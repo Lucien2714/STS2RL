@@ -1,0 +1,118 @@
+[
+  {
+    "id": "DEFECT",
+    "name": "The Defect",
+    "starting_hp": 75,
+    "starting_gold": 99,
+    "max_energy": 3,
+    "orb_slots": 3,
+    "starting_deck": [
+      "STRIKE_DEFECT",
+      "STRIKE_DEFECT",
+      "STRIKE_DEFECT",
+      "STRIKE_DEFECT",
+      "DEFEND_DEFECT",
+      "DEFEND_DEFECT",
+      "DEFEND_DEFECT",
+      "DEFEND_DEFECT",
+      "ZAP",
+      "DUALCAST"
+    ],
+    "starting_relics": [
+      "CRACKED_CORE"
+    ]
+  },
+  {
+    "id": "SILENT",
+    "name": "The Silent",
+    "starting_hp": 70,
+    "starting_gold": 99,
+    "max_energy": 3,
+    "orb_slots": null,
+    "starting_deck": [
+      "STRIKE_SILENT",
+      "STRIKE_SILENT",
+      "STRIKE_SILENT",
+      "STRIKE_SILENT",
+      "STRIKE_SILENT",
+      "DEFEND_SILENT",
+      "DEFEND_SILENT",
+      "DEFEND_SILENT",
+      "DEFEND_SILENT",
+      "NEUTRALIZE",
+      "SURVIVOR"
+    ],
+    "starting_relics": [
+      "RING_OF_THE_SNAKE"
+    ]
+  },
+  {
+    "id": "NECROBINDER",
+    "name": "The Necrobinder",
+    "starting_hp": 66,
+    "starting_gold": 99,
+    "max_energy": 3,
+    "orb_slots": null,
+    "starting_deck": [
+      "STRIKE_NECROBINDER",
+      "STRIKE_NECROBINDER",
+      "STRIKE_NECROBINDER",
+      "STRIKE_NECROBINDER",
+      "DEFEND_NECROBINDER",
+      "DEFEND_NECROBINDER",
+      "DEFEND_NECROBINDER",
+      "DEFEND_NECROBINDER",
+      "BODYGUARD",
+      "UNLEASH"
+    ],
+    "starting_relics": [
+      "BOUND_PHYLACTERY"
+    ]
+  },
+  {
+    "id": "IRONCLAD",
+    "name": "The Ironclad",
+    "starting_hp": 80,
+    "starting_gold": 99,
+    "max_energy": 3,
+    "orb_slots": null,
+    "starting_deck": [
+      "STRIKE_IRONCLAD",
+      "STRIKE_IRONCLAD",
+      "STRIKE_IRONCLAD",
+      "STRIKE_IRONCLAD",
+      "STRIKE_IRONCLAD",
+      "DEFEND_IRONCLAD",
+      "DEFEND_IRONCLAD",
+      "DEFEND_IRONCLAD",
+      "DEFEND_IRONCLAD",
+      "BASH"
+    ],
+    "starting_relics": [
+      "BURNING_BLOOD"
+    ]
+  },
+  {
+    "id": "REGENT",
+    "name": "The Regent",
+    "starting_hp": 75,
+    "starting_gold": 99,
+    "max_energy": 3,
+    "orb_slots": null,
+    "starting_deck": [
+      "STRIKE_REGENT",
+      "STRIKE_REGENT",
+      "STRIKE_REGENT",
+      "STRIKE_REGENT",
+      "DEFEND_REGENT",
+      "DEFEND_REGENT",
+      "DEFEND_REGENT",
+      "DEFEND_REGENT",
+      "FALLING_STAR",
+      "VENERATE"
+    ],
+    "starting_relics": [
+      "DIVINE_RIGHT"
+    ]
+  }
+]

@@ -1,0 +1,17 @@
+{
+  "acts.json": 5,
+  "ascensions.json": 11,
+  "cards.json": 576,
+  "characters.json": 5,
+  "enchantments.json": 22,
+  "encounters.json": 87,
+  "events.json": 66,
+  "intents.json": 14,
+  "keywords.json": 8,
+  "modifiers.json": 16,
+  "monsters.json": 115,
+  "orbs.json": 5,
+  "potions.json": 63,
+  "powers.json": 259,
+  "relics.json": 293
+}
