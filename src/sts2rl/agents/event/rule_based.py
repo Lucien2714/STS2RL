@@ -4,6 +4,14 @@ import logging
 import re
 
 from sts2rl.agents.base import EventAgent
+from sts2rl.agents.selection import (
+    can_confirm_selection,
+    can_select_more,
+    exact_required_count,
+    needs_more_selections,
+    remaining_to_min,
+    selection_selected_count,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -76,35 +84,58 @@ class EventPolicy(EventAgent):
         screen_type = card_select.get("screen_type")
         prompt = card_select.get("prompt", "")
         cards = card_select.get("cards", [])
-        number_of_cards = self._required_card_count_from_prompt(prompt)
         selected_indices = self._card_select_selected_indices(card_select, cards)
-        selected_count = len(selected_indices)
+        selected_count = selection_selected_count(
+            state,
+            "card_select",
+            len(selected_indices),
+        )
+        fallback_required_count = self._required_card_count_from_prompt(prompt)
+        required_count = exact_required_count(state, "card_select")
+        if required_count is None:
+            required_count = fallback_required_count
 
         logger.debug(
-            "EventPolicy: choosing card_select action screen_type=%s cards=%d selected=%d required=%s can_confirm=%s can_cancel=%s preview_showing=%s prompt=%s",
+            "EventPolicy: choosing card_select action screen_type=%s cards=%d selected=%d required=%s remaining_to_min=%s can_confirm=%s can_cancel=%s preview_showing=%s prompt=%s",
             screen_type,
             len(cards),
             selected_count,
-            number_of_cards,
+            required_count,
+            remaining_to_min(state, "card_select"),
             card_select.get("can_confirm"),
             card_select.get("can_cancel"),
             card_select.get("preview_showing"),
             prompt,
         )
 
-        if card_select.get("can_confirm") and (
-            number_of_cards is None
-            or selected_count >= number_of_cards
-            or card_select.get("preview_showing")
+        if card_select.get("preview_showing") and card_select.get("can_confirm"):
+            action = {"type": "confirm_selection"}
+            self._reset_card_select_memory()
+            logger.debug("EventPolicy: selected action=%s", action)
+            return action
+
+        if can_confirm_selection(
+            state,
+            "card_select",
+            selected_count,
+            fallback_required_count,
         ):
             action = {"type": "confirm_selection"}
             self._reset_card_select_memory()
             logger.debug("EventPolicy: selected action=%s", action)
             return action
 
-        if cards and (
-            number_of_cards is None
-            or selected_count < number_of_cards
+        should_select = needs_more_selections(
+            state,
+            "card_select",
+            selected_count,
+            fallback_required_count,
+        ) or not card_select.get("can_confirm", False)
+        if cards and should_select and can_select_more(
+            state,
+            "card_select",
+            selected_count,
+            fallback_required_count,
         ):
             card = self._choose_card(cards, screen_type, selected_indices)
             card_index = self._card_index(card)
@@ -165,7 +196,10 @@ class EventPolicy(EventAgent):
 
     def _required_card_count_from_prompt(self, prompt: str) -> int | None:
         """Infer a required selection count from STS2MCP prompt text."""
-        match = re.search(r"\bChoose\s+(?:up to\s+)?(\d+)\s+cards?\b", prompt, re.IGNORECASE)
+        if re.search(r"\bChoose\s+up to\s+\d+\s+cards?\b", prompt, re.IGNORECASE):
+            return None
+
+        match = re.search(r"\bChoose\s+(\d+)\s+cards?\b", prompt, re.IGNORECASE)
         if match is None:
             if re.search(r"\bChoose\s+a\s+card\b", prompt, re.IGNORECASE):
                 return 1

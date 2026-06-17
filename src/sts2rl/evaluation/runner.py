@@ -9,6 +9,7 @@ from typing import Callable
 from sts2rl.agents.orchestrator import Agent, BATTLE_SCREEN_TYPES
 from sts2rl.flow.battle_flow import (
     advance_forced_end_turn_states,
+    advance_forced_hand_select_states,
     fold_reward_details,
     forced_end_turn_q_values,
     is_forced_end_turn_state,
@@ -64,48 +65,7 @@ def current_q_values(agent: Agent, raw_state: dict, selected_action: dict | None
             "actions": [],
         }
 
-    action_mask = battle_agent.valid_action_mask(raw_state)
-    state_vector = battle_agent.encode_state(raw_state, action_mask)
-    with torch.no_grad():
-        state_tensor = torch.tensor(
-            state_vector,
-            dtype=torch.float32,
-            device=battle_agent.device,
-        ).unsqueeze(0)
-        q_tensor = battle_agent.model(state_tensor).squeeze(0).detach().cpu()
-
-    selected_action_id = None
-    if selected_action is not None:
-        try:
-            selected_action_id = battle_agent.get_game_action_id(selected_action, raw_state)
-        except (KeyError, ValueError):
-            selected_action_id = None
-
-    actions = []
-    best_valid = None
-    for action_id, q_value in enumerate(q_tensor.tolist()):
-        valid = bool(action_mask[action_id])
-        q_value = safe_float(q_value)
-        masked_q = q_value if valid else None
-        action = {
-            "id": action_id,
-            "key": battle_agent.get_action_key(action_id),
-            "q": q_value,
-            "masked_q": masked_q,
-            "valid": valid,
-            "selected": action_id == selected_action_id,
-        }
-        actions.append(action)
-        if valid and q_value is not None and (best_valid is None or q_value > best_valid["q"]):
-            best_valid = action
-
-    return {
-        "available": True,
-        "screen_type": state_type,
-        "selected_action_id": selected_action_id,
-        "best_valid_action": best_valid,
-        "actions": actions,
-    }
+    return battle_agent.current_q_values(raw_state, selected_action)
 
 
 def safe_float(value: float) -> float | None:
@@ -155,6 +115,34 @@ def evaluate_episode(
         if dashboard is not None:
             dashboard.wait_if_paused()
 
+        if raw_state.get("state_type") == "hand_select":
+            (
+                raw_state,
+                auto_reward,
+                auto_done,
+                auto_steps,
+            ) = advance_forced_hand_select_states(
+                game,
+                agent,
+                reward_model,
+                raw_state,
+            )
+            if auto_steps:
+                reward_details = fold_reward_details({}, auto_reward, auto_steps)
+                episode_reward += auto_reward
+                folded_step_count = len(auto_steps)
+                steps += folded_step_count
+                if reward_details.get("type") == "battle":
+                    battle_reward += reward_details.get("total", auto_reward)
+                    battle_steps += folded_step_count
+                    if reward_details.get("result") == "won":
+                        battle_wins += 1
+                    if reward_details.get("result") == "lost":
+                        battle_losses += 1
+                if auto_done:
+                    break
+                continue
+
         refresh_player_detail_for_map(game, player, raw_state)
 
         forced_end_turn = is_forced_end_turn_state(agent, raw_state)
@@ -177,19 +165,27 @@ def evaluate_episode(
             reward, reward_details = reward_model.compute(raw_state, next_raw_state, action)
         auto_steps = []
         if next_raw_state is not None and not done:
-            (
-                next_raw_state,
-                auto_reward,
-                auto_done,
-                auto_steps,
-            ) = advance_forced_end_turn_states(
-                game,
-                agent,
-                reward_model,
-                next_raw_state,
-            )
-            reward += auto_reward
-            done = done or auto_done
+            for advance_forced_states in (
+                advance_forced_hand_select_states,
+                advance_forced_end_turn_states,
+                advance_forced_hand_select_states,
+            ):
+                if done:
+                    break
+                (
+                    next_raw_state,
+                    auto_reward,
+                    auto_done,
+                    new_auto_steps,
+                ) = advance_forced_states(
+                    game,
+                    agent,
+                    reward_model,
+                    next_raw_state,
+                )
+                auto_steps.extend(new_auto_steps)
+                reward += auto_reward
+                done = done or auto_done
         reward_details = fold_reward_details(
             reward_details,
             reward,

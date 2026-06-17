@@ -72,49 +72,7 @@ def current_q_values(agent, raw_state: dict, selected_action: dict | None = None
             "actions": [],
         }
 
-    action_mask = battle_agent.valid_action_mask(raw_state)
-    state_vector = battle_agent.encode_state(raw_state, action_mask)
-    with torch.no_grad():
-        state_tensor = torch.tensor(
-            state_vector,
-            dtype=torch.float32,
-            device=battle_agent.device,
-        ).unsqueeze(0)
-        q_tensor = battle_agent.model(state_tensor).squeeze(0).detach().cpu()
-
-    selected_action_id = None
-    if selected_action is not None:
-        try:
-            selected_action_id = battle_agent.get_game_action_id(selected_action, raw_state)
-        except (KeyError, ValueError):
-            selected_action_id = None
-
-    actions = []
-    best_valid = None
-    for action_id, q_value in enumerate(q_tensor.tolist()):
-        valid = bool(action_mask[action_id])
-        q_value = safe_float(q_value)
-        masked_q = q_value if valid else None
-        action = {
-            "id": action_id,
-            "key": battle_agent.get_action_key(action_id),
-            "q": q_value,
-            "masked_q": masked_q,
-            "valid": valid,
-            "selected": action_id == selected_action_id,
-        }
-        actions.append(action)
-        if valid and q_value is not None and (best_valid is None or q_value > best_valid["q"]):
-            best_valid = action
-
-    return {
-        "available": True,
-        "screen_type": state_type,
-        "selected_action_id": selected_action_id,
-        "selected_q": selected_action_q({"actions": actions}),
-        "best_valid_action": best_valid,
-        "actions": actions,
-    }
+    return battle_agent.current_q_values(raw_state, selected_action)
 
 
 def selected_action_q(q_values: dict) -> float | None:
