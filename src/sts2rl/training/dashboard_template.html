@@ -376,7 +376,7 @@
       }
       return `
         <section>
-          <h2>Actions</h2>
+          <h2>Action Candidates</h2>
           <div class="counts">
             ${entries.map(([key, value]) => `<div class="count"><span>${escapeHtml(key)}</span><strong>${escapeHtml(value)}</strong></div>`).join("")}
           </div>
@@ -419,14 +419,12 @@
         `;
       }
       const best = qValues.best_valid_action;
-      const bestText = best ? `${best.id}: ${best.key} (${fixed(best.q, 4)})` : "none";
+      const bestText = best ? `${best.key} (${fixed(best.q, 4)})` : "none";
       const validActions = (qValues.actions || []).filter(action => action.valid);
       const rows = validActions.map(action => `
         <tr class="${action.selected ? "selected" : ""}">
-          <td>${escapeHtml(action.id)}</td>
           <td>${escapeHtml(action.key)}</td>
           <td>${action.q === null ? "n/a" : fixed(action.q, 6)}</td>
-          <td>${action.masked_q === null ? "n/a" : fixed(action.masked_q, 6)}</td>
           <td>${escapeHtml(action.selected ? "yes" : "")}</td>
         </tr>
       `).join("");
@@ -437,10 +435,8 @@
           <table>
             <thead>
               <tr>
-                <th>ID</th>
-                <th>Action</th>
-                <th>Raw Q</th>
-                <th>Masked Q</th>
+                <th>Candidate</th>
+                <th>Q</th>
                 <th>Selected</th>
               </tr>
             </thead>

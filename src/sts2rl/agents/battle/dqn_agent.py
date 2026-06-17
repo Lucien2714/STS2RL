@@ -1,4 +1,4 @@
-"""Trainable DQN battle agent and battle-state vector encoder."""
+"""Trainable candidate-action DQN battle agent and battle-state encoder."""
 
 from __future__ import annotations
 
@@ -8,9 +8,16 @@ import random
 import re
 
 from sts2rl.agents.base import BattleAgent as BattleAgentBase
+from sts2rl.agents.selection import (
+  can_confirm_selection,
+  can_select_more,
+  selection_selected_count,
+)
+from sts2rl.data.card import Card, CardIdentity, CardManager, normalize_enchantment_id
 from sts2rl.data.loader import (
   get_card_index,
   get_card_map_size,
+  get_data_index_or_default,
   get_data_map_size,
   get_intent_index,
   get_monster_index,
@@ -19,13 +26,8 @@ from sts2rl.data.loader import (
   get_relic_index,
 )
 
-
-try:
-  import torch
-  from torch import nn
-except ImportError:
-  torch = None
-  nn = None
+import torch
+from torch import nn
 
 
 logger = logging.getLogger(__name__)
@@ -38,35 +40,32 @@ BATTLE_MAX_POWERS = 259
 BATTLE_CARD_FEATURES = 10
 BATTLE_ENEMY_FEATURES = 11
 BATTLE_PLAYER_FEATURES = 10
+BATTLE_ACTION_TYPE_FEATURES = 5
+BATTLE_ACTION_IDENTITY_FEATURES = 3
+BATTLE_ACTION_TARGET_FEATURES = 3 + BATTLE_ENEMY_FEATURES
+BATTLE_ACTION_SCHEMA = "candidate_action_v1"
 
 
-if nn is not None:
-  class BattleQNetwork(nn.Module):
-    """Small fully connected Q-network for masked battle actions."""
+class BattleQNetwork(nn.Module):
+  """Small fully connected Q-network for state/action candidate scoring."""
 
-    def __init__(self, state_size: int, action_size: int, hidden_size: int = 256):
-      super().__init__()
-      self.net = nn.Sequential(
-        nn.Linear(state_size, hidden_size),
-        nn.ReLU(),
-        nn.Linear(hidden_size, hidden_size),
-        nn.ReLU(),
-        nn.Linear(hidden_size, action_size),
-      )
-    def forward(self, state):
-      """Return Q-values for every battle action."""
-      return self.net(state)
-else:
-  class BattleQNetwork:
-    """Placeholder that reports the missing torch dependency."""
+  def __init__(self, input_size: int, hidden_size: int = 256):
+    super().__init__()
+    self.net = nn.Sequential(
+      nn.Linear(input_size, hidden_size),
+      nn.ReLU(),
+      nn.Linear(hidden_size, hidden_size),
+      nn.ReLU(),
+      nn.Linear(hidden_size, 1),
+    )
 
-    def __init__(self, *args, **kwargs):
-      raise ModuleNotFoundError("torch is required for the DQN network")
-
+  def forward(self, state_action):
+    """Return one Q-value for each encoded state/action pair."""
+    return self.net(state_action).squeeze(-1)
 
 
 class BattleDQNAgent(BattleAgentBase):
-  """Battle agent that combines epsilon-greedy DQN policy and replay training."""
+  """Battle agent that scores legal action candidates with a DQN."""
 
   MAX_HAND = BATTLE_MAX_HAND
   MAX_POTIONS = BATTLE_MAX_POTIONS
@@ -75,23 +74,14 @@ class BattleDQNAgent(BattleAgentBase):
   CARD_FEATURES = BATTLE_CARD_FEATURES
   ENEMY_FEATURES = BATTLE_ENEMY_FEATURES
   PLAYER_FEATURES = BATTLE_PLAYER_FEATURES
+  ACTION_SCHEMA = BATTLE_ACTION_SCHEMA
 
-  ACTION_SET = (
-    ["end_turn"]
-    + [
-      f"play_card_{card_index}_target_{enemy_index}"
-      for card_index in range(BATTLE_MAX_HAND)
-      for enemy_index in range(BATTLE_MAX_ENEMIES)
-    ]
-    + [f"play_card_{card_index}_self" for card_index in range(BATTLE_MAX_HAND)]
-    + [
-      f"use_potion_{slot}_target_{enemy_index}"
-      for slot in range(BATTLE_MAX_POTIONS)
-      for enemy_index in range(BATTLE_MAX_ENEMIES)
-    ]
-    + [f"use_potion_{slot}_self" for slot in range(BATTLE_MAX_POTIONS)]
-    + [f"combat_select_card_{card_index}" for card_index in range(BATTLE_MAX_HAND)]
-    + ["combat_confirm_selection"]
+  ACTION_TYPES = (
+    "end_turn",
+    "play_card",
+    "use_potion",
+    "combat_select_card",
+    "combat_confirm_selection",
   )
 
   def __init__(
@@ -108,23 +98,21 @@ class BattleDQNAgent(BattleAgentBase):
     hidden_size=256,
     device=None,
   ):
-    self.action_set = list(self.ACTION_SET)
-    self.act2id = {action: i for i, action in enumerate(self.action_set)}
-    self.id2act = {i: action for i, action in enumerate(self.action_set)}
-    self.id2game_action = {
-      action_id: self._action_key_to_game_action(action)
-      for action_id, action in self.id2act.items()
-    }
-    self.action_size = len(self.action_set)
-
     self.card_vector_size = get_card_map_size() * 2
+    self.enchantment_vector_size = get_data_map_size("enchantments")
     self.intent_vector_size = get_data_map_size("intents")
     self.potion_vector_size = get_data_map_size("potions")
     self.relic_vector_size = get_data_map_size("relics")
     self.potion_slot_size = 1 + self.potion_vector_size + 2
+    self.action_feature_size = (
+      BATTLE_ACTION_TYPE_FEATURES
+      + self.CARD_FEATURES
+      + BATTLE_ACTION_IDENTITY_FEATURES
+      + self.potion_slot_size
+      + BATTLE_ACTION_TARGET_FEATURES
+    )
     self.state_size = (
       1
-      + self.action_size
       + self.PLAYER_FEATURES
       + self.MAX_HAND * self.CARD_FEATURES
       + self.card_vector_size * 3
@@ -133,6 +121,7 @@ class BattleDQNAgent(BattleAgentBase):
       + self.MAX_POWERS
       + self.relic_vector_size
     )
+    self.model_input_size = self.state_size + self.action_feature_size
 
     self.update_freq = update_freq
     self.update_freq_target = update_freq_target
@@ -147,32 +136,23 @@ class BattleDQNAgent(BattleAgentBase):
     self.last_action_selection = {}
 
     self.device = self._resolve_device(device)
-    self.model = None
-    self.target_model = None
-    self.optimizer = None
-    self.loss_fn = None
-
-    if torch is not None:
-      self.model = BattleQNetwork(self.state_size, self.action_size, hidden_size).to(self.device)
-      self.target_model = BattleQNetwork(self.state_size, self.action_size, hidden_size).to(self.device)
-      self.target_model.load_state_dict(self.model.state_dict())
-      self.target_model.eval()
-      self.optimizer = torch.optim.Adam(self.model.parameters(), lr=learning_rate)
-      self.loss_fn = nn.SmoothL1Loss()
+    self.model = BattleQNetwork(self.model_input_size, hidden_size).to(self.device)
+    self.target_model = BattleQNetwork(self.model_input_size, hidden_size).to(self.device)
+    self.target_model.load_state_dict(self.model.state_dict())
+    self.target_model.eval()
+    self.optimizer = torch.optim.Adam(self.model.parameters(), lr=learning_rate)
+    self.loss_fn = nn.SmoothL1Loss()
 
   def choose_action(self, raw_state: dict, training: bool = True) -> dict:
-    """Choose a legal battle action using exploration or masked Q-values."""
-    action_mask = self.valid_action_mask(raw_state)
-    valid_action_ids = [index for index, is_valid in enumerate(action_mask) if is_valid]
-
-    if len(valid_action_ids) == 0:
+    """Choose a legal battle action using exploration or candidate Q-values."""
+    candidates = self.valid_action_candidates(raw_state)
+    if not candidates:
       action = self._fallback_action(raw_state)
       self.last_action_selection = {
         "method": "fallback",
-        "reason": "no_valid_actions",
+        "reason": "no_valid_candidates",
         "training": training,
         "epsilon": self.epsilon,
-        "action_id": None,
         "action_key": None,
         "q": None,
         "valid_action_count": 0,
@@ -180,91 +160,89 @@ class BattleDQNAgent(BattleAgentBase):
       return action
 
     if training and random.random() < self.epsilon:
-      action_id = random.choice(valid_action_ids)
+      candidate = random.choice(candidates)
       self.last_action_selection = {
         "method": "epsilon_random",
         "reason": "epsilon_exploration",
         "training": training,
         "epsilon": self.epsilon,
-        "action_id": action_id,
-        "action_key": self.get_action_key(action_id),
+        "action_key": candidate["action_key"],
         "q": None,
-        "valid_action_count": len(valid_action_ids),
+        "valid_action_count": len(candidates),
       }
-      return self.get_game_action(action_id, raw_state)
+      return self._public_action(candidate)
 
-    if self.model is None:
-      raise ModuleNotFoundError("torch is required for DQN action selection")
-
-    state_vector = self.encode_state(raw_state, action_mask)
-    with torch.no_grad():
-      state_tensor = torch.tensor(state_vector, dtype=torch.float32, device=self.device).unsqueeze(0)
-      q_values = self.model(state_tensor).squeeze(0)
-      invalid_mask = torch.tensor(
-        [not is_valid for is_valid in action_mask],
-        dtype=torch.bool,
-        device=self.device,
-      )
-      q_values = q_values.masked_fill(invalid_mask, float("-inf"))
-      action_id = int(torch.argmax(q_values).item())
-
+    q_values = self._score_candidates(raw_state, candidates, self.model)
+    best_index = max(range(len(candidates)), key=lambda index: q_values[index])
+    candidate = candidates[best_index]
     self.last_action_selection = {
       "method": "greedy_q",
-      "reason": "model_argmax",
+      "reason": "candidate_argmax",
       "training": training,
       "epsilon": self.epsilon,
-      "action_id": action_id,
-      "action_key": self.get_action_key(action_id),
-      "q": float(q_values[action_id].item()),
-      "valid_action_count": len(valid_action_ids),
+      "action_key": candidate["action_key"],
+      "q": q_values[best_index],
+      "valid_action_count": len(candidates),
     }
-    return self.get_game_action(action_id, raw_state)
+    return self._public_action(candidate)
 
   def remember(
     self,
     state,
-    action_id: int,
+    action_vector,
     reward: float,
     next_state,
     done: bool,
-    next_action_mask,
+    next_action_vectors,
   ) -> None:
     """Store one transition in replay memory."""
     self.replay_buffer.append((
       list(state),
-      int(action_id),
+      list(action_vector),
       float(reward),
       list(next_state),
       bool(done),
-      list(next_action_mask),
+      [list(vector) for vector in next_action_vectors],
     ))
     self.trained_steps += 1
 
   def train_step(self) -> float | None:
     """Run one replay update when enough samples are available."""
-    if self.model is None:
-      raise ModuleNotFoundError("torch is required for DQN training")
-
     if len(self.replay_buffer) < self.batch_size:
       return None
 
     batch = random.sample(self.replay_buffer, self.batch_size)
-    states, actions, rewards, next_states, dones, next_masks = zip(*batch)
+    states, actions, rewards, next_states, dones, next_actions = zip(*batch)
 
-    states_tensor = torch.tensor(states, dtype=torch.float32, device=self.device)
-    actions_tensor = torch.tensor(actions, dtype=torch.long, device=self.device).unsqueeze(1)
+    state_action_inputs = [
+      list(state) + list(action)
+      for state, action in zip(states, actions)
+    ]
+    current_inputs = torch.tensor(
+      state_action_inputs,
+      dtype=torch.float32,
+      device=self.device,
+    )
     rewards_tensor = torch.tensor(rewards, dtype=torch.float32, device=self.device)
-    next_states_tensor = torch.tensor(next_states, dtype=torch.float32, device=self.device)
     dones_tensor = torch.tensor(dones, dtype=torch.bool, device=self.device)
-    next_masks_tensor = torch.tensor(next_masks, dtype=torch.bool, device=self.device)
 
-    current_q = self.model(states_tensor).gather(1, actions_tensor).squeeze(1)
+    current_q = self.model(current_inputs)
 
+    max_next_q_values = []
     with torch.no_grad():
-      next_q = self.target_model(next_states_tensor)
-      next_q = next_q.masked_fill(~next_masks_tensor, float("-inf"))
-      max_next_q = next_q.max(dim=1).values
-      max_next_q = torch.where(torch.isfinite(max_next_q), max_next_q, torch.zeros_like(max_next_q))
+      for next_state, done, candidate_vectors in zip(next_states, dones, next_actions):
+        if done or not candidate_vectors:
+          max_next_q_values.append(0.0)
+          continue
+        next_inputs = [
+          list(next_state) + list(candidate_vector)
+          for candidate_vector in candidate_vectors
+        ]
+        next_tensor = torch.tensor(next_inputs, dtype=torch.float32, device=self.device)
+        next_q = self.target_model(next_tensor)
+        max_next_q_values.append(float(next_q.max().item()))
+
+      max_next_q = torch.tensor(max_next_q_values, dtype=torch.float32, device=self.device)
       target_q = rewards_tensor + self.gamma * max_next_q * (~dones_tensor).float()
 
     loss = self.loss_fn(current_q, target_q)
@@ -286,12 +264,8 @@ class BattleDQNAgent(BattleAgentBase):
     battle = raw_state.get("battle", {})
     player = raw_state.get("player", {})
 
-    if action_mask is None:
-      action_mask = self.valid_action_mask(raw_state)
-
     features = []
     features.append(self._scale(raw_state.get("round", battle.get("round", 0)), 100))
-    features.extend([1.0 if is_valid else 0.0 for is_valid in action_mask])
     features.extend(self._encode_player(player))
 
     hand = player.get("hand", raw_state.get("hand", []))
@@ -318,164 +292,290 @@ class BattleDQNAgent(BattleAgentBase):
 
     return [float(value) for value in features]
 
-  def valid_action_mask(self, raw_state: dict) -> list[bool]:
-    """Return a Boolean mask for legal actions in the current battle state."""
-    mask = [False for _ in range(self.action_size)]
+  def encode_action(self, raw_state: dict, action: dict) -> list[float]:
+    """Encode a single action candidate or dispatched game action."""
+    player = raw_state.get("player", {})
+    action_type = action.get("type")
+    features = [1.0 if action_type == name else 0.0 for name in self.ACTION_TYPES]
+
+    card = self._action_item(action, raw_state) if action_type in {
+      "play_card",
+      "combat_select_card",
+    } else None
+    if card is None:
+      features.extend([0.0] * self.CARD_FEATURES)
+      features.extend([0.0] * BATTLE_ACTION_IDENTITY_FEATURES)
+    else:
+      card_index = self._parse_int(action.get("card_index", card.get("index", 0)))
+      features.extend(self._encode_hand_card(card, card_index, player))
+      features.extend(self._encode_card_identity(Card.from_raw(card).identity))
+
+    if action_type == "use_potion":
+      potion = self._action_item(action, raw_state)
+      slot = self._parse_int(action.get("slot", 0))
+      features.extend(self._encode_potion(potion, slot))
+    else:
+      features.extend([0.0] * self.potion_slot_size)
+
+    features.extend(self._encode_action_target(raw_state, action))
+    return [float(value) for value in features]
+
+  def valid_action_candidates(self, raw_state: dict) -> list[dict]:
+    """Return legal action candidates for the current battle state."""
     state_type = raw_state.get("state_type")
-
     if state_type == "hand_select":
-      hand_select = raw_state.get("hand_select", {})
-      cards = hand_select.get("cards", [])
-      selected_indices = {
-        self._parse_int(card.get("index", -1), -1)
-        for card in hand_select.get("selected_cards", [])
-      }
-
-      for card in cards[: self.MAX_HAND]:
-        card_index = self._parse_int(card.get("index", len(cards)))
-        if card_index in selected_indices:
-          continue
-        if 0 <= card_index < self.MAX_HAND:
-          mask[self.act2id[f"combat_select_card_{card_index}"]] = True
-
-      if hand_select.get("can_confirm", False):
-        mask[self.act2id["combat_confirm_selection"]] = True
-
-      return mask
+      return self._hand_select_candidates(raw_state)
 
     if state_type not in {"monster", "elite", "boss"}:
-      mask[self.act2id["end_turn"]] = True
-      return mask
+      return []
+
+    if not self._is_player_play_phase(raw_state):
+      return []
 
     battle = raw_state.get("battle", {})
     player = raw_state.get("player", {})
-    hand = player.get("hand", raw_state.get("hand", []))
     enemies = battle.get("enemies", raw_state.get("enemies", []))
     potions = player.get("potions", [])
     energy = self._parse_int(player.get("energy", raw_state.get("energy", 0)))
-    mask[self.act2id["end_turn"]] = True
 
-    for card_index, card in enumerate(hand[: self.MAX_HAND]):
-      if not self._is_playable_card(card, energy):
+    candidates = [self._candidate({"type": "end_turn"}, "end_turn")]
+    candidates.extend(self._play_card_candidates(raw_state, energy, enemies))
+    candidates.extend(self._potion_candidates(potions, enemies))
+    return candidates
+
+  def valid_action_mask(self, raw_state: dict) -> list[bool]:
+    """Return a dynamic all-true mask for compatibility with older callers."""
+    return [True for _ in self.valid_action_candidates(raw_state)]
+
+  def current_q_values(self, raw_state: dict, selected_action: dict | None = None) -> dict:
+    """Return candidate Q-values for dashboards and evaluation telemetry."""
+    candidates = self.valid_action_candidates(raw_state)
+    if not candidates:
+      return {
+        "available": False,
+        "reason": "No legal DQN battle actions are available",
+        "screen_type": raw_state.get("state_type"),
+        "actions": [],
+      }
+
+    selected_key = None
+    if selected_action is not None:
+      try:
+        selected_key = self.action_key(selected_action, raw_state)
+      except (KeyError, ValueError):
+        selected_key = None
+
+    q_values = self._score_candidates(raw_state, candidates, self.model)
+    actions = []
+    best_valid = None
+    for candidate, q_value in zip(candidates, q_values):
+      action = {
+        "id": candidate["action_key"],
+        "key": candidate["action_key"],
+        "q": self._safe_float(q_value),
+        "masked_q": self._safe_float(q_value),
+        "valid": True,
+        "selected": candidate["action_key"] == selected_key,
+      }
+      actions.append(action)
+      if action["q"] is not None and (best_valid is None or action["q"] > best_valid["q"]):
+        best_valid = action
+
+    return {
+      "available": True,
+      "screen_type": raw_state.get("state_type"),
+      "selected_action_id": selected_key,
+      "selected_q": next((action["q"] for action in actions if action["selected"]), None),
+      "best_valid_action": best_valid,
+      "actions": actions,
+    }
+
+  def action_key(self, action: dict, raw_state: dict | None = None) -> str:
+    """Return a stable key for an action within the current state."""
+    if action.get("action_key"):
+      return str(action["action_key"])
+
+    action_type = action.get("type")
+    if action_type == "end_turn":
+      return "end_turn"
+
+    if action_type == "play_card":
+      identity_key = action.get("card_identity")
+      if identity_key is None and raw_state is not None:
+        item = self._action_item(action, raw_state)
+        if item is not None:
+          identity_key = Card.from_raw(item).identity_key
+      identity_key = identity_key or "UNKNOWN_CARD"
+      target_index = self._action_target_index(action, raw_state)
+      if target_index is not None:
+        return f"play_card:{identity_key}:target:{target_index}"
+      return f"play_card:{identity_key}:self"
+
+    if action_type == "use_potion":
+      target_index = self._action_target_index(action, raw_state)
+      if target_index is not None:
+        return f"use_potion:{action['slot']}:target:{target_index}"
+      return f"use_potion:{action['slot']}:self"
+
+    if action_type == "combat_select_card":
+      return f"combat_select_card:{action['card_index']}"
+
+    if action_type == "combat_confirm_selection":
+      return "combat_confirm_selection"
+
+    raise ValueError(f"Unknown game action: {action}")
+
+  def candidate_action_vectors(self, raw_state: dict) -> list[list[float]]:
+    """Encode every currently legal action candidate."""
+    return [
+      self.encode_action(raw_state, candidate["action"])
+      for candidate in self.valid_action_candidates(raw_state)
+    ]
+
+  def _score_candidates(self, raw_state: dict, candidates: list[dict], model) -> list[float]:
+    if not candidates:
+      return []
+    state_vector = self.encode_state(raw_state)
+    inputs = [
+      state_vector + self.encode_action(raw_state, candidate["action"])
+      for candidate in candidates
+    ]
+    with torch.no_grad():
+      input_tensor = torch.tensor(inputs, dtype=torch.float32, device=self.device)
+      q_tensor = model(input_tensor).detach().cpu()
+    return [float(value) for value in q_tensor.tolist()]
+
+  def _play_card_candidates(self, raw_state: dict, energy: int, enemies: list[dict]) -> list[dict]:
+    manager = CardManager.from_state_hand(raw_state)
+    candidates = []
+    for identity_key in manager.identity_keys():
+      cards = [
+        card for card in manager.matching_cards(identity_key)
+        if card.is_playable_with_energy(energy)
+      ]
+      if not cards:
         continue
-      if self._requires_enemy_target(card):
+      card = self._best_card(cards, energy)
+      if card.index is None:
+        continue
+      action = {
+        "type": "play_card",
+        "card_index": card.index,
+        "card_identity": card.identity_key,
+      }
+      if self._requires_enemy_target(card.raw):
         for enemy_index, enemy in enumerate(enemies[: self.MAX_ENEMIES]):
-          if self._parse_int(enemy.get("hp", 0)) > 0:
-            mask[self.act2id[f"play_card_{card_index}_target_{enemy_index}"]] = True
+          target = self._enemy_id_by_index(enemies, enemy_index)
+          if target is None:
+            continue
+          targeted_action = dict(action)
+          targeted_action["target_index"] = enemy_index
+          targeted_action["target"] = target
+          candidates.append(self._candidate(
+            targeted_action,
+            f"play_card:{card.identity_key}:target:{enemy_index}",
+          ))
       else:
-        mask[self.act2id[f"play_card_{card_index}_self"]] = True
+        candidates.append(self._candidate(action, f"play_card:{card.identity_key}:self"))
+    return candidates
 
+  def _potion_candidates(self, potions: list[dict], enemies: list[dict]) -> list[dict]:
+    candidates = []
     for slot, potion in enumerate(potions[: self.MAX_POTIONS]):
       if not potion or not potion.get("can_use_in_combat", True):
         continue
       potion_slot = self._potion_slot(potion, slot)
       if not 0 <= potion_slot < self.MAX_POTIONS:
         continue
+      action = {"type": "use_potion", "slot": potion_slot}
       if self._requires_enemy_target(potion):
         for enemy_index, enemy in enumerate(enemies[: self.MAX_ENEMIES]):
-          if self._parse_int(enemy.get("hp", 0)) > 0:
-            mask[self.act2id[f"use_potion_{potion_slot}_target_{enemy_index}"]] = True
+          target = self._enemy_id_by_index(enemies, enemy_index)
+          if target is None:
+            continue
+          targeted_action = dict(action)
+          targeted_action["target_index"] = enemy_index
+          targeted_action["target"] = target
+          candidates.append(self._candidate(
+            targeted_action,
+            f"use_potion:{potion_slot}:target:{enemy_index}",
+          ))
       else:
-        mask[self.act2id[f"use_potion_{potion_slot}_self"]] = True
+        candidates.append(self._candidate(action, f"use_potion:{potion_slot}:self"))
+    return candidates
 
-    return mask
+  def _hand_select_candidates(self, raw_state: dict) -> list[dict]:
+    hand_select = raw_state.get("hand_select", {})
+    cards = hand_select.get("cards", [])
+    selected_indices = {
+      self._parse_int(card.get("index", -1), -1)
+      for card in hand_select.get("selected_cards", [])
+    }
+    selected_count = selection_selected_count(
+      raw_state,
+      "hand_select",
+      len(selected_indices),
+    )
+    candidates = []
+    if can_select_more(raw_state, "hand_select", selected_count):
+      for card in cards[: self.MAX_HAND]:
+        card_index = self._parse_int(card.get("index", len(cards)))
+        if card_index in selected_indices:
+          continue
+        if 0 <= card_index < self.MAX_HAND:
+          action = {"type": "combat_select_card", "card_index": card_index}
+          candidates.append(self._candidate(action, f"combat_select_card:{card_index}"))
+    if can_confirm_selection(raw_state, "hand_select", selected_count):
+      candidates.append(self._candidate(
+        {"type": "combat_confirm_selection"},
+        "combat_confirm_selection",
+      ))
+    return candidates
 
-  def get_action_id(self, action_key: str) -> int:
-    """Return the numeric action id for an action key."""
-    return self.act2id[action_key]
+  def _candidate(self, action: dict, key: str) -> dict:
+    action = dict(action)
+    action["action_key"] = key
+    return {"action": action, "action_key": key}
 
-  def get_action_key(self, action_id: int) -> str:
-    """Return the action key for a numeric action id."""
-    return self.id2act[action_id]
+  def _public_action(self, candidate: dict) -> dict:
+    return dict(candidate["action"])
 
-  def get_game_action(self, action_id: int, raw_state: dict | None = None) -> dict:
-    """Convert an action id into the game-action dictionary sent to STS2MCP."""
-    action = dict(self.id2game_action[action_id])
+  def _best_card(self, cards: list[Card], energy: int) -> Card:
+    return sorted(
+      cards,
+      key=lambda card: (
+        card.cost_for_energy(energy),
+        -card.current_upgrade_level,
+        card.index if card.index is not None else 999,
+      ),
+    )[0]
 
-    if action["type"] in {"play_card", "use_potion"} and raw_state is not None:
-      item = self._action_item(action, raw_state)
-      if item is not None and self._requires_enemy_target(item):
-        enemies = raw_state.get("battle", {}).get("enemies", raw_state.get("enemies", []))
-        target = self._enemy_id_by_index(enemies, action.get("target_index"))
-        if target is not None:
-          action["target"] = target
+  def _encode_card_identity(self, identity: CardIdentity) -> list[float]:
+    enchantment_index = get_data_index_or_default(
+      "enchantments",
+      normalize_enchantment_id(identity.enchantment_id),
+      default=-1,
+    )
+    return [
+      self._scale(identity.upgrade_level, 10),
+      self._scale(enchantment_index + 1, max(1, self.enchantment_vector_size)),
+      1.0 if identity.enchantment_id else 0.0,
+    ]
 
-    return action
-
-  def get_game_action_id(self, action: dict, raw_state: dict | None = None) -> int:
-    """Convert a game-action dictionary back into its numeric action id."""
-    return self.act2id[self._game_action_to_action_key(action, raw_state)]
-
-  def _action_key_to_game_action(self, action_key: str) -> dict:
-    if action_key == "end_turn":
-      return {"type": "end_turn"}
-
-    play_card_target = re.fullmatch(r"play_card_(\d+)_target_(\d+)", action_key)
-    if play_card_target:
-      return {
-        "type": "play_card",
-        "card_index": int(play_card_target.group(1)),
-        "target_index": int(play_card_target.group(2)),
-      }
-
-    play_card_self = re.fullmatch(r"play_card_(\d+)_self", action_key)
-    if play_card_self:
-      return {
-        "type": "play_card",
-        "card_index": int(play_card_self.group(1)),
-      }
-
-    use_potion_target = re.fullmatch(r"use_potion_(\d+)_target_(\d+)", action_key)
-    if use_potion_target:
-      return {
-        "type": "use_potion",
-        "slot": int(use_potion_target.group(1)),
-        "target_index": int(use_potion_target.group(2)),
-      }
-
-    use_potion_self = re.fullmatch(r"use_potion_(\d+)_self", action_key)
-    if use_potion_self:
-      return {
-        "type": "use_potion",
-        "slot": int(use_potion_self.group(1)),
-      }
-
-    if action_key.startswith("combat_select_card_"):
-      return {
-        "type": "combat_select_card",
-        "card_index": int(action_key.removeprefix("combat_select_card_")),
-      }
-
-    if action_key == "combat_confirm_selection":
-      return {"type": "combat_confirm_selection"}
-
-    raise ValueError(f"Unknown action key: {action_key}")
-
-  def _game_action_to_action_key(self, action: dict, raw_state: dict | None = None) -> str:
-    action_type = action.get("type")
-
-    if action_type == "end_turn":
-      return "end_turn"
-
-    if action_type == "play_card":
-      target_index = self._action_target_index(action, raw_state)
-      if target_index is not None:
-        return f"play_card_{action['card_index']}_target_{target_index}"
-      return f"play_card_{action['card_index']}_self"
-
-    if action_type == "use_potion":
-      target_index = self._action_target_index(action, raw_state)
-      if target_index is not None:
-        return f"use_potion_{action['slot']}_target_{target_index}"
-      return f"use_potion_{action['slot']}_self"
-
-    if action_type == "combat_select_card":
-      return f"combat_select_card_{action['card_index']}"
-
-    if action_type == "combat_confirm_selection":
-      return "combat_confirm_selection"
-
-    raise ValueError(f"Unknown game action: {action}")
+  def _encode_action_target(self, raw_state: dict, action: dict) -> list[float]:
+    target_index = self._action_target_index(action, raw_state)
+    features = [
+      1.0 if target_index is None and action.get("type") in {"play_card", "use_potion"} else 0.0,
+      1.0 if target_index is not None else 0.0,
+      self._scale(target_index if target_index is not None else 0, self.MAX_ENEMIES),
+    ]
+    if target_index is None:
+      features.extend([0.0] * self.ENEMY_FEATURES)
+      return features
+    enemies = raw_state.get("battle", {}).get("enemies", raw_state.get("enemies", []))
+    enemy = enemies[target_index] if 0 <= target_index < len(enemies) else None
+    features.extend(self._encode_enemy(enemy))
+    return features
 
   def _encode_player(self, player: dict) -> list[float]:
     max_hp = max(1, self._parse_int(player.get("max_hp", 1)))
@@ -599,14 +699,22 @@ class BattleDQNAgent(BattleAgentBase):
 
   def _action_item(self, action: dict, raw_state: dict) -> dict | None:
     player = raw_state.get("player", {})
-    if action["type"] == "play_card":
+    if action.get("type") == "play_card":
       hand = player.get("hand", raw_state.get("hand", []))
-      card_index = action["card_index"]
-      return hand[card_index] if card_index < len(hand) else None
+      card_index = self._parse_int(action.get("card_index"), -1)
+      return hand[card_index] if 0 <= card_index < len(hand) else None
 
-    if action["type"] == "use_potion":
+    if action.get("type") == "combat_select_card":
+      hand_select = raw_state.get("hand_select", {})
+      card_index = self._parse_int(action.get("card_index"), -1)
+      for card in hand_select.get("cards", []):
+        if self._parse_int(card.get("index", -1), -1) == card_index:
+          return card
+      return None
+
+    if action.get("type") == "use_potion":
       potions = player.get("potions", [])
-      slot = action["slot"]
+      slot = self._parse_int(action.get("slot"), -1)
       for potion_index, potion in enumerate(potions):
         if self._potion_slot(potion, potion_index) == slot:
           return potion
@@ -628,13 +736,27 @@ class BattleDQNAgent(BattleAgentBase):
     return slots
 
   def _fallback_action(self, raw_state: dict) -> dict:
+    if raw_state.get("state_type") in {"monster", "elite", "boss"}:
+      if not self._is_player_play_phase(raw_state):
+        return {"type": "proceed"}
+      return {"type": "end_turn"}
+
     if raw_state.get("state_type") == "hand_select":
       hand_select = raw_state.get("hand_select", {})
-      if hand_select.get("can_confirm", False):
+      selected_indices = {
+        self._parse_int(card.get("index", -1), -1)
+        for card in hand_select.get("selected_cards", [])
+      }
+      selected_count = selection_selected_count(
+        raw_state,
+        "hand_select",
+        len(selected_indices),
+      )
+      if can_confirm_selection(raw_state, "hand_select", selected_count):
         return {"type": "combat_confirm_selection"}
 
       cards = hand_select.get("cards", [])
-      if cards:
+      if cards and can_select_more(raw_state, "hand_select", selected_count):
         return {
           "type": "combat_select_card",
           "card_index": self._parse_int(cards[0].get("index", 0)),
@@ -642,30 +764,28 @@ class BattleDQNAgent(BattleAgentBase):
 
     return {"type": "end_turn"}
 
+  def _is_player_play_phase(self, raw_state: dict) -> bool:
+    battle = raw_state.get("battle", {})
+    return battle.get("turn") == "player" and battle.get("is_play_phase") is True
+
   def _is_playable_card(self, card: dict, energy: int) -> bool:
-    can_play = card.get("can_play")
-    if can_play is not None:
-      if not can_play:
-        return False
-    elif str(card.get("type", "")).lower() in {"status", "curse"}:
-      return False
-
-    if card.get("unplayable_reason"):
-      return False
-
-    return self._parse_cost(card.get("cost", 0), energy) <= energy
+    return Card.from_raw(card).is_playable_with_energy(energy)
 
   def _requires_enemy_target(self, item: dict) -> bool:
     if item.get("requires_target", False):
       return True
-    target_type = str(item.get("target_type", item.get("target", ""))).lower()
-    return target_type in {"anyenemy", "enemy"}
+    target_type = self._normalize_target_type(item.get("target_type", item.get("target", "")))
+    return (
+      self._target_type_has_enemy(target_type)
+      and "random" not in target_type
+      and "all" not in target_type
+    )
 
-  def _first_alive_enemy_id(self, enemies: list[dict]) -> str | None:
-    for enemy in enemies:
-      if self._parse_int(enemy.get("hp", 0)) > 0:
-        return enemy.get("entity_id") or enemy.get("id")
-    return None
+  def _normalize_target_type(self, value: object) -> str:
+    return re.sub(r"[^a-z0-9]+", "", str(value).lower())
+
+  def _target_type_has_enemy(self, target_type: str) -> bool:
+    return "enemy" in target_type or "enemies" in target_type
 
   def _enemy_id_by_index(self, enemies: list[dict], enemy_index: object) -> str | None:
     enemy_index = self._parse_int(enemy_index, -1)
@@ -780,7 +900,8 @@ class BattleDQNAgent(BattleAgentBase):
     return values.get(card_type, 0.0)
 
   def _target_type_value(self, target_type: str) -> float:
-    if "enemy" in target_type:
+    target_type = self._normalize_target_type(target_type)
+    if self._target_type_has_enemy(target_type):
       return 0.33
     if "self" in target_type:
       return 0.66
@@ -805,17 +926,21 @@ class BattleDQNAgent(BattleAgentBase):
     denominator = max(float(denominator), 1.0)
     return max(0.0, min(float(self._parse_int(value)) / denominator, 1.0))
 
+  def _safe_float(self, value: float) -> float | None:
+    try:
+      value = float(value)
+    except (TypeError, ValueError):
+      return None
+    return value if value == value and value not in {float("inf"), float("-inf")} else None
+
   def _resolve_device(self, device):
-    if torch is None:
-      return "cpu"
     return torch.device(device or ("cuda" if torch.cuda.is_available() else "cpu"))
 
   def save(self, path: str) -> None:
     """Save model, optimizer, and exploration state to a checkpoint."""
-    if self.model is None:
-      raise ModuleNotFoundError("torch is required to save the DQN")
     torch.save(
       {
+        "action_schema": self.ACTION_SCHEMA,
         "model_state_dict": self.model.state_dict(),
         "target_model_state_dict": self.target_model.state_dict(),
         "optimizer_state_dict": self.optimizer.state_dict(),
@@ -823,16 +948,21 @@ class BattleDQNAgent(BattleAgentBase):
         "trained_steps": self.trained_steps,
         "learn_steps": self.learn_steps,
         "state_size": self.state_size,
-        "action_size": self.action_size,
+        "action_feature_size": self.action_feature_size,
+        "model_input_size": self.model_input_size,
       },
       path,
     )
 
   def load(self, path: str) -> None:
     """Load model, optimizer, and exploration state from a checkpoint."""
-    if self.model is None:
-      raise ModuleNotFoundError("torch is required to load the DQN")
     checkpoint = torch.load(path, map_location=self.device)
+    action_schema = checkpoint.get("action_schema")
+    if action_schema != self.ACTION_SCHEMA:
+      raise ValueError(
+        f"Incompatible battle checkpoint action_schema={action_schema!r}; "
+        f"expected {self.ACTION_SCHEMA!r}. Retrain or use a matching checkpoint."
+      )
     self.model.load_state_dict(checkpoint["model_state_dict"])
     self.target_model.load_state_dict(checkpoint["target_model_state_dict"])
     self.optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
@@ -843,11 +973,12 @@ class BattleDQNAgent(BattleAgentBase):
     )
     self.learn_steps = checkpoint.get("learn_steps", self.learn_steps)
     logger.info(
-      "Loaded DQN checkpoint from %s: trained_steps=%d learn_steps=%d epsilon=%.4f",
+      "Loaded DQN checkpoint from %s: trained_steps=%d learn_steps=%d epsilon=%.4f schema=%s",
       path,
       self.trained_steps,
       self.learn_steps,
       self.epsilon,
+      self.ACTION_SCHEMA,
     )
 
 

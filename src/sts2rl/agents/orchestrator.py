@@ -9,12 +9,19 @@ from sts2rl.agents.shop.rule_based import ShopPolicy
 from sts2rl.agents.rest.rule_based import RestPolicy
 from sts2rl.agents.event.rule_based import EventPolicy
 from sts2rl.agents.default.rule_based import DefaultPolicy
+from sts2rl.agents.selection import (
+    can_confirm_selection,
+    can_select_more,
+    first_unselected_card_index,
+    selected_card_indices,
+    selection_selected_count,
+)
 
 
 logger = logging.getLogger(__name__)
 
 
-BATTLE_SCREEN_TYPES = {"monster", "elite", "boss", "hand_select"}
+BATTLE_SCREEN_TYPES = {"monster", "elite", "boss"}
 BATTLE_ACTION_TYPES = {
     "end_turn",
     "play_card",
@@ -88,12 +95,32 @@ class Agent:
 
         if state_type == "hand_select":
             hand_select = raw_state.get("hand_select", {})
+            selected_indices = selected_card_indices(hand_select)
+            selected_count = selection_selected_count(
+                raw_state,
+                "hand_select",
+                len(selected_indices),
+            )
+            if can_confirm_selection(raw_state, "hand_select", selected_count):
+                return {"type": "combat_confirm_selection"}
+            if can_select_more(raw_state, "hand_select", selected_count):
+                card_index = first_unselected_card_index(hand_select)
+                if card_index is not None:
+                    return {
+                        "type": "combat_select_card",
+                        "card_index": card_index,
+                    }
             if hand_select.get("can_confirm", False):
                 return {"type": "combat_confirm_selection"}
 
         if state_type == "card_select":
             card_select = raw_state.get("card_select", {})
-            if card_select.get("can_confirm", False):
+            selected_count = selection_selected_count(
+                raw_state,
+                "card_select",
+                len(card_select.get("selected_cards", [])),
+            )
+            if can_confirm_selection(raw_state, "card_select", selected_count):
                 return {"type": "confirm_selection"}
 
         return None
@@ -114,11 +141,10 @@ class Agent:
         if action.get("type") not in BATTLE_ACTION_TYPES:
             return None
 
-        action_mask = self.battle_agent.valid_action_mask(prev_raw_state)
-        next_action_mask = self.battle_agent.valid_action_mask(next_raw_state)
-        state = self.battle_agent.encode_state(prev_raw_state, action_mask)
-        next_state = self.battle_agent.encode_state(next_raw_state, next_action_mask)
-        action_id = self.battle_agent.get_game_action_id(action, prev_raw_state)
+        state = self.battle_agent.encode_state(prev_raw_state)
+        action_vector = self.battle_agent.encode_action(prev_raw_state, action)
+        next_state = self.battle_agent.encode_state(next_raw_state)
+        next_action_vectors = self.battle_agent.candidate_action_vectors(next_raw_state)
 
         reward_details = reward_details or {}
         battle_result = reward_details.get("result")
@@ -126,11 +152,11 @@ class Agent:
 
         self.battle_agent.remember(
             state,
-            action_id,
+            action_vector,
             reward,
             next_state,
             battle_done,
-            next_action_mask,
+            next_action_vectors,
         )
         loss = self.battle_agent.train_step()
         won_battle = battle_result == "won"

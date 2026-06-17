@@ -13,6 +13,7 @@ from sts2rl.flow.player_detail import refresh_player_detail_for_map
 from sts2rl.agents.orchestrator import Agent
 from sts2rl.flow.battle_flow import (
     advance_forced_end_turn_states,
+    advance_forced_hand_select_states,
     fold_reward_details,
     forced_end_turn_action_selection,
     forced_end_turn_q_values,
@@ -405,6 +406,55 @@ def run_training_client(
         while raw_state.get("state_type")!="game_over" and not stop_event.is_set():
             if dashboard is not None:
                 dashboard.wait_if_paused()
+            if raw_state.get("state_type") == "hand_select":
+                try:
+                    (
+                        advanced_state,
+                        auto_reward,
+                        auto_done,
+                        auto_steps,
+                    ) = advance_forced_hand_select_states(
+                        game,
+                        agent,
+                        reward_model,
+                        raw_state,
+                    )
+                except Exception as exc:
+                    recovered_state, restart_episode = recover_client_state_after_disconnect(
+                        game,
+                        client_id,
+                        base_url,
+                        dashboard,
+                        stop_event,
+                        episode,
+                        raw_state,
+                        exc,
+                    )
+                    if recovered_state is None or restart_episode:
+                        break
+                    raw_state = recovered_state
+                    final_raw_state = recovered_state
+                    continue
+                if auto_steps:
+                    reward_details = fold_reward_details({}, auto_reward, auto_steps)
+                    episode_reward += auto_reward
+                    folded_step_count = len(auto_steps)
+                    episode_steps += folded_step_count
+                    final_raw_state = advanced_state
+                    if reward_details.get("type") == "battle":
+                        step_battle_reward = reward_details.get("total", auto_reward)
+                        battle_reward += step_battle_reward
+                        current_battle_reward += step_battle_reward
+                        current_battle_steps += folded_step_count
+                        current_battle_hp_lost = reward_details.get(
+                            "hp_lost",
+                            current_battle_hp_lost,
+                        )
+                    raw_state = advanced_state
+                    done = done or auto_done
+                    if done:
+                        break
+                    continue
             prev_raw_state = raw_state
             refresh_player_detail_for_map(game, player, raw_state)
 
@@ -488,17 +538,27 @@ def run_training_client(
             auto_steps = []
             if next_raw_state is not None and not done:
                 try:
-                    (
-                        next_raw_state,
-                        auto_reward,
-                        auto_done,
-                        auto_steps,
-                    ) = advance_forced_end_turn_states(
-                        game,
-                        agent,
-                        reward_model,
-                        next_raw_state,
-                    )
+                    for advance_forced_states in (
+                        advance_forced_hand_select_states,
+                        advance_forced_end_turn_states,
+                        advance_forced_hand_select_states,
+                    ):
+                        if done:
+                            break
+                        (
+                            next_raw_state,
+                            auto_reward,
+                            auto_done,
+                            new_auto_steps,
+                        ) = advance_forced_states(
+                            game,
+                            agent,
+                            reward_model,
+                            next_raw_state,
+                        )
+                        auto_steps.extend(new_auto_steps)
+                        reward += auto_reward
+                        done = done or auto_done
                 except Exception as exc:
                     recovered_state, restart_episode = recover_client_state_after_disconnect(
                         game,
@@ -515,8 +575,6 @@ def run_training_client(
                     raw_state = recovered_state
                     final_raw_state = recovered_state
                     continue
-                reward += auto_reward
-                done = done or auto_done
             final_raw_state = next_raw_state
             reward_details = fold_reward_details(
                 reward_details,
@@ -592,8 +650,12 @@ def run_training_client(
             if training_info is not None:
                 battle_steps += 1
                 loss = training_info["loss"]
-                action_type = training_info["action_type"]
-                action_counts[action_type] = action_counts.get(action_type, 0) + 1
+                action_count_key = (
+                    action.get("action_key")
+                    or action_selection.get("action_key")
+                    or training_info["action_type"]
+                )
+                action_counts[action_count_key] = action_counts.get(action_count_key, 0) + 1
                 if training_info["updated"]:
                     update_count += 1
                     losses.append(loss)
