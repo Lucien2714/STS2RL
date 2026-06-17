@@ -22,11 +22,6 @@ from sts2rl.flow.player_detail import refresh_player_detail_for_map
 
 from sts2rl.evaluation.dashboard import LiveEvaluationDashboard
 
-try:
-    import torch
-except ImportError:
-    torch = None
-
 
 def choose_eval_action(agent: Agent, raw_state: dict) -> dict:
     """Choose an action for evaluation without battle exploration."""
@@ -56,16 +51,7 @@ def current_q_values(agent: Agent, raw_state: dict, selected_action: dict | None
             "actions": [],
         }
 
-    battle_agent = agent.battle_agent
-    if torch is None or battle_agent.model is None:
-        return {
-            "available": False,
-            "reason": "Torch/model is not available",
-            "screen_type": state_type,
-            "actions": [],
-        }
-
-    return battle_agent.current_q_values(raw_state, selected_action)
+    return agent.battle_agent.current_q_values(raw_state, selected_action)
 
 
 def safe_float(value: float) -> float | None:
@@ -292,8 +278,7 @@ def evaluate_checkpoint(
 
     agent = Agent()
     agent.battle_agent.load(str(checkpoint_path))
-    if agent.battle_agent.model is not None:
-        agent.battle_agent.model.eval()
+    agent.battle_agent.model.eval()
 
     game = Game(
         character=character,

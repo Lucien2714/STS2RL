@@ -26,13 +26,8 @@ from sts2rl.data.loader import (
   get_relic_index,
 )
 
-
-try:
-  import torch
-  from torch import nn
-except ImportError:
-  torch = None
-  nn = None
+import torch
+from torch import nn
 
 
 logger = logging.getLogger(__name__)
@@ -51,29 +46,22 @@ BATTLE_ACTION_TARGET_FEATURES = 3 + BATTLE_ENEMY_FEATURES
 BATTLE_ACTION_SCHEMA = "candidate_action_v1"
 
 
-if nn is not None:
-  class BattleQNetwork(nn.Module):
-    """Small fully connected Q-network for state/action candidate scoring."""
+class BattleQNetwork(nn.Module):
+  """Small fully connected Q-network for state/action candidate scoring."""
 
-    def __init__(self, input_size: int, hidden_size: int = 256):
-      super().__init__()
-      self.net = nn.Sequential(
-        nn.Linear(input_size, hidden_size),
-        nn.ReLU(),
-        nn.Linear(hidden_size, hidden_size),
-        nn.ReLU(),
-        nn.Linear(hidden_size, 1),
-      )
+  def __init__(self, input_size: int, hidden_size: int = 256):
+    super().__init__()
+    self.net = nn.Sequential(
+      nn.Linear(input_size, hidden_size),
+      nn.ReLU(),
+      nn.Linear(hidden_size, hidden_size),
+      nn.ReLU(),
+      nn.Linear(hidden_size, 1),
+    )
 
-    def forward(self, state_action):
-      """Return one Q-value for each encoded state/action pair."""
-      return self.net(state_action).squeeze(-1)
-else:
-  class BattleQNetwork:
-    """Placeholder that reports the missing torch dependency."""
-
-    def __init__(self, *args, **kwargs):
-      raise ModuleNotFoundError("torch is required for the DQN network")
+  def forward(self, state_action):
+    """Return one Q-value for each encoded state/action pair."""
+    return self.net(state_action).squeeze(-1)
 
 
 class BattleDQNAgent(BattleAgentBase):
@@ -148,18 +136,12 @@ class BattleDQNAgent(BattleAgentBase):
     self.last_action_selection = {}
 
     self.device = self._resolve_device(device)
-    self.model = None
-    self.target_model = None
-    self.optimizer = None
-    self.loss_fn = None
-
-    if torch is not None:
-      self.model = BattleQNetwork(self.model_input_size, hidden_size).to(self.device)
-      self.target_model = BattleQNetwork(self.model_input_size, hidden_size).to(self.device)
-      self.target_model.load_state_dict(self.model.state_dict())
-      self.target_model.eval()
-      self.optimizer = torch.optim.Adam(self.model.parameters(), lr=learning_rate)
-      self.loss_fn = nn.SmoothL1Loss()
+    self.model = BattleQNetwork(self.model_input_size, hidden_size).to(self.device)
+    self.target_model = BattleQNetwork(self.model_input_size, hidden_size).to(self.device)
+    self.target_model.load_state_dict(self.model.state_dict())
+    self.target_model.eval()
+    self.optimizer = torch.optim.Adam(self.model.parameters(), lr=learning_rate)
+    self.loss_fn = nn.SmoothL1Loss()
 
   def choose_action(self, raw_state: dict, training: bool = True) -> dict:
     """Choose a legal battle action using exploration or candidate Q-values."""
@@ -189,9 +171,6 @@ class BattleDQNAgent(BattleAgentBase):
         "valid_action_count": len(candidates),
       }
       return self._public_action(candidate)
-
-    if self.model is None:
-      raise ModuleNotFoundError("torch is required for DQN action selection")
 
     q_values = self._score_candidates(raw_state, candidates, self.model)
     best_index = max(range(len(candidates)), key=lambda index: q_values[index])
@@ -229,9 +208,6 @@ class BattleDQNAgent(BattleAgentBase):
 
   def train_step(self) -> float | None:
     """Run one replay update when enough samples are available."""
-    if self.model is None:
-      raise ModuleNotFoundError("torch is required for DQN training")
-
     if len(self.replay_buffer) < self.batch_size:
       return None
 
@@ -377,14 +353,6 @@ class BattleDQNAgent(BattleAgentBase):
         selected_key = self.action_key(selected_action, raw_state)
       except (KeyError, ValueError):
         selected_key = None
-
-    if self.model is None:
-      return {
-        "available": False,
-        "reason": "Torch/model is not available",
-        "screen_type": raw_state.get("state_type"),
-        "actions": [],
-      }
 
     q_values = self._score_candidates(raw_state, candidates, self.model)
     actions = []
@@ -935,14 +903,10 @@ class BattleDQNAgent(BattleAgentBase):
     return value if value == value and value not in {float("inf"), float("-inf")} else None
 
   def _resolve_device(self, device):
-    if torch is None:
-      return "cpu"
     return torch.device(device or ("cuda" if torch.cuda.is_available() else "cpu"))
 
   def save(self, path: str) -> None:
     """Save model, optimizer, and exploration state to a checkpoint."""
-    if self.model is None:
-      raise ModuleNotFoundError("torch is required to save the DQN")
     torch.save(
       {
         "action_schema": self.ACTION_SCHEMA,
@@ -961,8 +925,6 @@ class BattleDQNAgent(BattleAgentBase):
 
   def load(self, path: str) -> None:
     """Load model, optimizer, and exploration state from a checkpoint."""
-    if self.model is None:
-      raise ModuleNotFoundError("torch is required to load the DQN")
     checkpoint = torch.load(path, map_location=self.device)
     action_schema = checkpoint.get("action_schema")
     if action_schema != self.ACTION_SCHEMA:

@@ -7,12 +7,6 @@ import math
 from sts2rl.agents.orchestrator import BATTLE_ACTION_TYPES, BATTLE_SCREEN_TYPES
 
 
-try:
-    import torch
-except ImportError:
-    torch = None
-
-
 def action_selection_details(
     agent,
     raw_state: dict,
@@ -63,16 +57,7 @@ def current_q_values(agent, raw_state: dict, selected_action: dict | None = None
             "actions": [],
         }
 
-    battle_agent = agent.battle_agent
-    if torch is None or battle_agent.model is None:
-        return {
-            "available": False,
-            "reason": "Torch/model is not available",
-            "screen_type": state_type,
-            "actions": [],
-        }
-
-    return battle_agent.current_q_values(raw_state, selected_action)
+    return agent.battle_agent.current_q_values(raw_state, selected_action)
 
 
 def selected_action_q(q_values: dict) -> float | None:
