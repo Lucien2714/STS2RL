@@ -327,7 +327,10 @@ class BattleDQNAgent(BattleAgentBase):
       return self._hand_select_candidates(raw_state)
 
     if state_type not in {"monster", "elite", "boss"}:
-      return [self._candidate({"type": "end_turn"}, "end_turn")]
+      return []
+
+    if not self._is_player_play_phase(raw_state):
+      return []
 
     battle = raw_state.get("battle", {})
     player = raw_state.get("player", {})
@@ -347,6 +350,14 @@ class BattleDQNAgent(BattleAgentBase):
   def current_q_values(self, raw_state: dict, selected_action: dict | None = None) -> dict:
     """Return candidate Q-values for dashboards and evaluation telemetry."""
     candidates = self.valid_action_candidates(raw_state)
+    if not candidates:
+      return {
+        "available": False,
+        "reason": "No legal DQN battle actions are available",
+        "screen_type": raw_state.get("state_type"),
+        "actions": [],
+      }
+
     selected_key = None
     if selected_action is not None:
       try:
@@ -725,6 +736,11 @@ class BattleDQNAgent(BattleAgentBase):
     return slots
 
   def _fallback_action(self, raw_state: dict) -> dict:
+    if raw_state.get("state_type") in {"monster", "elite", "boss"}:
+      if not self._is_player_play_phase(raw_state):
+        return {"type": "proceed"}
+      return {"type": "end_turn"}
+
     if raw_state.get("state_type") == "hand_select":
       hand_select = raw_state.get("hand_select", {})
       selected_indices = {
@@ -748,14 +764,28 @@ class BattleDQNAgent(BattleAgentBase):
 
     return {"type": "end_turn"}
 
+  def _is_player_play_phase(self, raw_state: dict) -> bool:
+    battle = raw_state.get("battle", {})
+    return battle.get("turn") == "player" and battle.get("is_play_phase") is True
+
   def _is_playable_card(self, card: dict, energy: int) -> bool:
     return Card.from_raw(card).is_playable_with_energy(energy)
 
   def _requires_enemy_target(self, item: dict) -> bool:
     if item.get("requires_target", False):
       return True
-    target_type = str(item.get("target_type", item.get("target", ""))).lower()
-    return target_type in {"anyenemy", "enemy"}
+    target_type = self._normalize_target_type(item.get("target_type", item.get("target", "")))
+    return (
+      self._target_type_has_enemy(target_type)
+      and "random" not in target_type
+      and "all" not in target_type
+    )
+
+  def _normalize_target_type(self, value: object) -> str:
+    return re.sub(r"[^a-z0-9]+", "", str(value).lower())
+
+  def _target_type_has_enemy(self, target_type: str) -> bool:
+    return "enemy" in target_type or "enemies" in target_type
 
   def _enemy_id_by_index(self, enemies: list[dict], enemy_index: object) -> str | None:
     enemy_index = self._parse_int(enemy_index, -1)
@@ -870,7 +900,8 @@ class BattleDQNAgent(BattleAgentBase):
     return values.get(card_type, 0.0)
 
   def _target_type_value(self, target_type: str) -> float:
-    if "enemy" in target_type:
+    target_type = self._normalize_target_type(target_type)
+    if self._target_type_has_enemy(target_type):
       return 0.33
     if "self" in target_type:
       return 0.66
