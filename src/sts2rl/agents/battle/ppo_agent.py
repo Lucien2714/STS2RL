@@ -328,6 +328,10 @@ class BattlePPOAgent(BattleDQNAgent):
       "actions": actions,
     }
 
+  def bc_score(self, state_action: torch.Tensor) -> torch.Tensor:
+    """Return differentiable actor logits per encoded state/action row."""
+    return self.model.action_logits(state_action)
+
   def _transition_from_encoded_action(self, state: list[float], action_vector: list[float]) -> dict:
     with torch.no_grad():
       state_tensor = torch.tensor([state], dtype=torch.float32, device=self.device)

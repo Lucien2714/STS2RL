@@ -463,6 +463,16 @@ class BattleDQNAgent(BattleAgentBase):
       q_tensor = model(input_tensor).detach().cpu()
     return [float(value) for value in q_tensor.tolist()]
 
+  def bc_score(self, state_action: torch.Tensor) -> torch.Tensor:
+    """Return a differentiable score per encoded state/action row.
+
+    This is the single primitive behavioral cloning needs: the trainer encodes
+    the candidate set once (via ``encode_state``/``encode_action``), then applies
+    a softmax over these scores. Any candidate-scoring agent reuses the identical
+    BC loss by overriding only this method. The DQN score is the Q-value.
+    """
+    return self.model(state_action)
+
   def _play_card_candidates(self, raw_state: dict, energy: int, enemies: list[dict]) -> list[dict]:
     manager = CardManager.from_state_hand(raw_state)
     candidates = []
