@@ -1,5 +1,7 @@
 """Tests for battle-agent action masking."""
 
+import torch
+
 from sts2rl.agents.battle.dqn_agent import BattleDQNAgent
 from sts2rl.agents.event.rule_based import EventPolicy
 from sts2rl.agents.orchestrator import Agent
@@ -417,3 +419,57 @@ def test_reward_shaping_uses_small_unused_energy_penalty():
 
     assert details["end_turn_energy_penalty"] == -3 * BATTLE_UNUSED_ENERGY_PENALTY
     assert reward == details["end_turn_energy_penalty"]
+
+
+def test_dqn_greedy_breaks_ties_randomly_not_always_end_turn():
+    """With equal candidate Q-values, greedy selection must not always pick the
+    first candidate (end_turn); ties are broken randomly."""
+    agent = BattleDQNAgent(hidden_size=16)
+    agent.epsilon = 0.0  # pure greedy
+
+    # Force every candidate to score identically by zeroing the output layer.
+    with torch.no_grad():
+        final_layer = agent.model.net[-1]
+        final_layer.weight.zero_()
+        final_layer.bias.zero_()
+
+    raw_state = {
+        "state_type": "monster",
+        "battle": {
+            "turn": "player",
+            "is_play_phase": True,
+            "enemies": [{"entity_id": "ENEMY_0", "hp": 10, "max_hp": 10}],
+        },
+        "player": {
+            "energy": 3,
+            "max_energy": 3,
+            "hand": [
+                {
+                    "index": 0,
+                    "id": "STRIKE_IRONCLAD",
+                    "type": "Attack",
+                    "cost": "1",
+                    "target_type": "Enemy",
+                    "can_play": True,
+                },
+            ],
+            "potions": [],
+            "status": [],
+            "relics": [],
+        },
+    }
+
+    candidate_keys = {c["action_key"] for c in agent.valid_action_candidates(raw_state)}
+    assert "end_turn" in candidate_keys
+    assert len(candidate_keys) >= 2
+
+    chosen = set()
+    for _ in range(60):
+        action = agent.choose_action(raw_state, training=False)
+        key = agent.action_key(action, raw_state)
+        assert key in candidate_keys
+        chosen.add(key)
+
+    # Old behavior (first-index argmax) would always return end_turn.
+    assert chosen != {"end_turn"}
+    assert len(chosen) >= 2

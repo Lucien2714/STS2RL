@@ -59,6 +59,10 @@ class Agent:
 
     def __init__(self, battle_agent=None, battle_agent_type: str = "DQN"):
         self.battle_agent = battle_agent or create_battle_agent(battle_agent_type)
+        # Each orchestrator drives one trajectory/client, so it gets its own
+        # rollout collector over the shared battle model. This keeps concurrent
+        # clients from clobbering each other's on-policy rollout state.
+        self.rollout = self.battle_agent.new_rollout()
         self.map_policy = MapPolicy()
         self.reward_policy = RewardPolicy()
         self.shop_policy = ShopPolicy()
@@ -74,7 +78,7 @@ class Agent:
         logger.debug("Agent: choosing action screen_type=%s", screen_type)
 
         if is_battle_policy_state(raw_state):
-            action = self.battle_agent.choose_action(raw_state, training=True)
+            action = self.rollout.choose_action(raw_state, training=True)
             logger.debug(
                 "Agent: selected %s action=%s",
                 type(self.battle_agent).__name__,
@@ -140,7 +144,7 @@ class Agent:
         battle_result = reward_details.get("result")
         battle_done = done or battle_result in {"won", "lost"}
 
-        self.battle_agent.remember(
+        self.rollout.remember(
             state,
             action_vector,
             reward,
@@ -156,7 +160,7 @@ class Agent:
             "Agent: battle training step reward=%.2f loss=%s replay_size=%d epsilon=%.3f",
             reward,
             loss,
-            len(self.battle_agent.replay_buffer),
+            self.battle_agent.buffered_steps(),
             self.battle_agent.epsilon,
         )
         return {
@@ -165,7 +169,7 @@ class Agent:
             "reward": float(reward),
             "action_type": action.get("type"),
             "epsilon": self.battle_agent.epsilon,
-            "replay_size": len(self.battle_agent.replay_buffer),
+            "replay_size": self.battle_agent.buffered_steps(),
             "learn_steps": self.battle_agent.learn_steps,
             "won_battle": won_battle,
             "lost_battle": lost_battle,

@@ -83,7 +83,7 @@ def test_ppo_train_step_updates_after_rollout_and_clears_buffer():
 
     assert isinstance(loss, float)
     assert agent.learn_steps == 1
-    assert len(agent.replay_buffer) == 0
+    assert agent.buffered_steps() == 0
 
 
 def test_ppo_checkpoint_round_trip(tmp_path):
@@ -120,3 +120,74 @@ def test_orchestrator_creates_ppo_from_agent_type():
     agent = Agent(battle_agent_type="PPO")
 
     assert isinstance(agent.battle_agent, BattlePPOAgent)
+
+
+def test_ppo_collectors_isolate_pending_transitions():
+    """Interleaved collectors must not clobber each other's on-policy pending data."""
+    agent = BattlePPOAgent(rollout_steps=8, hidden_size=32)
+    collector_a = agent.new_rollout()
+    collector_b = agent.new_rollout()
+    state_a = playable_battle_state()
+    state_b = playable_battle_state(enemy_hp=7)
+
+    # A chooses, then B chooses (this would overwrite a single shared pending slot),
+    # then each remembers in interleaved order.
+    action_a = collector_a.choose_action(state_a, training=True)
+    action_b = collector_b.choose_action(state_b, training=True)
+    collector_a.remember(
+        agent.encode_state(state_a),
+        agent.encode_action(state_a, action_a),
+        1.0,
+        agent.encode_state(state_a),
+        True,
+        [],
+    )
+    collector_b.remember(
+        agent.encode_state(state_b),
+        agent.encode_action(state_b, action_b),
+        1.0,
+        agent.encode_state(state_b),
+        True,
+        [],
+    )
+
+    # Each kept its own transition with the full candidate set (end_turn + play_card),
+    # not the single-candidate fallback that the old shared-slot clobber produced.
+    assert len(collector_a.buffer) == 1
+    assert len(collector_b.buffer) == 1
+    assert len(collector_a.buffer[0]["candidate_vectors"]) >= 2
+    assert len(collector_b.buffer[0]["candidate_vectors"]) >= 2
+
+
+def test_ppo_update_groups_trajectories_and_clears_buffers():
+    """An update over two collectors runs one PPO step and clears every buffer."""
+    agent = BattlePPOAgent(
+        rollout_steps=4,
+        minibatch_size=2,
+        update_epochs=1,
+        hidden_size=32,
+    )
+    collectors = [agent.new_rollout(), agent.new_rollout()]
+
+    for collector in collectors:
+        state = playable_battle_state()
+        next_state = playable_battle_state(enemy_hp=5)
+        for reward, done in [(1.0, False), (2.0, True)]:
+            action = collector.choose_action(state, training=True)
+            collector.remember(
+                agent.encode_state(state),
+                agent.encode_action(state, action),
+                reward,
+                agent.encode_state(next_state),
+                done,
+                [] if done else agent.candidate_action_vectors(next_state),
+            )
+
+    assert agent.buffered_steps() == 4  # two trajectory segments of length 2
+
+    loss = agent.train_step()
+
+    assert isinstance(loss, float)
+    assert agent.learn_steps == 1
+    assert agent.buffered_steps() == 0
+    assert all(collector.buffer == [] for collector in collectors)

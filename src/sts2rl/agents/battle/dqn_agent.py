@@ -177,7 +177,11 @@ class BattleDQNAgent(BattleAgentBase):
       return self._public_action(candidate)
 
     q_values = self._score_candidates(raw_state, candidates, self.model)
-    best_index = max(range(len(candidates)), key=lambda index: q_values[index])
+    # Break ties randomly so equal/near-equal Q-values do not collapse onto the
+    # first candidate (which is always end_turn) and bias the policy toward it.
+    best_q = max(q_values)
+    best_indices = [index for index, q in enumerate(q_values) if q >= best_q - 1e-6]
+    best_index = random.choice(best_indices)
     candidate = candidates[best_index]
     self.last_action_selection = {
       "method": "greedy_q",
@@ -1066,6 +1070,32 @@ class BattleDQNAgent(BattleAgentBase):
       self.epsilon,
       self.ACTION_SCHEMA,
     )
+
+  def buffered_steps(self) -> int:
+    """Return the number of transitions currently buffered for an update."""
+    return len(self.replay_buffer)
+
+  def new_rollout(self) -> "SharedReplayCollector":
+    """Return a rollout collector for one trajectory/client.
+
+    DQN uses a single order-independent replay buffer, so per-trajectory
+    isolation is unnecessary; every collector forwards to this shared agent.
+    The collector exists only to give the orchestrator a uniform interface.
+    """
+    return SharedReplayCollector(self)
+
+
+class SharedReplayCollector:
+  """Rollout collector that forwards to a shared replay-buffer agent."""
+
+  def __init__(self, agent: BattleDQNAgent) -> None:
+    self.agent = agent
+
+  def choose_action(self, raw_state: dict, training: bool = True) -> dict:
+    return self.agent.choose_action(raw_state, training=training)
+
+  def remember(self, *args, **kwargs) -> None:
+    return self.agent.remember(*args, **kwargs)
 
 
 DQNBattleAgent = BattleDQNAgent

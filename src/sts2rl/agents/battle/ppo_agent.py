@@ -51,8 +51,131 @@ class BattlePPOPolicy(nn.Module):
     return self.critic(states).squeeze(-1)
 
 
+class PPORolloutCollector:
+  """Per-trajectory rollout buffer for one client/episode stream.
+
+  Each collector owns its own pending transition and rollout buffer, so several
+  concurrent clients can share one ``BattlePPOAgent`` (model + optimizer) without
+  clobbering each other's on-policy data. The agent stays unaware of how many
+  trajectories exist or how they are scheduled; the harness simply gives each
+  client its own collector via ``BattlePPOAgent.new_rollout()``.
+  """
+
+  def __init__(self, agent: "BattlePPOAgent") -> None:
+    self.agent = agent
+    self.buffer: list[dict] = []
+    self._pending: dict | None = None
+
+  def choose_action(self, raw_state: dict, training: bool = True) -> dict:
+    """Sample a legal battle action and stash its on-policy data on this collector."""
+    agent = self.agent
+    candidates = agent.valid_action_candidates(raw_state)
+    if not candidates:
+      action = agent._fallback_action(raw_state)
+      agent.last_action_selection = {
+        "method": "fallback",
+        "reason": "no_valid_candidates",
+        "training": training,
+        "epsilon": agent.epsilon,
+        "action_key": None,
+        "q": None,
+        "prob": None,
+        "value": None,
+        "valid_action_count": 0,
+      }
+      self._pending = None
+      return action
+
+    state_vector = agent.encode_state(raw_state)
+    candidate_vectors = [
+      agent.encode_action(raw_state, candidate["action"])
+      for candidate in candidates
+    ]
+    inputs = [state_vector + candidate_vector for candidate_vector in candidate_vectors]
+    with torch.no_grad():
+      input_tensor = torch.tensor(inputs, dtype=torch.float32, device=agent.device)
+      state_tensor = torch.tensor([state_vector], dtype=torch.float32, device=agent.device)
+      logits = agent.model.action_logits(input_tensor)
+      value = float(agent.model.value(state_tensor).item())
+      distribution = Categorical(logits=logits)
+      if training:
+        action_index_tensor = distribution.sample()
+        method = "ppo_sample"
+      else:
+        action_index_tensor = torch.argmax(logits)
+        method = "ppo_argmax"
+      action_index = int(action_index_tensor.item())
+      logprob = float(distribution.log_prob(action_index_tensor).item())
+      probs = distribution.probs.detach().cpu().tolist()
+      logits_list = logits.detach().cpu().tolist()
+
+    candidate = candidates[action_index]
+    self._pending = {
+      "state": list(state_vector),
+      "candidate_vectors": [list(vector) for vector in candidate_vectors],
+      "action_index": action_index,
+      "action_vector": list(candidate_vectors[action_index]),
+      "logprob": logprob,
+      "value": value,
+    }
+    agent.last_action_selection = {
+      "method": method,
+      "reason": "candidate_policy",
+      "training": training,
+      "epsilon": agent.epsilon,
+      "action_key": candidate["action_key"],
+      "q": float(logits_list[action_index]),
+      "prob": float(probs[action_index]),
+      "value": value,
+      "valid_action_count": len(candidates),
+    }
+    return agent._public_action(candidate)
+
+  def remember(
+    self,
+    state,
+    action_vector,
+    reward: float,
+    next_state,
+    done: bool,
+    next_action_vectors,
+  ) -> None:
+    """Append one transition to this collector's trajectory buffer."""
+    agent = self.agent
+    state = list(state)
+    action_vector = list(action_vector)
+    pending = self._pending
+    if (
+      pending is None
+      or pending["state"] != state
+      or pending["action_vector"] != action_vector
+    ):
+      pending = agent._transition_from_encoded_action(state, action_vector)
+
+    self.buffer.append({
+      "state": state,
+      "action_vector": action_vector,
+      "reward": float(reward),
+      "next_state": list(next_state),
+      "done": bool(done),
+      "next_action_vectors": [list(vector) for vector in next_action_vectors],
+      "candidate_vectors": pending["candidate_vectors"],
+      "action_index": int(pending["action_index"]),
+      "logprob": float(pending["logprob"]),
+      "value": float(pending["value"]),
+    })
+    agent.trained_steps += 1
+    self._pending = None
+
+
 class BattlePPOAgent(BattleDQNAgent):
-  """Battle agent that samples legal candidate actions with PPO."""
+  """Battle agent that samples legal candidate actions with PPO.
+
+  The agent owns the shared model/optimizer and the update logic; per-trajectory
+  rollout state lives in :class:`PPORolloutCollector` instances created via
+  :meth:`new_rollout`. A built-in default collector keeps single-agent use
+  (tests, evaluation, direct calls) working unchanged.
+  """
 
   ACTION_SCHEMA = "candidate_action_ppo_v2"
 
@@ -95,116 +218,58 @@ class BattlePPOAgent(BattleDQNAgent):
     ).to(self.device)
     self.target_model = None
     self.optimizer = torch.optim.Adam(self.model.parameters(), lr=learning_rate, eps=1e-5)
-    self.replay_buffer = []
-    self._pending_transition = None
+
+    self.collectors: list[PPORolloutCollector] = []
+    self._default_rollout = self.new_rollout()
+
+  def new_rollout(self) -> PPORolloutCollector:
+    """Create and register a rollout collector for one trajectory/client."""
+    collector = PPORolloutCollector(self)
+    self.collectors.append(collector)
+    return collector
+
+  def buffered_steps(self) -> int:
+    """Return the total transitions buffered across all collectors."""
+    return sum(len(collector.buffer) for collector in self.collectors)
 
   def choose_action(self, raw_state: dict, training: bool = True) -> dict:
-    """Choose a legal battle action from the PPO policy distribution."""
-    candidates = self.valid_action_candidates(raw_state)
-    if not candidates:
-      action = self._fallback_action(raw_state)
-      self.last_action_selection = {
-        "method": "fallback",
-        "reason": "no_valid_candidates",
-        "training": training,
-        "epsilon": self.epsilon,
-        "action_key": None,
-        "q": None,
-        "prob": None,
-        "value": None,
-        "valid_action_count": 0,
-      }
-      return action
+    """Choose an action via the built-in default collector (single-agent use)."""
+    return self._default_rollout.choose_action(raw_state, training=training)
 
-    state_vector = self.encode_state(raw_state)
-    candidate_vectors = [
-      self.encode_action(raw_state, candidate["action"])
-      for candidate in candidates
-    ]
-    inputs = [
-      state_vector + candidate_vector
-      for candidate_vector in candidate_vectors
-    ]
-    with torch.no_grad():
-      input_tensor = torch.tensor(inputs, dtype=torch.float32, device=self.device)
-      state_tensor = torch.tensor([state_vector], dtype=torch.float32, device=self.device)
-      logits = self.model.action_logits(input_tensor)
-      value = float(self.model.value(state_tensor).item())
-      distribution = Categorical(logits=logits)
-      if training:
-        action_index_tensor = distribution.sample()
-        method = "ppo_sample"
-      else:
-        action_index_tensor = torch.argmax(logits)
-        method = "ppo_argmax"
-      action_index = int(action_index_tensor.item())
-      logprob = float(distribution.log_prob(action_index_tensor).item())
-      probs = distribution.probs.detach().cpu().tolist()
-      logits_list = logits.detach().cpu().tolist()
-
-    candidate = candidates[action_index]
-    self._pending_transition = {
-      "state": list(state_vector),
-      "candidate_vectors": [list(vector) for vector in candidate_vectors],
-      "action_index": action_index,
-      "action_vector": list(candidate_vectors[action_index]),
-      "logprob": logprob,
-      "value": value,
-    }
-    self.last_action_selection = {
-      "method": method,
-      "reason": "candidate_policy",
-      "training": training,
-      "epsilon": self.epsilon,
-      "action_key": candidate["action_key"],
-      "q": float(logits_list[action_index]),
-      "prob": float(probs[action_index]),
-      "value": value,
-      "valid_action_count": len(candidates),
-    }
-    return self._public_action(candidate)
-
-  def remember(
-    self,
-    state,
-    action_vector,
-    reward: float,
-    next_state,
-    done: bool,
-    next_action_vectors,
-  ) -> None:
-    """Store one PPO rollout transition."""
-    state = list(state)
-    action_vector = list(action_vector)
-    pending = self._pending_transition
-    if (
-      pending is None
-      or pending["state"] != state
-      or pending["action_vector"] != action_vector
-    ):
-      pending = self._transition_from_encoded_action(state, action_vector)
-
-    self.replay_buffer.append({
-      "state": state,
-      "action_vector": action_vector,
-      "reward": float(reward),
-      "next_state": list(next_state),
-      "done": bool(done),
-      "next_action_vectors": [list(vector) for vector in next_action_vectors],
-      "candidate_vectors": pending["candidate_vectors"],
-      "action_index": int(pending["action_index"]),
-      "logprob": float(pending["logprob"]),
-      "value": float(pending["value"]),
-    })
-    self.trained_steps += 1
-    self._pending_transition = None
+  def remember(self, *args, **kwargs) -> None:
+    """Record a transition on the built-in default collector (single-agent use)."""
+    return self._default_rollout.remember(*args, **kwargs)
 
   def train_step(self) -> float | None:
-    """Run a PPO update when the rollout buffer is full."""
-    if len(self.replay_buffer) < self.rollout_steps:
+    """Run a PPO update once enough rollout steps are buffered across collectors."""
+    return self.update()
+
+  def update(self) -> float | None:
+    """Update the shared policy from all collectors' trajectories.
+
+    Advantages/returns are computed per collector (each buffer is one
+    temporally-ordered trajectory segment), then concatenated for a single
+    minibatched PPO update. This keeps GAE within trajectory boundaries even
+    when several clients fill their buffers independently.
+    """
+    segments = [collector.buffer for collector in self.collectors if collector.buffer]
+    if sum(len(segment) for segment in segments) < self.rollout_steps:
       return None
 
-    rollout = list(self.replay_buffer)
+    rollout: list[dict] = []
+    advantage_segments = []
+    return_segments = []
+    for segment in segments:
+      advantages, returns = self._segment_gae(segment)
+      rollout.extend(segment)
+      advantage_segments.append(advantages)
+      return_segments.append(returns)
+
+    advantages = torch.cat(advantage_segments)
+    returns = torch.cat(return_segments)
+    if advantages.numel() > 1:
+      advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
+
     states = torch.tensor(
       [transition["state"] for transition in rollout],
       dtype=torch.float32,
@@ -215,30 +280,6 @@ class BattlePPOAgent(BattleDQNAgent):
       dtype=torch.float32,
       device=self.device,
     )
-    rewards = [transition["reward"] for transition in rollout]
-    dones = [transition["done"] for transition in rollout]
-    values = torch.tensor(
-      [transition["value"] for transition in rollout],
-      dtype=torch.float32,
-      device=self.device,
-    )
-
-    with torch.no_grad():
-      bootstrap_value = self._bootstrap_value(rollout[-1])
-      advantages = torch.zeros(len(rollout), dtype=torch.float32, device=self.device)
-      last_gae = 0.0
-      for index in reversed(range(len(rollout))):
-        if index == len(rollout) - 1:
-          next_value = bootstrap_value
-        else:
-          next_value = values[index + 1]
-        next_non_terminal = 0.0 if dones[index] else 1.0
-        delta = rewards[index] + self.gamma * next_value * next_non_terminal - values[index]
-        last_gae = delta + self.gamma * self.gae_lambda * next_non_terminal * last_gae
-        advantages[index] = last_gae
-      returns = advantages + values
-      if len(advantages) > 1:
-        advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
 
     last_loss = None
     indices = list(range(len(rollout)))
@@ -269,9 +310,35 @@ class BattlePPOAgent(BattleDQNAgent):
         self.optimizer.step()
         last_loss = float(loss.item())
 
-    self.replay_buffer.clear()
+    for collector in self.collectors:
+      collector.buffer.clear()
     self.learn_steps += 1
     return last_loss
+
+  def _segment_gae(self, segment: list[dict]) -> tuple[torch.Tensor, torch.Tensor]:
+    """Compute (advantages, returns) for one trajectory segment via GAE."""
+    rewards = [transition["reward"] for transition in segment]
+    dones = [transition["done"] for transition in segment]
+    values = torch.tensor(
+      [transition["value"] for transition in segment],
+      dtype=torch.float32,
+      device=self.device,
+    )
+    with torch.no_grad():
+      bootstrap_value = self._bootstrap_value(segment[-1])
+      advantages = torch.zeros(len(segment), dtype=torch.float32, device=self.device)
+      last_gae = 0.0
+      for index in reversed(range(len(segment))):
+        if index == len(segment) - 1:
+          next_value = bootstrap_value
+        else:
+          next_value = values[index + 1]
+        next_non_terminal = 0.0 if dones[index] else 1.0
+        delta = rewards[index] + self.gamma * next_value * next_non_terminal - values[index]
+        last_gae = delta + self.gamma * self.gae_lambda * next_non_terminal * last_gae
+        advantages[index] = last_gae
+      returns = advantages + values
+    return advantages, returns
 
   def current_q_values(self, raw_state: dict, selected_action: dict | None = None) -> dict:
     """Return PPO logits and probabilities for dashboard compatibility."""

@@ -17,7 +17,7 @@ from sts2rl.env.game_env import Game
 from sts2rl.env.player import Player
 from sts2rl.env.rewards import BattleProgressReward
 from sts2rl.flow.player_detail import refresh_player_detail_for_map
-from sts2rl.agents.orchestrator import Agent
+from sts2rl.agents.orchestrator import Agent, create_battle_agent
 from sts2rl.flow.battle_flow import (
     advance_forced_end_turn_states,
     fold_reward_details,
@@ -43,15 +43,15 @@ DEFAULT_CLIENT_PORT = 15526
 RECONNECT_POLL_SECONDS = 2.0
 
 
-def save_battle_checkpoint(agent: Agent, path: Path, reason: str) -> None:
+def save_battle_checkpoint(battle_agent, path: Path, reason: str) -> None:
     """Save the battle agent and log the checkpoint reason."""
-    agent.battle_agent.save(str(path))
+    battle_agent.save(str(path))
     logging.info(
         "Saved battle agent checkpoint (%s) to %s trained_steps=%d learn_steps=%d",
         reason,
         path,
-        agent.battle_agent.trained_steps,
-        agent.battle_agent.learn_steps,
+        battle_agent.trained_steps,
+        battle_agent.learn_steps,
     )
 
 
@@ -156,29 +156,35 @@ def training_client_urls(args: argparse.Namespace) -> list[str]:
 class SharedTrainingState:
     """Synchronize one trainable agent across multiple training clients."""
 
-    def __init__(self, agent: Agent, battle_agent_type: str) -> None:
-        self.agent = agent
+    def __init__(self, battle_agent, battle_agent_type: str) -> None:
+        # One shared battle agent (model + optimizer); each client builds its own
+        # orchestrator + rollout collector over it.
+        self.battle_agent = battle_agent
         self.battle_agent_type = normalize_battle_agent_type(battle_agent_type)
         self.checkpoint_dir = battle_agent_checkpoint_dir(self.battle_agent_type)
         self.latest_path = battle_latest_path(self.battle_agent_type)
         self.agent_lock = threading.RLock()
-        self.last_backup_index = agent.battle_agent.trained_steps // TRAINING_BACKUP_INTERVAL
+        self.last_backup_index = battle_agent.trained_steps // TRAINING_BACKUP_INTERVAL
+
+    def new_client_agent(self) -> Agent:
+        """Build a per-client orchestrator that shares the battle model."""
+        return Agent(battle_agent=self.battle_agent)
 
     def save_milestone_if_needed(self) -> None:
         """Save periodic latest and milestone checkpoints after enough steps."""
-        backup_index = self.agent.battle_agent.trained_steps // TRAINING_BACKUP_INTERVAL
+        backup_index = self.battle_agent.trained_steps // TRAINING_BACKUP_INTERVAL
         if backup_index <= self.last_backup_index:
             return
 
         self.last_backup_index = backup_index
         backup_step = backup_index * TRAINING_BACKUP_INTERVAL
         save_battle_checkpoint(
-            self.agent,
+            self.battle_agent,
             self.latest_path,
             f"training milestone {backup_step}",
         )
         save_battle_checkpoint(
-            self.agent,
+            self.battle_agent,
             battle_backup_path(backup_step, self.battle_agent_type),
             f"training milestone backup {backup_step}",
         )
@@ -375,7 +381,8 @@ def run_training_client(
     game = Game(character=0, base_url=base_url)
     player = Player(character=game.character)
     reward_model = BattleProgressReward()
-    agent = shared.agent
+    # Per-client orchestrator with its own rollout collector over the shared model.
+    agent = shared.new_client_agent()
     episode = 1
     final_client_status = "Stopped"
 
@@ -414,7 +421,7 @@ def run_training_client(
         action_counts = {}
         with shared.agent_lock:
             epsilon_start = agent.battle_agent.epsilon
-            replay_start = len(agent.battle_agent.replay_buffer)
+            replay_start = agent.battle_agent.buffered_steps()
 
         logging.info("%s starting episode %d base_url=%s", client_id, episode, base_url)
 
@@ -626,7 +633,7 @@ def run_training_client(
                     with shared.agent_lock:
                         train_step = agent.battle_agent.trained_steps
                         train_epsilon = agent.battle_agent.epsilon
-                        train_replay_size = len(agent.battle_agent.replay_buffer)
+                        train_replay_size = agent.battle_agent.buffered_steps()
                         train_learn_steps = agent.battle_agent.learn_steps
                     tensorboard.add_scalars(
                         f"clients/{client_id}/train",
@@ -641,7 +648,7 @@ def run_training_client(
                     )
 
             with shared.agent_lock:
-                print_replay_size = len(agent.battle_agent.replay_buffer)
+                print_replay_size = agent.battle_agent.buffered_steps()
                 print_epsilon = agent.battle_agent.epsilon
             print(
                 client_id,
@@ -656,7 +663,7 @@ def run_training_client(
             if dashboard is not None:
                 with shared.agent_lock:
                     epsilon = agent.battle_agent.epsilon
-                    replay_size = len(agent.battle_agent.replay_buffer)
+                    replay_size = agent.battle_agent.buffered_steps()
                     trained_steps = agent.battle_agent.trained_steps
                     learn_steps = agent.battle_agent.learn_steps
                 dashboard.update_step(
@@ -709,7 +716,7 @@ def run_training_client(
         max_loss = max(losses) if losses else None
         with shared.agent_lock:
             epsilon_end = agent.battle_agent.epsilon
-            replay_end = len(agent.battle_agent.replay_buffer)
+            replay_end = agent.battle_agent.buffered_steps()
         final_run = final_raw_state.get("run", {})
         final_floor = final_run.get("floor", 0)
         final_act = final_run.get("act", 0)
@@ -814,7 +821,7 @@ def run_training_client(
             try:
                 with shared.agent_lock:
                     save_battle_checkpoint(
-                        agent,
+                        shared.battle_agent,
                         shared.latest_path,
                         f"{client_id} episode {episode}",
                     )
@@ -873,13 +880,13 @@ def main():
     if tensorboard.enabled:
         logging.info("Writing TensorBoard training metrics to %s", tensorboard.log_dir)
 
-    agent = Agent(battle_agent_type=battle_agent_type)
+    battle_agent = create_battle_agent(battle_agent_type)
     checkpoint_dir = battle_agent_checkpoint_dir(battle_agent_type)
     latest_path = battle_latest_path(battle_agent_type)
     checkpoint_dir.mkdir(parents=True, exist_ok=True)
     if latest_path.exists():
         try:
-            agent.battle_agent.load(str(latest_path))
+            battle_agent.load(str(latest_path))
             logging.info(
                 "Loaded %s battle agent model from %s",
                 battle_agent_type,
@@ -899,7 +906,7 @@ def main():
             latest_path,
         )
 
-    shared = SharedTrainingState(agent, battle_agent_type)
+    shared = SharedTrainingState(battle_agent, battle_agent_type)
     stop_event = threading.Event()
     client_urls = training_client_urls(args)
     threads = []
