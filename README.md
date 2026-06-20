@@ -18,6 +18,13 @@ Run training:
 uv run sts2rl-train
 ```
 
+Optionally pretrain the battle agent on recorded human play before training
+(behavioral cloning), then let training resume from the pretrained checkpoint:
+
+```bash
+uv run sts2rl-pretrain --recordings /path/to/recordings --battle-agent DQN
+```
+
 Evaluate checkpoints:
 
 ```bash
@@ -62,6 +69,7 @@ See [Training](docs/training.md) and [Evaluation](docs/evaluation.md) for the fu
 - [Environment](docs/environment.md)
 - [Agents](docs/agents.md)
 - [Training](docs/training.md)
+- [Pretraining (Behavioral Cloning)](docs/pretraining.md)
 - [Evaluation](docs/evaluation.md)
 - [Seeds](docs/seeds.md)
 - [Rewards](docs/rewards.md)
