@@ -35,6 +35,7 @@ uv run sts2rl-evaluate --episodes 3 --client-port 15526
 | `--max-steps` | integer | `0` | Maximum steps per episode. `0` means no step limit. |
 | `--sleep` | float | `0.3` | Seconds to sleep between evaluation steps. |
 | `--csv` | path | none | Optional CSV output path for checkpoint summaries. |
+| `--tensorboard-logdir` | path | none | Optional TensorBoard log directory for checkpoint summary metrics. |
 | `--reset` | flag | on | Reset/start a fresh run before each evaluation episode. |
 | `--no-reset`, `--current-state` | flag | off | Start episodes from the current backend game state instead of resetting. |
 | `--live` | flag | off | Serve the live evaluation dashboard over HTTP. |
@@ -66,10 +67,13 @@ uv run sts2rl-evaluate --episodes 5 --seed EVALRUN --csv results/eval.csv
 uv run sts2rl-evaluate --client-port 15526 --client-port 15527 --episodes 3
 uv run sts2rl-evaluate --checkpoint-dir checkpoints --max-steps 200 --sleep 0
 uv run sts2rl-evaluate --no-reset --live --auto-pause
+uv run sts2rl-evaluate --tensorboard-logdir runs/evaluation
+tensorboard --logdir runs/evaluation
 ```
 
 ## Outputs
 
 - Console summary for each evaluated checkpoint
 - Optional CSV from `--csv`
+- Optional TensorBoard event files under `--tensorboard-logdir`
 - Optional live dashboard when `--live` or `--live-html` is used

@@ -31,13 +31,14 @@ class GameEnv:
             timeout=timeout,
         )
         self.action_dispatcher = ActionDispatcher(self.client)
+        self.in_battle = False
 
     def reset(self, run_seed: str | None = None) -> dict:
         """Navigate menus until a run state is active and return raw game state."""
         if run_seed is not None:
             self.run_seed = run_seed
 
-        raw_state = self.client.get_state()
+        raw_state = self._annotate_state_context(self.client.get_state())
 
         if raw_state.get("state_type") == "game_over":
             raw_state = self._menu_select_state("main_menu")
@@ -93,14 +94,14 @@ class GameEnv:
             run.get("floor", 0),
             run.get("ascension", 0),
         )
-        return raw_state
+        return self._annotate_state_context(raw_state)
 
     def step(self, action: dict) -> tuple[dict, bool, dict]:
         """Dispatch an action and return next raw state, done flag, and API info."""
         try:
             api_result = self.action_dispatcher.dispatch(action)
         except Exception as exc:
-            raw_state = self.client.get_state()
+            raw_state = self._annotate_state_context(self.client.get_state())
             done = raw_state.get("state_type") == "game_over"
             info = {
                 "error": str(exc),
@@ -122,7 +123,7 @@ class GameEnv:
 
     def get_state(self) -> dict:
         """Return the current raw game state from STS2MCP."""
-        return self.client.get_state()
+        return self._annotate_state_context(self.client.get_state())
 
     def get_player_detail(self) -> dict:
         """Return full local player details for the active run."""
@@ -132,13 +133,35 @@ class GameEnv:
         """Extract the raw state payload from supported STS2MCP response shapes."""
         if isinstance(api_result, dict):
             if isinstance(api_result.get("state"), dict):
-                return api_result["state"]
+                return self._annotate_state_context(api_result["state"])
             if isinstance(api_result.get("raw_state"), dict):
-                return api_result["raw_state"]
+                return self._annotate_state_context(api_result["raw_state"])
             if api_result.get("state_type") is not None:
-                return api_result
+                return self._annotate_state_context(api_result)
 
         raise STS2ClientError(f"Action response did not include state: {api_result}")
+
+    def _annotate_state_context(self, raw_state: dict) -> dict:
+        """Attach stateful context that STS2MCP overlays may omit."""
+        state_type = raw_state.get("state_type")
+        if state_type in {"monster", "elite", "boss"}:
+            self.in_battle = True
+        elif state_type in {
+            "rewards",
+            "card_reward",
+            "map",
+            "rest",
+            "rest_site",
+            "shop",
+            "event",
+            "treasure",
+            "game_over",
+            "menu",
+        }:
+            self.in_battle = False
+
+        raw_state["in_battle"] = self.in_battle
+        return raw_state
 
     def _menu_select_state(self, option: str, seed: str | None = None) -> dict:
         """Select a menu option and return the resulting raw state."""

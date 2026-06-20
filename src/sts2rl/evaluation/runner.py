@@ -6,10 +6,9 @@ import time
 from pathlib import Path
 from typing import Callable
 
-from sts2rl.agents.orchestrator import Agent, BATTLE_SCREEN_TYPES
+from sts2rl.agents.orchestrator import Agent, is_battle_policy_state, normalize_battle_agent_type
 from sts2rl.flow.battle_flow import (
     advance_forced_end_turn_states,
-    advance_forced_hand_select_states,
     fold_reward_details,
     forced_end_turn_q_values,
     is_forced_end_turn_state,
@@ -30,7 +29,7 @@ def choose_eval_action(agent: Agent, raw_state: dict) -> dict:
         return forced_action
 
     state_type = raw_state.get("state_type")
-    if state_type in BATTLE_SCREEN_TYPES:
+    if is_battle_policy_state(raw_state):
         return agent.battle_agent.choose_action(raw_state, training=False)
 
     policy_state = {
@@ -43,7 +42,7 @@ def choose_eval_action(agent: Agent, raw_state: dict) -> dict:
 def current_q_values(agent: Agent, raw_state: dict, selected_action: dict | None = None) -> dict:
     """Return masked Q-values for a battle state when a model is available."""
     state_type = raw_state.get("state_type")
-    if state_type not in BATTLE_SCREEN_TYPES:
+    if not is_battle_policy_state(raw_state):
         return {
             "available": False,
             "reason": f"No Q model is used for screen_type={state_type}",
@@ -101,34 +100,6 @@ def evaluate_episode(
         if dashboard is not None:
             dashboard.wait_if_paused()
 
-        if raw_state.get("state_type") == "hand_select":
-            (
-                raw_state,
-                auto_reward,
-                auto_done,
-                auto_steps,
-            ) = advance_forced_hand_select_states(
-                game,
-                agent,
-                reward_model,
-                raw_state,
-            )
-            if auto_steps:
-                reward_details = fold_reward_details({}, auto_reward, auto_steps)
-                episode_reward += auto_reward
-                folded_step_count = len(auto_steps)
-                steps += folded_step_count
-                if reward_details.get("type") == "battle":
-                    battle_reward += reward_details.get("total", auto_reward)
-                    battle_steps += folded_step_count
-                    if reward_details.get("result") == "won":
-                        battle_wins += 1
-                    if reward_details.get("result") == "lost":
-                        battle_losses += 1
-                if auto_done:
-                    break
-                continue
-
         refresh_player_detail_for_map(game, player, raw_state)
 
         forced_end_turn = is_forced_end_turn_state(agent, raw_state)
@@ -152,9 +123,7 @@ def evaluate_episode(
         auto_steps = []
         if next_raw_state is not None and not done:
             for advance_forced_states in (
-                advance_forced_hand_select_states,
                 advance_forced_end_turn_states,
-                advance_forced_hand_select_states,
             ):
                 if done:
                     break
@@ -271,12 +240,14 @@ def evaluate_checkpoint(
     client_id: str = "client-1",
     pause_between_episodes: bool = True,
     after_episode: Callable[[str, str, str, int], None] | None = None,
+    battle_agent_type: str = "DQN",
 ) -> dict:
     """Load a checkpoint, run evaluation episodes, and summarize results."""
     if dashboard is not None:
         dashboard.wait_if_paused()
 
-    agent = Agent()
+    battle_agent_type = normalize_battle_agent_type(battle_agent_type)
+    agent = Agent(battle_agent_type=battle_agent_type)
     agent.battle_agent.load(str(checkpoint_path))
     agent.battle_agent.model.eval()
 
@@ -322,6 +293,7 @@ def evaluate_checkpoint(
             "trained_steps": agent.battle_agent.trained_steps,
             "learn_steps": agent.battle_agent.learn_steps,
             "epsilon": agent.battle_agent.epsilon,
+            "battle_agent": battle_agent_type,
             "game_mode": game_mode,
             "start_mode": "reset" if reset_environment else "current_state",
             "seeds": ",".join(result["seed"] for result in episode_results),

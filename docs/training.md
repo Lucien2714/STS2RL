@@ -8,7 +8,7 @@ Default behavior:
 - uses one shared agent across all configured clients
 - battle actions use `training=True`
 - battle transitions are written to replay
-- DQN updates run after battle transitions
+- the selected battle agent updates after battle transitions
 - latest checkpoint is saved every 10 episodes
 - milestone backups are saved every 20,000 trained steps
 - reconnect recovery is preserved from the prototype
@@ -23,10 +23,12 @@ uv run sts2rl-train
 
 | Parameter | Type | Default | Description |
 |---|---|---:|---|
+| `--battle-agent` | `DQN` or `PPO` | `DQN` | Battle agent implementation to train. |
 | `--client-host` | string | `localhost` | Host used when building STS2MCP API URLs from `--client-port`. |
 | `--client-port`, `--mcp-port` | integer, repeatable | `15526` | STS2MCP API port for a game client. Repeat this flag to train with multiple running clients. |
 | `--base-url` | URL, repeatable | none | Full STS2MCP API base URL for one client. Use this when host/port construction is not enough. |
 | `--episode-log` | path | `logs/training_episodes.jsonl` | JSONL file that receives one summary record per completed episode. |
+| `--tensorboard-logdir` | path | none | Optional TensorBoard log directory for training metrics. |
 | `--live` | flag | off | Start the live training dashboard HTTP and WebSocket servers. |
 | `--live-html` | path | none | Write a static copy of the live dashboard HTML to this path. Also enables dashboard setup. |
 | `--live-http-host` | string | `127.0.0.1` | Interface for the live dashboard HTTP server. |
@@ -45,15 +47,21 @@ Examples:
 
 ```bash
 uv run sts2rl-train --client-port 15526
+uv run sts2rl-train --battle-agent PPO --client-port 15526
 uv run sts2rl-train --client-port 15526 --client-port 15527
 uv run sts2rl-train --base-url http://localhost:15526/api/v1
 uv run sts2rl-train --live --live-http-port 8774 --live-ws-port 8775
 uv run sts2rl-train --episode-log logs/experiment_a.jsonl
+uv run sts2rl-train --tensorboard-logdir runs/training
+tensorboard --logdir runs/training
 ```
 
 ## Outputs
 
-- Latest checkpoint: `checkpoints/battle_agent_latest.pt`
-- Milestone checkpoints: `checkpoints/battle_agent_step_<trained_steps>.pt`
+- Latest DQN checkpoint: `checkpoints/battleAgent/DQN/battleagent_latest.pt`
+- DQN milestone checkpoints: `checkpoints/battleAgent/DQN/battleagent_step_<trained_steps>.pt`
+- Latest PPO checkpoint: `checkpoints/battleAgent/PPO/battleagent_latest.pt`
+- PPO milestone checkpoints: `checkpoints/battleAgent/PPO/battleagent_step_<trained_steps>.pt`
 - Episode summaries: the `--episode-log` JSONL path
+- Optional TensorBoard event files under `--tensorboard-logdir`
 - Optional live dashboard: printed HTTP URL when `--live` or `--live-html` is used

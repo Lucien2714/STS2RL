@@ -6,6 +6,13 @@ import logging
 from pathlib import Path
 import threading
 import time
+from sts2rl.checkpoints.manager import (
+    battle_agent_checkpoint_dir,
+    battle_backup_path,
+    battle_latest_path,
+    normalize_battle_agent_type,
+    TRAINING_BACKUP_INTERVAL,
+)
 from sts2rl.env.game_env import Game
 from sts2rl.env.player import Player
 from sts2rl.env.rewards import BattleProgressReward
@@ -13,7 +20,6 @@ from sts2rl.flow.player_detail import refresh_player_detail_for_map
 from sts2rl.agents.orchestrator import Agent
 from sts2rl.flow.battle_flow import (
     advance_forced_end_turn_states,
-    advance_forced_hand_select_states,
     fold_reward_details,
     forced_end_turn_action_selection,
     forced_end_turn_q_values,
@@ -29,19 +35,12 @@ from sts2rl.training.config import (
 from sts2rl.training.dashboard import LiveTrainingDashboard
 from sts2rl.training.episode_log import EpisodeLogWriter
 from sts2rl.training.telemetry import action_selection_details, current_q_values
+from sts2rl.training.tensorboard import TensorBoardLogger
 
 SAVE_INTERVAL = 10
-TRAINING_BACKUP_INTERVAL = 20000
-CHECKPOINT_DIR = Path("checkpoints")
-BATTLE_MODEL_PATH = CHECKPOINT_DIR / "battle_agent_latest.pt"
 DEFAULT_EPISODE_LOG_PATH = Path("logs") / "training_episodes.jsonl"
 DEFAULT_CLIENT_PORT = 15526
 RECONNECT_POLL_SECONDS = 2.0
-
-
-def battle_backup_path(trained_steps: int) -> Path:
-    """Return the milestone checkpoint path for a trained-step count."""
-    return CHECKPOINT_DIR / f"battle_agent_step_{trained_steps}.pt"
 
 
 def save_battle_checkpoint(agent: Agent, path: Path, reason: str) -> None:
@@ -58,7 +57,13 @@ def save_battle_checkpoint(agent: Agent, path: Path, reason: str) -> None:
 
 def parse_args() -> argparse.Namespace:
     """Parse training CLI arguments."""
-    parser = argparse.ArgumentParser(description="Train the STS2DQN battle agent.")
+    parser = argparse.ArgumentParser(description="Train an STS2RL battle agent.")
+    parser.add_argument(
+        "--battle-agent",
+        choices=["DQN", "PPO"],
+        default="DQN",
+        help="Battle agent implementation to train.",
+    )
     parser.add_argument(
         "--live",
         action="store_true",
@@ -125,6 +130,12 @@ def parse_args() -> argparse.Namespace:
         default=DEFAULT_EPISODE_LOG_PATH,
         help="JSONL file that receives one summary record per completed episode.",
     )
+    parser.add_argument(
+        "--tensorboard-logdir",
+        type=Path,
+        default=None,
+        help="Optional TensorBoard log directory for training metrics.",
+    )
     return parser.parse_args()
 
 
@@ -145,8 +156,11 @@ def training_client_urls(args: argparse.Namespace) -> list[str]:
 class SharedTrainingState:
     """Synchronize one trainable agent across multiple training clients."""
 
-    def __init__(self, agent: Agent) -> None:
+    def __init__(self, agent: Agent, battle_agent_type: str) -> None:
         self.agent = agent
+        self.battle_agent_type = normalize_battle_agent_type(battle_agent_type)
+        self.checkpoint_dir = battle_agent_checkpoint_dir(self.battle_agent_type)
+        self.latest_path = battle_latest_path(self.battle_agent_type)
         self.agent_lock = threading.RLock()
         self.last_backup_index = agent.battle_agent.trained_steps // TRAINING_BACKUP_INTERVAL
 
@@ -160,12 +174,12 @@ class SharedTrainingState:
         backup_step = backup_index * TRAINING_BACKUP_INTERVAL
         save_battle_checkpoint(
             self.agent,
-            BATTLE_MODEL_PATH,
+            self.latest_path,
             f"training milestone {backup_step}",
         )
         save_battle_checkpoint(
             self.agent,
-            battle_backup_path(backup_step),
+            battle_backup_path(backup_step, self.battle_agent_type),
             f"training milestone backup {backup_step}",
         )
 
@@ -243,7 +257,7 @@ def wait_for_responsive_state(
     warned_at = 0.0
     while not stop_event.is_set():
         try:
-            raw_state = game.client.get_state()
+            raw_state = game.get_state()
             if dashboard is not None:
                 dashboard.update_client_status(client_id, base_url, "Reconnected", episode)
             logging.info("%s reconnected to %s", client_id, base_url)
@@ -354,6 +368,7 @@ def run_training_client(
     shared: SharedTrainingState,
     dashboard: LiveTrainingDashboard | None,
     episode_log: EpisodeLogWriter,
+    tensorboard: TensorBoardLogger,
     stop_event: threading.Event,
 ) -> None:
     """Run the training loop for one STS2MCP client."""
@@ -406,55 +421,6 @@ def run_training_client(
         while raw_state.get("state_type")!="game_over" and not stop_event.is_set():
             if dashboard is not None:
                 dashboard.wait_if_paused()
-            if raw_state.get("state_type") == "hand_select":
-                try:
-                    (
-                        advanced_state,
-                        auto_reward,
-                        auto_done,
-                        auto_steps,
-                    ) = advance_forced_hand_select_states(
-                        game,
-                        agent,
-                        reward_model,
-                        raw_state,
-                    )
-                except Exception as exc:
-                    recovered_state, restart_episode = recover_client_state_after_disconnect(
-                        game,
-                        client_id,
-                        base_url,
-                        dashboard,
-                        stop_event,
-                        episode,
-                        raw_state,
-                        exc,
-                    )
-                    if recovered_state is None or restart_episode:
-                        break
-                    raw_state = recovered_state
-                    final_raw_state = recovered_state
-                    continue
-                if auto_steps:
-                    reward_details = fold_reward_details({}, auto_reward, auto_steps)
-                    episode_reward += auto_reward
-                    folded_step_count = len(auto_steps)
-                    episode_steps += folded_step_count
-                    final_raw_state = advanced_state
-                    if reward_details.get("type") == "battle":
-                        step_battle_reward = reward_details.get("total", auto_reward)
-                        battle_reward += step_battle_reward
-                        current_battle_reward += step_battle_reward
-                        current_battle_steps += folded_step_count
-                        current_battle_hp_lost = reward_details.get(
-                            "hp_lost",
-                            current_battle_hp_lost,
-                        )
-                    raw_state = advanced_state
-                    done = done or auto_done
-                    if done:
-                        break
-                    continue
             prev_raw_state = raw_state
             refresh_player_detail_for_map(game, player, raw_state)
 
@@ -539,9 +505,7 @@ def run_training_client(
             if next_raw_state is not None and not done:
                 try:
                     for advance_forced_states in (
-                        advance_forced_hand_select_states,
                         advance_forced_end_turn_states,
-                        advance_forced_hand_select_states,
                     ):
                         if done:
                             break
@@ -659,6 +623,22 @@ def run_training_client(
                 if training_info["updated"]:
                     update_count += 1
                     losses.append(loss)
+                    with shared.agent_lock:
+                        train_step = agent.battle_agent.trained_steps
+                        train_epsilon = agent.battle_agent.epsilon
+                        train_replay_size = len(agent.battle_agent.replay_buffer)
+                        train_learn_steps = agent.battle_agent.learn_steps
+                    tensorboard.add_scalars(
+                        f"clients/{client_id}/train",
+                        {
+                            "loss": loss,
+                            "reward": reward,
+                            "epsilon": train_epsilon,
+                            "replay_size": train_replay_size,
+                            "learn_steps": train_learn_steps,
+                        },
+                        train_step,
+                    )
 
             with shared.agent_lock:
                 print_replay_size = len(agent.battle_agent.replay_buffer)
@@ -797,6 +777,37 @@ def run_training_client(
             "action_counts": dict(action_counts),
         }
         episode_log.append(episode_result)
+        with shared.agent_lock:
+            tensorboard_step = agent.battle_agent.trained_steps
+        tensorboard.add_scalars(
+            f"clients/{client_id}/episode",
+            {
+                "reward": episode_reward,
+                "battle_reward": battle_reward,
+                "steps": episode_steps,
+                "battle_steps": battle_steps,
+                "updates": update_count,
+                "final_floor": final_floor,
+                "final_act": final_act,
+                "avg_loss": avg_loss,
+                "min_loss": min_loss,
+                "max_loss": max_loss,
+                "epsilon_start": epsilon_start,
+                "epsilon_end": epsilon_end,
+                "replay_start": replay_start,
+                "replay_end": replay_end,
+                "wins": battle_wins,
+                "losses": battle_losses,
+            },
+            tensorboard_step,
+        )
+        for action_key, count in action_counts.items():
+            tensorboard.add_scalar(
+                f"clients/{client_id}/actions/{action_key}",
+                count,
+                tensorboard_step,
+            )
+        tensorboard.flush()
         if dashboard is not None:
             dashboard.add_episode_result(episode_result)
         if episode % SAVE_INTERVAL == 0:
@@ -804,7 +815,7 @@ def run_training_client(
                 with shared.agent_lock:
                     save_battle_checkpoint(
                         agent,
-                        BATTLE_MODEL_PATH,
+                        shared.latest_path,
                         f"{client_id} episode {episode}",
                     )
             except Exception as exc:
@@ -854,22 +865,41 @@ def main():
     episode_log = EpisodeLogWriter(args.episode_log)
     logging.info("Writing episode summaries to %s", episode_log.path)
 
-    agent = Agent()
-    CHECKPOINT_DIR.mkdir(parents=True, exist_ok=True)
-    if BATTLE_MODEL_PATH.exists():
+    battle_agent_type = normalize_battle_agent_type(args.battle_agent)
+    tensorboard = TensorBoardLogger(
+        args.tensorboard_logdir,
+        f"training_{battle_agent_type}_{time.strftime('%Y%m%d-%H%M%S')}",
+    )
+    if tensorboard.enabled:
+        logging.info("Writing TensorBoard training metrics to %s", tensorboard.log_dir)
+
+    agent = Agent(battle_agent_type=battle_agent_type)
+    checkpoint_dir = battle_agent_checkpoint_dir(battle_agent_type)
+    latest_path = battle_latest_path(battle_agent_type)
+    checkpoint_dir.mkdir(parents=True, exist_ok=True)
+    if latest_path.exists():
         try:
-            agent.battle_agent.load(str(BATTLE_MODEL_PATH))
-            logging.info("Loaded battle agent model from %s", BATTLE_MODEL_PATH)
+            agent.battle_agent.load(str(latest_path))
+            logging.info(
+                "Loaded %s battle agent model from %s",
+                battle_agent_type,
+                latest_path,
+            )
         except Exception as exc:
             logging.warning(
-                "Could not load battle agent model from %s; starting fresh. error=%s",
-                BATTLE_MODEL_PATH,
+                "Could not load %s battle agent model from %s; starting fresh. error=%s",
+                battle_agent_type,
+                latest_path,
                 exc,
             )
     else:
-        logging.info("No battle agent checkpoint found at %s; starting fresh", BATTLE_MODEL_PATH)
+        logging.info(
+            "No %s battle agent checkpoint found at %s; starting fresh",
+            battle_agent_type,
+            latest_path,
+        )
 
-    shared = SharedTrainingState(agent)
+    shared = SharedTrainingState(agent, battle_agent_type)
     stop_event = threading.Event()
     client_urls = training_client_urls(args)
     threads = []
@@ -883,7 +913,15 @@ def main():
             client_id = f"client-{index}"
             thread = threading.Thread(
                 target=run_training_client,
-                args=(client_id, base_url, shared, dashboard, episode_log, stop_event),
+                args=(
+                    client_id,
+                    base_url,
+                    shared,
+                    dashboard,
+                    episode_log,
+                    tensorboard,
+                    stop_event,
+                ),
                 name=f"trainer-{client_id}",
             )
             thread.start()
@@ -903,6 +941,7 @@ def main():
         if dashboard is not None:
             dashboard.finish()
             dashboard.close()
+        tensorboard.close()
 
 
 if __name__ == "__main__":

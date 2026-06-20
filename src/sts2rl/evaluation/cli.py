@@ -4,8 +4,12 @@ import argparse
 import logging
 from pathlib import Path
 import threading
+import time
 
-from sts2rl.checkpoints.manager import CHECKPOINT_DIR
+from sts2rl.checkpoints.manager import (
+    battle_agent_checkpoint_dir,
+    normalize_battle_agent_type,
+)
 
 from sts2rl.evaluation.checkpoints import find_checkpoints
 from sts2rl.evaluation.config import (
@@ -22,6 +26,7 @@ from sts2rl.evaluation.config import (
 from sts2rl.evaluation.dashboard import LiveEvaluationDashboard
 from sts2rl.evaluation.runner import evaluate_checkpoint, write_csv
 from sts2rl.evaluation.seeds import evaluation_client_episode_seeds
+from sts2rl.training.tensorboard import TensorBoardLogger
 
 DEFAULT_CLIENT_PORT = 15526
 
@@ -31,7 +36,18 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Evaluate each saved battle-agent checkpoint without training."
     )
-    parser.add_argument("--checkpoint-dir", type=Path, default=CHECKPOINT_DIR)
+    parser.add_argument(
+        "--battle-agent",
+        choices=["DQN", "PPO"],
+        default="DQN",
+        help="Battle agent implementation to evaluate.",
+    )
+    parser.add_argument(
+        "--checkpoint-dir",
+        type=Path,
+        default=None,
+        help="Directory containing checkpoints. Defaults to the selected battle agent directory.",
+    )
     parser.add_argument("--episodes", type=int, default=DEFAULT_EPISODES)
     parser.add_argument("--character", type=int, default=0)
     parser.add_argument(
@@ -83,6 +99,12 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--sleep", type=float, default=DEFAULT_SLEEP_SECONDS)
     parser.add_argument("--csv", type=Path, default=None)
+    parser.add_argument(
+        "--tensorboard-logdir",
+        type=Path,
+        default=None,
+        help="Optional TensorBoard log directory for evaluation metrics.",
+    )
     reset_group = parser.add_mutually_exclusive_group()
     reset_group.add_argument(
         "--reset",
@@ -247,9 +269,19 @@ def main() -> None:
         format="%(levelname)s:%(name)s:%(message)s",
     )
 
-    checkpoints = find_checkpoints(args.checkpoint_dir)
+    battle_agent_type = normalize_battle_agent_type(args.battle_agent)
+    tensorboard = TensorBoardLogger(
+        args.tensorboard_logdir,
+        f"evaluation_{battle_agent_type}_{time.strftime('%Y%m%d-%H%M%S')}",
+    )
+    if tensorboard.enabled:
+        logging.info("Writing TensorBoard evaluation metrics to %s", tensorboard.log_dir)
+
+    checkpoint_dir = args.checkpoint_dir or battle_agent_checkpoint_dir(battle_agent_type)
+    checkpoints = find_checkpoints(checkpoint_dir)
     if not checkpoints:
-        logging.warning("No checkpoints found in %s", args.checkpoint_dir)
+        logging.warning("No checkpoints found in %s", checkpoint_dir)
+        tensorboard.close()
         return
 
     dashboard_enabled = args.live or args.live_html is not None
@@ -299,7 +331,7 @@ def main() -> None:
                         checkpoint_path.name,
                         1,
                     )
-            logging.info("Evaluating checkpoint %s", checkpoint_path)
+            logging.info("Evaluating %s checkpoint %s", battle_agent_type, checkpoint_path)
             try:
                 result = evaluate_checkpoint_clients(
                     checkpoint_path,
@@ -307,12 +339,14 @@ def main() -> None:
                     args,
                     dashboard,
                     client_episode_seeds,
+                    battle_agent_type,
                 )
             except Exception as exc:
                 logging.exception("Could not evaluate checkpoint %s: %s", checkpoint_path, exc)
                 continue
 
             rows.append(result)
+            write_evaluation_tensorboard_result(tensorboard, result)
             if dashboard is not None:
                 dashboard.add_checkpoint_result(result)
             print_checkpoint_result(result)
@@ -326,6 +360,36 @@ def main() -> None:
     finally:
         if dashboard is not None:
             dashboard.close()
+        tensorboard.close()
+
+
+def write_evaluation_tensorboard_result(
+    tensorboard: TensorBoardLogger,
+    result: dict,
+) -> None:
+    """Write one checkpoint summary to TensorBoard."""
+    step = int(result.get("trained_steps", len(result.get("checkpoint", ""))))
+    tensorboard.add_scalars(
+        "evaluation",
+        {
+            "avg_reward": result.get("avg_reward"),
+            "avg_battle_reward": result.get("avg_battle_reward"),
+            "avg_steps": result.get("avg_steps"),
+            "avg_battle_steps": result.get("avg_battle_steps"),
+            "avg_floor": result.get("avg_floor"),
+            "max_floor": result.get("max_floor"),
+            "battle_wins": result.get("battle_wins"),
+            "battle_losses": result.get("battle_losses"),
+            "battle_win_rate": result.get("battle_win_rate"),
+            "timeouts": result.get("timeouts"),
+            "episodes": result.get("episodes"),
+            "clients": result.get("clients", 1),
+            "learn_steps": result.get("learn_steps"),
+            "epsilon": result.get("epsilon"),
+        },
+        step,
+    )
+    tensorboard.flush()
 
 
 def evaluate_checkpoint_clients(
@@ -334,6 +398,7 @@ def evaluate_checkpoint_clients(
     args: argparse.Namespace,
     dashboard: LiveEvaluationDashboard | None,
     client_episode_seeds: list[list[str]],
+    battle_agent_type: str,
 ) -> dict:
     """Evaluate one checkpoint using one or more STS2MCP clients."""
     if len(client_urls) == 1:
@@ -351,6 +416,7 @@ def evaluate_checkpoint_clients(
             dashboard,
             client_id="client-1",
             pause_between_episodes=args.auto_pause,
+            battle_agent_type=battle_agent_type,
         )
 
     results: list[dict] = []
@@ -391,6 +457,7 @@ def evaluate_checkpoint_clients(
                 client_id=client_id,
                 pause_between_episodes=False,
                 after_episode=episode_gate.wait if episode_gate is not None else None,
+                battle_agent_type=battle_agent_type,
             )
             with lock:
                 results.append(result)
@@ -504,3 +571,7 @@ def print_checkpoint_result(result: dict) -> None:
         f"avg_floor={result['avg_floor']:.1f} max_floor={result['max_floor']} "
         f"timeouts={result['timeouts']}"
     )
+
+
+if __name__ == "__main__":
+    main()

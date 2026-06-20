@@ -11,6 +11,7 @@ from sts2rl.agents.base import BattleAgent as BattleAgentBase
 from sts2rl.agents.selection import (
   can_confirm_selection,
   can_select_more,
+  selected_card_indices,
   selection_selected_count,
 )
 from sts2rl.data.card import Card, CardIdentity, CardManager, normalize_enchantment_id
@@ -40,10 +41,10 @@ BATTLE_MAX_POWERS = 259
 BATTLE_CARD_FEATURES = 10
 BATTLE_ENEMY_FEATURES = 11
 BATTLE_PLAYER_FEATURES = 10
-BATTLE_ACTION_TYPE_FEATURES = 5
+BATTLE_ACTION_TYPE_FEATURES = 8
 BATTLE_ACTION_IDENTITY_FEATURES = 3
 BATTLE_ACTION_TARGET_FEATURES = 3 + BATTLE_ENEMY_FEATURES
-BATTLE_ACTION_SCHEMA = "candidate_action_v1"
+BATTLE_ACTION_SCHEMA = "candidate_action_v2"
 
 
 class BattleQNetwork(nn.Module):
@@ -82,6 +83,9 @@ class BattleDQNAgent(BattleAgentBase):
     "use_potion",
     "combat_select_card",
     "combat_confirm_selection",
+    "select_card",
+    "confirm_selection",
+    "cancel_selection",
   )
 
   def __init__(
@@ -301,12 +305,15 @@ class BattleDQNAgent(BattleAgentBase):
     card = self._action_item(action, raw_state) if action_type in {
       "play_card",
       "combat_select_card",
+      "select_card",
     } else None
     if card is None:
       features.extend([0.0] * self.CARD_FEATURES)
       features.extend([0.0] * BATTLE_ACTION_IDENTITY_FEATURES)
     else:
-      card_index = self._parse_int(action.get("card_index", card.get("index", 0)))
+      card_index = self._parse_int(
+        action.get("card_index", action.get("index", card.get("index", 0)))
+      )
       features.extend(self._encode_hand_card(card, card_index, player))
       features.extend(self._encode_card_identity(Card.from_raw(card).identity))
 
@@ -325,6 +332,8 @@ class BattleDQNAgent(BattleAgentBase):
     state_type = raw_state.get("state_type")
     if state_type == "hand_select":
       return self._hand_select_candidates(raw_state)
+    if state_type == "card_select" and raw_state.get("in_battle") is True:
+      return self._card_select_candidates(raw_state)
 
     if state_type not in {"monster", "elite", "boss"}:
       return []
@@ -422,6 +431,15 @@ class BattleDQNAgent(BattleAgentBase):
 
     if action_type == "combat_confirm_selection":
       return "combat_confirm_selection"
+
+    if action_type == "select_card":
+      return f"select_card:{action['index']}"
+
+    if action_type == "confirm_selection":
+      return "confirm_selection"
+
+    if action_type == "cancel_selection":
+      return "cancel_selection"
 
     raise ValueError(f"Unknown game action: {action}")
 
@@ -529,6 +547,35 @@ class BattleDQNAgent(BattleAgentBase):
       candidates.append(self._candidate(
         {"type": "combat_confirm_selection"},
         "combat_confirm_selection",
+      ))
+    return candidates
+
+  def _card_select_candidates(self, raw_state: dict) -> list[dict]:
+    card_select = raw_state.get("card_select", {})
+    cards = card_select.get("cards", [])
+    selected_indices = selected_card_indices(card_select)
+    selected_count = selection_selected_count(
+      raw_state,
+      "card_select",
+      len(selected_indices),
+    )
+    candidates = []
+    if can_select_more(raw_state, "card_select", selected_count):
+      for fallback_index, card in enumerate(cards):
+        card_index = self._parse_int(card.get("index", fallback_index), fallback_index)
+        if card_index in selected_indices:
+          continue
+        action = {"type": "select_card", "index": card_index}
+        candidates.append(self._candidate(action, f"select_card:{card_index}"))
+    if can_confirm_selection(raw_state, "card_select", selected_count):
+      candidates.append(self._candidate(
+        {"type": "confirm_selection"},
+        "confirm_selection",
+      ))
+    if card_select.get("can_cancel", False):
+      candidates.append(self._candidate(
+        {"type": "cancel_selection"},
+        "cancel_selection",
       ))
     return candidates
 
@@ -712,6 +759,14 @@ class BattleDQNAgent(BattleAgentBase):
           return card
       return None
 
+    if action.get("type") == "select_card":
+      card_select = raw_state.get("card_select", {})
+      card_index = self._parse_int(action.get("index"), -1)
+      for fallback_index, card in enumerate(card_select.get("cards", [])):
+        if self._parse_int(card.get("index", fallback_index), fallback_index) == card_index:
+          return card
+      return None
+
     if action.get("type") == "use_potion":
       potions = player.get("potions", [])
       slot = self._parse_int(action.get("slot"), -1)
@@ -761,6 +816,27 @@ class BattleDQNAgent(BattleAgentBase):
           "type": "combat_select_card",
           "card_index": self._parse_int(cards[0].get("index", 0)),
         }
+
+    if raw_state.get("state_type") == "card_select":
+      card_select = raw_state.get("card_select", {})
+      selected_indices = selected_card_indices(card_select)
+      selected_count = selection_selected_count(
+        raw_state,
+        "card_select",
+        len(selected_indices),
+      )
+      if can_confirm_selection(raw_state, "card_select", selected_count):
+        return {"type": "confirm_selection"}
+
+      cards = card_select.get("cards", [])
+      if cards and can_select_more(raw_state, "card_select", selected_count):
+        return {
+          "type": "select_card",
+          "index": self._parse_int(cards[0].get("index", 0)),
+        }
+
+      if card_select.get("can_cancel", False):
+        return {"type": "cancel_selection"}
 
     return {"type": "end_turn"}
 

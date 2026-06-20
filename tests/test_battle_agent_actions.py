@@ -1,6 +1,14 @@
 """Tests for battle-agent action masking."""
 
 from sts2rl.agents.battle.dqn_agent import BattleDQNAgent
+from sts2rl.agents.event.rule_based import EventPolicy
+from sts2rl.agents.orchestrator import Agent
+from sts2rl.env.constants import (
+    BATTLE_ENEMY_DAMAGE_REWARD,
+    BATTLE_ENEMY_KILL_REWARD,
+    BATTLE_UNUSED_ENERGY_PENALTY,
+    BATTLE_WIN_REWARD,
+)
 from sts2rl.env.rewards import BattleProgressReward
 
 
@@ -252,6 +260,103 @@ def test_enemy_target_type_variants_generate_targeted_actions():
     assert "play_card:BASH:target:1" in action_keys
 
 
+def test_in_battle_card_select_generates_per_card_candidates():
+    """Battle-context card_select should expose each concrete card as a candidate."""
+    agent = BattleDQNAgent()
+    raw_state = {
+        "state_type": "card_select",
+        "in_battle": True,
+        "card_select": {
+            "screen_type": "simple_select",
+            "prompt": "Choose a card to put on top of your Draw Pile.",
+            "cards": [
+                {"index": 0, "id": "STRIKE_IRONCLAD", "type": "Attack", "cost": "1"},
+                {"index": 1, "id": "DEFEND_IRONCLAD", "type": "Skill", "cost": "1"},
+            ],
+            "selected_count": 0,
+            "min_select": 1,
+            "remaining_to_min": 1,
+            "max_select": 1,
+            "required_select_count": 1,
+            "can_confirm": False,
+            "can_cancel": False,
+        },
+        "player": {
+            "energy": 3,
+            "max_energy": 3,
+            "hand": [],
+            "potions": [],
+            "status": [],
+            "relics": [],
+        },
+    }
+
+    action_keys = {
+        candidate["action_key"]
+        for candidate in agent.valid_action_candidates(raw_state)
+    }
+
+    assert action_keys == {"select_card:0", "select_card:1"}
+    assert agent.action_key({"type": "select_card", "index": 1}, raw_state) == "select_card:1"
+    assert len(agent.encode_action(raw_state, {"type": "select_card", "index": 1})) == (
+        agent.action_feature_size
+    )
+
+
+def test_in_battle_card_select_routes_to_battle_agent():
+    """Only battle-context card_select should route through the battle policy."""
+    agent = Agent()
+
+    def choose_card_select(raw_state, training=True):
+        assert raw_state["state_type"] == "card_select"
+        assert raw_state["in_battle"] is True
+        return {"type": "select_card", "index": 1}
+
+    agent.battle_agent.choose_action = choose_card_select
+    raw_state = {
+        "state_type": "card_select",
+        "in_battle": True,
+        "card_select": {
+            "cards": [
+                {"index": 0, "id": "STRIKE_IRONCLAD"},
+                {"index": 1, "id": "DEFEND_IRONCLAD"},
+            ],
+            "selected_count": 0,
+            "required_select_count": 1,
+            "can_confirm": False,
+        },
+    }
+
+    assert agent.choose_action({
+        "screen_type": "card_select",
+        "raw_state": raw_state,
+    }) == {"type": "select_card", "index": 1}
+
+
+def test_non_battle_card_select_still_uses_event_policy():
+    """Non-battle card_select remains outside the battle agent."""
+    policy = EventPolicy()
+    agent = Agent()
+    raw_state = {
+        "state_type": "card_select",
+        "in_battle": False,
+        "card_select": {
+            "cards": [
+                {"index": 0, "id": "STRIKE_IRONCLAD"},
+                {"index": 1, "id": "DEFEND_IRONCLAD"},
+            ],
+            "selected_count": 0,
+            "required_select_count": 1,
+            "can_confirm": False,
+        },
+    }
+
+    assert agent.choose_action({
+        "screen_type": "card_select",
+        "raw_state": raw_state,
+    }) == policy.choose_action(raw_state)
+
+
 def test_rewards_after_battle_counts_as_win_reward():
     """Reward screens should terminate the battle reward as a win."""
     reward_model = BattleProgressReward()
@@ -284,4 +389,31 @@ def test_rewards_after_battle_counts_as_win_reward():
     )
 
     assert details["result"] == "won"
-    assert reward >= 200.0
+    assert details["win_reward"] == BATTLE_WIN_REWARD
+    assert details["enemy_damage_reward"] == BATTLE_ENEMY_DAMAGE_REWARD
+    assert details["enemy_kill_reward"] == BATTLE_ENEMY_KILL_REWARD
+    assert reward == (
+        BATTLE_WIN_REWARD
+        + BATTLE_ENEMY_DAMAGE_REWARD
+        + BATTLE_ENEMY_KILL_REWARD
+    )
+
+
+def test_reward_shaping_uses_small_unused_energy_penalty():
+    """Ending a turn with unused energy should be a small nudge, not a hard rule."""
+    reward_model = BattleProgressReward()
+    prev_state = {
+        "state_type": "monster",
+        "battle": {"enemies": [{"entity_id": "ENEMY_0", "hp": 10, "max_hp": 10}]},
+        "player": {"hp": 50, "max_hp": 80, "gold": 20, "energy": 3},
+    }
+    next_state = {
+        "state_type": "monster",
+        "battle": {"enemies": [{"entity_id": "ENEMY_0", "hp": 10, "max_hp": 10}]},
+        "player": {"hp": 50, "max_hp": 80, "gold": 20, "energy": 0},
+    }
+
+    reward, details = reward_model.compute(prev_state, next_state, {"type": "end_turn"})
+
+    assert details["end_turn_energy_penalty"] == -3 * BATTLE_UNUSED_ENERGY_PENALTY
+    assert reward == details["end_turn_energy_penalty"]

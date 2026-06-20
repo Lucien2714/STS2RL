@@ -5,11 +5,17 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 
 from sts2rl.env.constants import (
+    BATTLE_ENEMY_DAMAGE_REWARD,
+    BATTLE_ENEMY_KILL_REWARD,
     BATTLE_GOLD_LOSS_PENALTY,
+    BATTLE_HP_LOSS_PENALTY,
     BATTLE_LOSS_PENALTY,
     BATTLE_MAX_HP_LOSS_PENALTY,
+    BATTLE_POTION_USE_PENALTY,
     BATTLE_REWARD_STATE_TYPES,
     BATTLE_STATE_TYPES,
+    BATTLE_UNUSED_ENERGY_PENALTY,
+    BATTLE_WIN_REWARD,
 )
 from sts2rl.env.state import (
     battle_has_alive_enemy,
@@ -69,13 +75,17 @@ class BattleProgressReward(RewardModel):
         action: dict | None = None,
     ) -> tuple[float, dict]:
         """Compute reward for one raw-state transition."""
-        if prev_state.get("state_type") in BATTLE_STATE_TYPES:
+        if self._is_battle_reward_state(prev_state):
             reward, details = self._compute_battle_reward(prev_state, next_state, action)
         else:
             reward, details = self._compute_default_reward(prev_state, next_state)
 
         self._last_player_hp = player_hp(next_state, self._last_player_hp)
         return reward, details
+
+    def _is_battle_reward_state(self, state: dict) -> bool:
+        """Return whether a transition should use battle reward shaping."""
+        return state.get("state_type") in BATTLE_STATE_TYPES or state.get("in_battle") is True
 
     def _compute_default_reward(
         self,
@@ -158,7 +168,7 @@ class BattleProgressReward(RewardModel):
         total_max_hp_lost = max(0, battle_start_max_hp - next_max_hp)
 
         potion_used = bool(action and action.get("type") == "use_potion")
-        potion_penalty = -5.0 if potion_used else 0.0
+        potion_penalty = -BATTLE_POTION_USE_PENALTY if potion_used else 0.0
         prev_state_type = prev_state.get("state_type")
         next_state_type = next_state.get("state_type")
         battle_result = self._battle_result(prev_state, next_state)
@@ -167,12 +177,12 @@ class BattleProgressReward(RewardModel):
             next_state,
             count_missing_as_dead=battle_result != "lost",
         )
-        enemy_damage_reward = float(enemy_hp_lost)
-        enemy_kill_reward = float(enemies_killed) * 10.0
+        enemy_damage_reward = float(enemy_hp_lost) * BATTLE_ENEMY_DAMAGE_REWARD
+        enemy_kill_reward = float(enemies_killed) * BATTLE_ENEMY_KILL_REWARD
         end_turn_energy_penalty = self._end_turn_energy_penalty(prev_state, action)
-        win_reward = 200.0 if battle_result == "won" else 0.0
+        win_reward = BATTLE_WIN_REWARD if battle_result == "won" else 0.0
         loss_penalty = -BATTLE_LOSS_PENALTY if battle_result == "lost" else 0.0
-        hp_penalty = -float(step_hp_lost)
+        hp_penalty = -float(step_hp_lost) * BATTLE_HP_LOSS_PENALTY
         gold_penalty = (
             -float(total_gold_lost) * BATTLE_GOLD_LOSS_PENALTY
             if battle_result is not None
@@ -237,7 +247,7 @@ class BattleProgressReward(RewardModel):
         """Infer battle termination status from adjacent raw states."""
         prev_state_type = prev_state.get("state_type")
         next_state_type = next_state.get("state_type")
-        if prev_state_type not in BATTLE_STATE_TYPES:
+        if not self._is_battle_reward_state(prev_state):
             return None
         if next_state_type == "game_over":
             return "lost"
@@ -283,7 +293,7 @@ class BattleProgressReward(RewardModel):
             return 0.0
 
         energy = self._parse_int(prev_state.get("player", {}).get("energy", 0))
-        return -5 * float(max(0, energy))
+        return -BATTLE_UNUSED_ENERGY_PENALTY * float(max(0, energy))
 
     def _parse_int(self, value: object, default: int = 0) -> int:
         """Parse an integer-like value with a safe default."""

@@ -2,7 +2,7 @@
 
 from sts2rl.agents.battle.dqn_agent import BattleDQNAgent
 from sts2rl.agents.event.rule_based import EventPolicy
-from sts2rl.agents.orchestrator import Agent, BATTLE_SCREEN_TYPES
+from sts2rl.agents.orchestrator import Agent, is_battle_policy_state
 from sts2rl.flow.battle_flow import advance_forced_hand_select_states
 
 
@@ -84,27 +84,24 @@ def test_card_select_picks_until_required_count_before_confirming():
     assert policy.choose_action(state) == {"type": "select_card", "index": 1}
 
 
-def test_auto_advance_finishes_hand_select_prompt_without_outer_loop_steps():
-    """Hand-select auto-advance should select required cards and confirm."""
+def test_auto_advance_leaves_hand_select_for_battle_policy():
+    """Hand-select prompts should no longer be auto-advanced around the agent."""
     agent = Agent()
     game = HandSelectGame()
+    initial_state = hand_select_state()
 
     raw_state, reward, done, auto_steps = advance_forced_hand_select_states(
         game,
         agent,
         ZeroReward(),
-        hand_select_state(),
+        initial_state,
     )
 
-    assert raw_state == {"state_type": "monster"}
+    assert raw_state == initial_state
     assert reward == 0.0
     assert done is False
-    assert game.actions == [
-        {"type": "combat_select_card", "card_index": 0},
-        {"type": "combat_select_card", "card_index": 1},
-        {"type": "combat_confirm_selection"},
-    ]
-    assert len(auto_steps) == 3
+    assert game.actions == []
+    assert auto_steps == []
 
 
 def test_card_select_confirms_after_required_count_is_met():
@@ -135,8 +132,8 @@ def test_card_select_confirms_after_required_count_is_met():
     assert policy.choose_action(state) == {"type": "confirm_selection"}
 
 
-def test_orchestrator_selects_hand_card_before_required_count():
-    """The top-level forced transition should respect exact hand-select counts."""
+def test_orchestrator_routes_hand_select_to_battle_agent():
+    """Hand-select is a battle policy state."""
     agent = Agent()
     raw_state = {
         "state_type": "hand_select",
@@ -157,20 +154,24 @@ def test_orchestrator_selects_hand_card_before_required_count():
         },
     }
 
-    assert agent._forced_transition_action(raw_state) == {
-        "type": "combat_select_card",
-        "card_index": 1,
-    }
+    assert agent._forced_transition_action(raw_state) is None
+    assert is_battle_policy_state(raw_state) is True
+    assert agent.choose_action({
+        "screen_type": "hand_select",
+        "raw_state": raw_state,
+    }) == {"type": "combat_select_card", "card_index": 1, "action_key": "combat_select_card:1"}
 
 
-def test_orchestrator_fast_selects_hand_cards_without_battle_dqn():
-    """Hand-select prompts should be handled as fast forced transitions."""
+def test_orchestrator_uses_battle_agent_for_hand_select():
+    """Hand-select prompts should route through the trainable battle agent."""
     agent = Agent()
 
-    def fail_battle_choice(*args, **kwargs):
-        raise AssertionError("hand_select should not route through battle DQN")
+    def choose_hand_select(raw_state, training=True):
+        assert raw_state["state_type"] == "hand_select"
+        assert training is True
+        return {"type": "combat_select_card", "card_index": 1}
 
-    agent.battle_agent.choose_action = fail_battle_choice
+    agent.battle_agent.choose_action = choose_hand_select
     raw_state = {
         "state_type": "hand_select",
         "hand_select": {
@@ -197,12 +198,11 @@ def test_orchestrator_fast_selects_hand_cards_without_battle_dqn():
         }
     )
 
-    assert "hand_select" not in BATTLE_SCREEN_TYPES
     assert action == {"type": "combat_select_card", "card_index": 1}
 
 
-def test_hand_select_steps_are_not_trained_as_battle_actions():
-    """Prompt selections should not run DQN replay/training updates."""
+def test_hand_select_steps_are_trained_as_battle_actions():
+    """Prompt selections should run battle replay/training updates."""
     agent = Agent()
     raw_state = {
         "state_type": "hand_select",
@@ -222,7 +222,9 @@ def test_hand_select_steps_are_not_trained_as_battle_actions():
         False,
     )
 
-    assert training_info is None
+    assert training_info is not None
+    assert training_info["action_type"] == "combat_select_card"
+    assert len(agent.battle_agent.replay_buffer) == 1
 
 
 def test_hand_select_candidates_confirm_only_after_required_count():

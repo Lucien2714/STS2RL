@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import math
 
-from sts2rl.agents.orchestrator import BATTLE_ACTION_TYPES, BATTLE_SCREEN_TYPES
+from sts2rl.agents.orchestrator import BATTLE_ACTION_TYPES, is_battle_policy_state
 
 
 def action_selection_details(
@@ -31,7 +31,7 @@ def action_selection_details(
             "q": selected_action_q(q_values),
         }
 
-    if state_type in BATTLE_SCREEN_TYPES and action.get("type") in BATTLE_ACTION_TYPES:
+    if is_battle_policy_state(raw_state) and action.get("type") in BATTLE_ACTION_TYPES:
         selection = dict(getattr(agent.battle_agent, "last_action_selection", {}) or {})
         selection.setdefault("method", "battle_unknown")
         selection.setdefault("reason", "battle action selection metadata unavailable")
@@ -49,7 +49,7 @@ def action_selection_details(
 def current_q_values(agent, raw_state: dict, selected_action: dict | None = None) -> dict:
     """Return masked Q-values for the current battle state when available."""
     state_type = raw_state.get("state_type")
-    if state_type not in BATTLE_SCREEN_TYPES:
+    if not is_battle_policy_state(raw_state):
         return {
             "available": False,
             "reason": f"No Q model is used for screen_type={state_type}",

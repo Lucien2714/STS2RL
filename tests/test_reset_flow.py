@@ -113,6 +113,39 @@ def test_step_returns_raw_state_and_api_info_without_reward():
     assert "reward_details" not in info
 
 
+def test_game_env_tracks_in_battle_across_card_select_overlay():
+    """Card-select overlays should inherit battle context from previous states."""
+    env = GameEnv()
+    battle_state = env._state_from_action_result({
+        "state": {
+            "state_type": "monster",
+            "battle": {"turn": "player", "is_play_phase": True, "enemies": []},
+            "player": {},
+        }
+    })
+    card_select_state = env._state_from_action_result({
+        "state": {
+            "state_type": "card_select",
+            "card_select": {
+                "screen_type": "simple_select",
+                "cards": [{"index": 0, "id": "STRIKE_IRONCLAD"}],
+            },
+            "player": {},
+        }
+    })
+    map_state = env._state_from_action_result({
+        "state": {
+            "state_type": "map",
+            "run": {"act": 1, "floor": 5},
+            "player": {},
+        }
+    })
+
+    assert battle_state["in_battle"] is True
+    assert card_select_state["in_battle"] is True
+    assert map_state["in_battle"] is False
+
+
 def test_refresh_player_detail_for_map_updates_player_model():
     """Map states should be enriched with player-detail before routing."""
     env = GameEnv()

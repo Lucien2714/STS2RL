@@ -3,39 +3,62 @@
 import logging
 
 from sts2rl.agents.battle.dqn_agent import BattleDQNAgent
+from sts2rl.agents.battle.ppo_agent import BattlePPOAgent
 from sts2rl.agents.map.rule_based import MapPolicy
 from sts2rl.agents.reward.rule_based import RewardPolicy
 from sts2rl.agents.shop.rule_based import ShopPolicy
 from sts2rl.agents.rest.rule_based import RestPolicy
 from sts2rl.agents.event.rule_based import EventPolicy
 from sts2rl.agents.default.rule_based import DefaultPolicy
-from sts2rl.agents.selection import (
-    can_confirm_selection,
-    can_select_more,
-    first_unselected_card_index,
-    selected_card_indices,
-    selection_selected_count,
-)
 
 
 logger = logging.getLogger(__name__)
 
 
 BATTLE_SCREEN_TYPES = {"monster", "elite", "boss"}
+BATTLE_PROMPT_TYPES = {"hand_select"}
 BATTLE_ACTION_TYPES = {
     "end_turn",
     "play_card",
     "use_potion",
     "combat_select_card",
     "combat_confirm_selection",
+    "select_card",
+    "confirm_selection",
+    "cancel_selection",
 }
+BATTLE_AGENT_TYPES = {
+    "DQN": BattleDQNAgent,
+    "PPO": BattlePPOAgent,
+}
+
+
+def normalize_battle_agent_type(agent_type: str) -> str:
+    """Return a canonical battle agent type name."""
+    agent_type = str(agent_type).strip().upper()
+    if agent_type not in BATTLE_AGENT_TYPES:
+        raise ValueError(f"Unsupported battle agent type: {agent_type!r}")
+    return agent_type
+
+
+def create_battle_agent(agent_type: str):
+    """Create a battle agent implementation by type name."""
+    return BATTLE_AGENT_TYPES[normalize_battle_agent_type(agent_type)]()
+
+
+def is_battle_policy_state(raw_state: dict) -> bool:
+    """Return whether a raw state should be controlled by the battle policy."""
+    state_type = raw_state.get("state_type")
+    if state_type in BATTLE_SCREEN_TYPES or state_type in BATTLE_PROMPT_TYPES:
+        return True
+    return state_type == "card_select" and raw_state.get("in_battle") is True
 
 
 class Agent:
     """Coordinate battle, map, reward, shop, rest, event, and fallback policies."""
 
-    def __init__(self):
-        self.battle_agent = BattleDQNAgent()
+    def __init__(self, battle_agent=None, battle_agent_type: str = "DQN"):
+        self.battle_agent = battle_agent or create_battle_agent(battle_agent_type)
         self.map_policy = MapPolicy()
         self.reward_policy = RewardPolicy()
         self.shop_policy = ShopPolicy()
@@ -50,14 +73,13 @@ class Agent:
 
         logger.debug("Agent: choosing action screen_type=%s", screen_type)
 
-        forced_action = self._forced_transition_action(raw_state)
-        if forced_action is not None:
-            logger.debug("Agent: selected forced transition action=%s", forced_action)
-            return forced_action
-
-        if screen_type in BATTLE_SCREEN_TYPES:
+        if is_battle_policy_state(raw_state):
             action = self.battle_agent.choose_action(raw_state, training=True)
-            logger.debug("Agent: selected BattleDQNAgent action=%s", action)
+            logger.debug(
+                "Agent: selected %s action=%s",
+                type(self.battle_agent).__name__,
+                action,
+            )
             return action
 
         if screen_type == "map":
@@ -91,38 +113,6 @@ class Agent:
 
     def _forced_transition_action(self, raw_state: dict) -> dict | None:
         """Return required confirmation actions before normal policy selection."""
-        state_type = raw_state.get("state_type")
-
-        if state_type == "hand_select":
-            hand_select = raw_state.get("hand_select", {})
-            selected_indices = selected_card_indices(hand_select)
-            selected_count = selection_selected_count(
-                raw_state,
-                "hand_select",
-                len(selected_indices),
-            )
-            if can_confirm_selection(raw_state, "hand_select", selected_count):
-                return {"type": "combat_confirm_selection"}
-            if can_select_more(raw_state, "hand_select", selected_count):
-                card_index = first_unselected_card_index(hand_select)
-                if card_index is not None:
-                    return {
-                        "type": "combat_select_card",
-                        "card_index": card_index,
-                    }
-            if hand_select.get("can_confirm", False):
-                return {"type": "combat_confirm_selection"}
-
-        if state_type == "card_select":
-            card_select = raw_state.get("card_select", {})
-            selected_count = selection_selected_count(
-                raw_state,
-                "card_select",
-                len(card_select.get("selected_cards", [])),
-            )
-            if can_confirm_selection(raw_state, "card_select", selected_count):
-                return {"type": "confirm_selection"}
-
         return None
 
     def train_from_step(
@@ -135,7 +125,7 @@ class Agent:
         reward_details: dict | None = None,
     ) -> dict | None:
         """Train the battle agent when a step belongs to the battle action space."""
-        if prev_raw_state.get("state_type") not in BATTLE_SCREEN_TYPES:
+        if not is_battle_policy_state(prev_raw_state):
             return None
 
         if action.get("type") not in BATTLE_ACTION_TYPES:
