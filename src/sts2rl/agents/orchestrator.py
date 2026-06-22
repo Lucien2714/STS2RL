@@ -4,18 +4,17 @@ import logging
 
 from sts2rl.agents.candidate_dqn_agent import DQNCandidateAgent
 from sts2rl.agents.candidate_ppo_agent import PPOCandidateAgent
+from sts2rl.agents.default.rule_based import DefaultPolicy
+from sts2rl.agents.event.rule_based import EventPolicy
 from sts2rl.agents.map.rule_based import MapPolicy
+from sts2rl.agents.rest.rule_based import RestPolicy
 from sts2rl.agents.reward.rule_based import RewardPolicy
 from sts2rl.agents.shop.rule_based import ShopPolicy
-from sts2rl.agents.rest.rule_based import RestPolicy
-from sts2rl.agents.event.rule_based import EventPolicy
-from sts2rl.agents.default.rule_based import DefaultPolicy
-from sts2rl.encoders.map_encoder import MapEncoder
-from sts2rl.encoders.reward_encoder import RewardEncoder
-from sts2rl.encoders.rest_encoder import RestEncoder
-from sts2rl.encoders.shop_encoder import ShopEncoder
 from sts2rl.encoders.event_encoder import EventEncoder
-
+from sts2rl.encoders.map_encoder import MapEncoder
+from sts2rl.encoders.rest_encoder import RestEncoder
+from sts2rl.encoders.reward_encoder import RewardEncoder
+from sts2rl.encoders.shop_encoder import ShopEncoder
 
 logger = logging.getLogger(__name__)
 
@@ -90,8 +89,7 @@ def create_screen_agents(agent_type: str = "PPO") -> dict:
     """Create one trainable agent per registered non-battle screen."""
     agent_cls = SCREEN_AGENT_TYPES[normalize_screen_agent_type(agent_type)]
     return {
-        screen: agent_cls(encoder=encoder_cls())
-        for screen, encoder_cls in SCREEN_ENCODERS.items()
+        screen: agent_cls(encoder=encoder_cls()) for screen, encoder_cls in SCREEN_ENCODERS.items()
     }
 
 
@@ -156,7 +154,9 @@ class Agent:
 
         # Trainable screen agent, when one is registered and has legal candidates.
         screen = screen_name_for_state(raw_state)
-        if screen in self.screen_agents and self.screen_agents[screen].valid_action_candidates(raw_state):
+        if screen in self.screen_agents and self.screen_agents[screen].valid_action_candidates(
+            raw_state
+        ):
             action = self.screen_rollouts[screen].choose_action(raw_state, training=True)
             logger.debug("Agent: selected %s screen agent action=%s", screen, action)
             return action

@@ -156,10 +156,12 @@ def test_orchestrator_routes_hand_select_to_battle_agent():
 
     assert agent._forced_transition_action(raw_state) is None
     assert is_battle_policy_state(raw_state) is True
-    assert agent.choose_action({
-        "screen_type": "hand_select",
-        "raw_state": raw_state,
-    }) == {"type": "combat_select_card", "card_index": 1, "action_key": "combat_select_card:1"}
+    assert agent.choose_action(
+        {
+            "screen_type": "hand_select",
+            "raw_state": raw_state,
+        }
+    ) == {"type": "combat_select_card", "card_index": 1, "action_key": "combat_select_card:1"}
 
 
 def test_orchestrator_uses_battle_agent_for_hand_select():
@@ -250,21 +252,17 @@ def test_hand_select_candidates_confirm_only_after_required_count():
     }
 
     action_keys = {
-        candidate["action_key"]
-        for candidate in battle_agent.valid_action_candidates(raw_state)
+        candidate["action_key"] for candidate in battle_agent.valid_action_candidates(raw_state)
     }
 
     assert action_keys == {"combat_select_card:1"}
 
-    raw_state["hand_select"]["selected_cards"].append(
-        {"index": 1, "id": "DEFEND_IRONCLAD"}
-    )
+    raw_state["hand_select"]["selected_cards"].append({"index": 1, "id": "DEFEND_IRONCLAD"})
     raw_state["hand_select"]["selected_count"] = 2
     raw_state["hand_select"]["remaining_to_min"] = 0
 
     action_keys = {
-        candidate["action_key"]
-        for candidate in battle_agent.valid_action_candidates(raw_state)
+        candidate["action_key"] for candidate in battle_agent.valid_action_candidates(raw_state)
     }
 
     assert action_keys == {"combat_confirm_selection"}

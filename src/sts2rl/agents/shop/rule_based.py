@@ -2,7 +2,6 @@
 
 import logging
 
-
 logger = logging.getLogger(__name__)
 
 
@@ -23,8 +22,6 @@ class ShopPolicy:
 
         # Placeholder:
         # do not buy anything for now
-        action = {
-            "type": "proceed"
-        }
+        action = {"type": "proceed"}
         logger.debug("ShopPolicy: selected action=%s", action)
         return action

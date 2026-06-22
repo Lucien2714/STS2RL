@@ -3,7 +3,7 @@
 import logging
 
 from sts2rl.actions.dispatcher import ActionDispatcher
-from sts2rl.env.mcp_client import STS2Client, STS2ClientError, GameCharacter
+from sts2rl.env.mcp_client import GameCharacter, STS2Client, STS2ClientError
 
 logger = logging.getLogger(__name__)
 
@@ -83,9 +83,7 @@ class GameEnv:
             )
 
         if raw_state.get("state_type") == "menu":
-            raise STS2ClientError(
-                f"Reset did not leave menu after 10 transitions: {raw_state}"
-            )
+            raise STS2ClientError(f"Reset did not leave menu after 10 transitions: {raw_state}")
 
         run = raw_state.get("run", {})
         logger.info(
@@ -166,9 +164,7 @@ class GameEnv:
     def _menu_select_state(self, option: str, seed: str | None = None) -> dict:
         """Select a menu option and return the resulting raw state."""
         logger.info("Reset menu_select option=%s seed=%s", option, seed)
-        raw_state = self._state_from_action_result(
-            self.client.menu_select(option, seed=seed)
-        )
+        raw_state = self._state_from_action_result(self.client.menu_select(option, seed=seed))
         logger.info(
             "Reset menu_select option=%s -> state_type=%s menu_screen=%s",
             option,

@@ -4,17 +4,17 @@ Generated from the STS2MCP API documentation:
 https://github.com/Gennadiyev/STS2MCP/blob/main/docs/raw-full.md
 """
 
-
 from __future__ import annotations
 
 from typing import Any, Literal, Optional
-import requests
 
+import requests
 
 GameMode = Literal["singleplayer", "multiplayer"]
 ResponseFormat = Literal["json", "markdown"]
 WikiItemType = Literal["all", "card", "relic"]
 GameCharacter = {0: "IRONCLAD", 1: "SILENT", 2: "REGENT", 3: "NECROBINDER", 4: "DEFECT"}
+
 
 class STS2ClientError(Exception):
     """Raised when the STS2_MCP API returns an error or invalid response."""

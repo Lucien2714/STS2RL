@@ -9,7 +9,6 @@ from pathlib import Path
 
 from sts2rl.evaluation.dashboard import LiveEvaluationHttpServer, LiveEvaluationWebSocketServer
 
-
 TRAINING_DASHBOARD_TEMPLATE_PATH = Path(__file__).with_name("dashboard_template.html")
 
 
@@ -225,13 +224,9 @@ class LiveTrainingDashboard:
         """Return a thread-safe copy of the dashboard state."""
         with self._data_lock:
             current_step = dict(self.current_step)
-            client_steps = {
-                client_id: dict(step)
-                for client_id, step in self.client_steps.items()
-            }
+            client_steps = {client_id: dict(step) for client_id, step in self.client_steps.items()}
             client_recent_steps = {
-                client_id: list(steps)
-                for client_id, steps in self.client_recent_steps.items()
+                client_id: list(steps) for client_id, steps in self.client_recent_steps.items()
             }
             recent_steps = list(self.recent_steps)
             episode_rows = list(self.episode_rows)

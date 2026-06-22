@@ -1,14 +1,13 @@
 """Local player model built from bundled data and live STS2MCP detail payloads."""
 
 from sts2rl.data.loader import (
-    DataStore,
-    DataIdMap,
     CardInstance,
+    DataIdMap,
+    DataStore,
     get_potion_index,
     get_relic_index,
     load_card,
 )
-
 
 CHARACTER_MAP = {
     0: "IRONCLAD",
@@ -142,10 +141,7 @@ class Player:
             player.get("deck_count"),
             len(self.deck_details),
         )
-        self.current_deck = [
-            self._card_instance_from_detail(card)
-            for card in self.deck_details
-        ]
+        self.current_deck = [self._card_instance_from_detail(card) for card in self.deck_details]
 
         self.relic_details = list(player.get("relics", []))
         self.current_relic = [

@@ -2,7 +2,6 @@
 
 import logging
 
-
 logger = logging.getLogger(__name__)
 
 
@@ -27,21 +26,14 @@ class RestPolicy:
         )
 
         if not options:
-            action = {
-                "type": "proceed"
-            }
+            action = {"type": "proceed"}
             logger.debug("RestPolicy: selected action=%s", action)
             return action
 
-        enabled_options = [
-            option for option in options
-            if option.get("is_enabled", True)
-        ]
+        enabled_options = [option for option in options if option.get("is_enabled", True)]
 
         if not enabled_options:
-            action = {
-                "type": "proceed"
-            }
+            action = {"type": "proceed"}
             logger.debug("RestPolicy: selected action=%s", action)
             return action
 

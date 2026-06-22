@@ -47,8 +47,7 @@ def test_ppo_choose_action_returns_legal_candidate_with_probability():
 
     action = agent.choose_action(raw_state, training=True)
     action_keys = {
-        candidate["action_key"]
-        for candidate in agent.valid_action_candidates(raw_state)
+        candidate["action_key"] for candidate in agent.valid_action_candidates(raw_state)
     }
 
     assert agent.action_key(action, raw_state) in action_keys
@@ -106,10 +105,12 @@ def test_orchestrator_accepts_ppo_battle_agent():
     battle_agent = BattlePPOAgent(rollout_steps=2, hidden_size=32)
     agent = Agent(battle_agent=battle_agent)
 
-    action = agent.choose_action({
-        "screen_type": "monster",
-        "raw_state": playable_battle_state(),
-    })
+    action = agent.choose_action(
+        {
+            "screen_type": "monster",
+            "raw_state": playable_battle_state(),
+        }
+    )
 
     assert agent.battle_agent is battle_agent
     assert action["type"] in {"end_turn", "play_card"}

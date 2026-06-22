@@ -7,7 +7,6 @@ from typing import Any, Iterable
 
 from sts2rl.data.loader import DataIdMap
 
-
 UNKNOWN_CARD_ID = "UNKNOWN_CARD"
 
 
@@ -180,10 +179,7 @@ class CardManager:
         """Return the best current hand index for a stable card identity."""
         candidates = self.matching_cards(identity)
         if require_playable:
-            candidates = [
-                card for card in candidates
-                if card.is_playable_with_energy(energy)
-            ]
+            candidates = [card for card in candidates if card.is_playable_with_energy(energy)]
         if not candidates:
             return None
 

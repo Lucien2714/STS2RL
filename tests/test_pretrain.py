@@ -51,12 +51,17 @@ def write_jsonl(path, samples, extra_lines=()):
     """Write samples in the mod's JSONL recording format."""
     with path.open("w", encoding="utf-8") as handle:
         for state, action in samples:
-            handle.write(json.dumps({
-                "ts": 0.0,
-                "state_type": state["state_type"],
-                "state": state,
-                "action": action,
-            }) + "\n")
+            handle.write(
+                json.dumps(
+                    {
+                        "ts": 0.0,
+                        "state_type": state["state_type"],
+                        "state": state,
+                        "action": action,
+                    }
+                )
+                + "\n"
+            )
         for line in extra_lines:
             handle.write(line + "\n")
 

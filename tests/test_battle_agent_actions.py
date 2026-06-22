@@ -48,8 +48,7 @@ def test_status_card_with_can_play_is_valid_self_action():
     }
 
     action_keys = {
-        candidate["action_key"]
-        for candidate in agent.valid_action_candidates(raw_state)
+        candidate["action_key"] for candidate in agent.valid_action_candidates(raw_state)
     }
 
     assert "play_card:SLIMED:self" in action_keys
@@ -85,8 +84,7 @@ def test_status_card_without_can_play_stays_invalid():
     }
 
     action_keys = {
-        candidate["action_key"]
-        for candidate in agent.valid_action_candidates(raw_state)
+        candidate["action_key"] for candidate in agent.valid_action_candidates(raw_state)
     }
 
     assert "play_card:SOME_STATUS:self" not in action_keys
@@ -252,8 +250,7 @@ def test_enemy_target_type_variants_generate_targeted_actions():
     }
 
     action_keys = {
-        candidate["action_key"]
-        for candidate in agent.valid_action_candidates(raw_state)
+        candidate["action_key"] for candidate in agent.valid_action_candidates(raw_state)
     }
 
     assert "play_card:STRIKE_IRONCLAD:target:0" in action_keys
@@ -294,8 +291,7 @@ def test_in_battle_card_select_generates_per_card_candidates():
     }
 
     action_keys = {
-        candidate["action_key"]
-        for candidate in agent.valid_action_candidates(raw_state)
+        candidate["action_key"] for candidate in agent.valid_action_candidates(raw_state)
     }
 
     assert action_keys == {"select_card:0", "select_card:1"}
@@ -329,10 +325,12 @@ def test_in_battle_card_select_routes_to_battle_agent():
         },
     }
 
-    assert agent.choose_action({
-        "screen_type": "card_select",
-        "raw_state": raw_state,
-    }) == {"type": "select_card", "index": 1}
+    assert agent.choose_action(
+        {
+            "screen_type": "card_select",
+            "raw_state": raw_state,
+        }
+    ) == {"type": "select_card", "index": 1}
 
 
 def test_non_battle_card_select_still_uses_event_policy():
@@ -353,10 +351,12 @@ def test_non_battle_card_select_still_uses_event_policy():
         },
     }
 
-    assert agent.choose_action({
-        "screen_type": "card_select",
-        "raw_state": raw_state,
-    }) == policy.choose_action(raw_state)
+    assert agent.choose_action(
+        {
+            "screen_type": "card_select",
+            "raw_state": raw_state,
+        }
+    ) == policy.choose_action(raw_state)
 
 
 def test_rewards_after_battle_counts_as_win_reward():
@@ -394,11 +394,7 @@ def test_rewards_after_battle_counts_as_win_reward():
     assert details["win_reward"] == BATTLE_WIN_REWARD
     assert details["enemy_damage_reward"] == BATTLE_ENEMY_DAMAGE_REWARD
     assert details["enemy_kill_reward"] == BATTLE_ENEMY_KILL_REWARD
-    assert reward == (
-        BATTLE_WIN_REWARD
-        + BATTLE_ENEMY_DAMAGE_REWARD
-        + BATTLE_ENEMY_KILL_REWARD
-    )
+    assert reward == (BATTLE_WIN_REWARD + BATTLE_ENEMY_DAMAGE_REWARD + BATTLE_ENEMY_KILL_REWARD)
 
 
 def test_reward_shaping_uses_small_unused_energy_penalty():
@@ -491,7 +487,12 @@ def test_potion_candidates_include_discard():
             "hand": [],
             "potions": [
                 {"slot": 0, "id": "FIRE_POTION", "target_type": "Enemy", "can_use_in_combat": True},
-                {"slot": 1, "id": "FAIRY_POTION", "target_type": "None", "can_use_in_combat": False},
+                {
+                    "slot": 1,
+                    "id": "FAIRY_POTION",
+                    "target_type": "None",
+                    "can_use_in_combat": False,
+                },
             ],
             "status": [],
             "relics": [],
@@ -499,8 +500,7 @@ def test_potion_candidates_include_discard():
     }
 
     action_keys = {
-        candidate["action_key"]
-        for candidate in agent.valid_action_candidates(raw_state)
+        candidate["action_key"] for candidate in agent.valid_action_candidates(raw_state)
     }
 
     # Both potions can be discarded, even the one that cannot be used in combat.

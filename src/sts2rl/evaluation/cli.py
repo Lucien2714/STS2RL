@@ -2,15 +2,14 @@
 
 import argparse
 import logging
-from pathlib import Path
 import threading
 import time
+from pathlib import Path
 
 from sts2rl.checkpoints.manager import (
     battle_agent_checkpoint_dir,
     normalize_battle_agent_type,
 )
-
 from sts2rl.evaluation.checkpoints import find_checkpoints
 from sts2rl.evaluation.config import (
     DEFAULT_EPISODES,
@@ -470,7 +469,9 @@ def evaluate_checkpoint_clients(
                     args.episodes,
                 )
         except Exception as exc:
-            logging.exception("%s could not evaluate checkpoint %s: %s", client_id, checkpoint_path, exc)
+            logging.exception(
+                "%s could not evaluate checkpoint %s: %s", client_id, checkpoint_path, exc
+            )
             if episode_gate is not None:
                 episode_gate.abort()
             with lock:
@@ -543,9 +544,7 @@ def aggregate_client_results(
             "timeouts": sum(result.get("timeouts", 0) for result in results),
             "seeds": ",".join(result.get("seeds", "") for result in results if result.get("seeds")),
             "ending_steps": ",".join(
-                result.get("ending_steps", "")
-                for result in results
-                if result.get("ending_steps")
+                result.get("ending_steps", "") for result in results if result.get("ending_steps")
             ),
         }
     )

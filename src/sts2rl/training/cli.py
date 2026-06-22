@@ -3,29 +3,28 @@
 import argparse
 import json
 import logging
-from pathlib import Path
 import threading
 import time
-from sts2rl.checkpoints.manager import (
-    agent_backup_path,
-    agent_checkpoint_dir,
-    agent_latest_path,
-    battle_agent_checkpoint_dir,
-    battle_backup_path,
-    battle_latest_path,
-    normalize_battle_agent_type,
-    TRAINING_BACKUP_INTERVAL,
-)
-from sts2rl.env.game_env import Game
-from sts2rl.env.player import Player
-from sts2rl.env.rewards import BattleProgressReward
-from sts2rl.flow.player_detail import refresh_player_detail_for_map
+from pathlib import Path
+
 from sts2rl.agents.orchestrator import (
     Agent,
     create_battle_agent,
     create_screen_agents,
     normalize_screen_agent_type,
 )
+from sts2rl.checkpoints.manager import (
+    TRAINING_BACKUP_INTERVAL,
+    agent_backup_path,
+    agent_latest_path,
+    battle_agent_checkpoint_dir,
+    battle_backup_path,
+    battle_latest_path,
+    normalize_battle_agent_type,
+)
+from sts2rl.env.game_env import Game
+from sts2rl.env.player import Player
+from sts2rl.env.rewards import BattleProgressReward
 from sts2rl.flow.battle_flow import (
     advance_forced_end_turn_states,
     fold_reward_details,
@@ -34,6 +33,7 @@ from sts2rl.flow.battle_flow import (
     is_forced_end_turn_state,
     should_skip_agent,
 )
+from sts2rl.flow.player_detail import refresh_player_detail_for_map
 from sts2rl.training.config import (
     DEFAULT_TRAINING_LIVE_HTTP_HOST,
     DEFAULT_TRAINING_LIVE_HTTP_PORT,
@@ -291,10 +291,7 @@ def is_connection_error_text(error: object) -> bool:
 
 def is_connection_action_error(info: dict) -> bool:
     """Return whether step info represents an action-time connection failure."""
-    return bool(
-        info.get("action_error")
-        and is_connection_error_text(info.get("error", ""))
-    )
+    return bool(info.get("action_error") and is_connection_error_text(info.get("error", "")))
 
 
 def is_main_menu(raw_state: dict) -> bool:
@@ -463,149 +460,84 @@ def run_training_client(
     final_client_status = "Stopped"
 
     try:
-      while not stop_event.is_set():
-        if dashboard is not None:
-            dashboard.update_client_status(client_id, base_url, "Resetting", episode)
-            dashboard.wait_if_paused()
-        raw_state = start_or_recover_episode(
-            game,
-            client_id,
-            base_url,
-            dashboard,
-            stop_event,
-            episode,
-        )
-        if raw_state is None:
-            break
-        reward_model.reset(raw_state)
-        final_raw_state = raw_state
-        restart_episode = False
-        done = False
-        episode_reward = 0.0
-        battle_reward = 0.0
-        current_battle_reward = 0.0
-        current_battle_steps = 0
-        current_battle_hp_lost = 0
-        current_battle_potions_used = 0
-        battle_number = 0
-        episode_steps = 0
-        battle_steps = 0
-        update_count = 0
-        battle_wins = 0
-        battle_losses = 0
-        losses = []
-        action_counts = {}
-        with shared.agent_lock:
-            epsilon_start = agent.battle_agent.epsilon
-            replay_start = agent.battle_agent.buffered_steps()
-
-        logging.info("%s starting episode %d base_url=%s", client_id, episode, base_url)
-
-        while raw_state.get("state_type")!="game_over" and not stop_event.is_set():
+        while not stop_event.is_set():
             if dashboard is not None:
+                dashboard.update_client_status(client_id, base_url, "Resetting", episode)
                 dashboard.wait_if_paused()
-            prev_raw_state = raw_state
-            refresh_player_detail_for_map(game, player, raw_state)
-
+            raw_state = start_or_recover_episode(
+                game,
+                client_id,
+                base_url,
+                dashboard,
+                stop_event,
+                episode,
+            )
+            if raw_state is None:
+                break
+            reward_model.reset(raw_state)
+            final_raw_state = raw_state
+            restart_episode = False
+            done = False
+            episode_reward = 0.0
+            battle_reward = 0.0
+            current_battle_reward = 0.0
+            current_battle_steps = 0
+            current_battle_hp_lost = 0
+            current_battle_potions_used = 0
+            battle_number = 0
+            episode_steps = 0
+            battle_steps = 0
+            update_count = 0
+            battle_wins = 0
+            battle_losses = 0
+            losses = []
+            action_counts = {}
             with shared.agent_lock:
-                forced_end_turn = is_forced_end_turn_state(agent, raw_state)
-                skipped_agent = should_skip_agent(raw_state)
-                if forced_end_turn:
-                    action = {"type": "end_turn"}
-                    q_values = forced_end_turn_q_values(raw_state)
-                    action_selection = forced_end_turn_action_selection()
-                elif skipped_agent:
-                    action = {"type": "proceed"}
-                    q_values = current_q_values(agent, prev_raw_state, action)
-                    action_selection = action_selection_details(
-                        agent,
-                        prev_raw_state,
-                        action,
-                        skipped_agent,
-                        q_values,
-                    )
-                else:
-                    policy_state = {
-                        "screen_type": raw_state.get("state_type"),
-                        "raw_state": raw_state,
-                    }
-                    action = agent.choose_action(policy_state)
-                    q_values = current_q_values(agent, prev_raw_state, action)
-                    action_selection = action_selection_details(
-                        agent,
-                        prev_raw_state,
-                        action,
-                        skipped_agent,
-                        q_values,
-                    )
-                
-            try:
-                next_raw_state, done, info = game.step(action)
-            except Exception as exc:
-                recovered_state, restart_episode = recover_client_state_after_disconnect(
-                    game,
-                    client_id,
-                    base_url,
-                    dashboard,
-                    stop_event,
-                    episode,
-                    prev_raw_state,
-                    exc,
-                )
-                if recovered_state is None or restart_episode:
-                    break
-                raw_state = recovered_state
-                final_raw_state = recovered_state
-                continue
+                epsilon_start = agent.battle_agent.epsilon
+                replay_start = agent.battle_agent.buffered_steps()
 
-            if info.get("action_error"):
-                reward, reward_details = reward_model.action_error_reward(
-                    info.get("error", "client request failed")
-                )
-                if is_connection_action_error(info):
-                    recovered_state, restart_episode = recover_client_state_after_disconnect(
-                        game,
-                        client_id,
-                        base_url,
-                        dashboard,
-                        stop_event,
-                        episode,
-                        prev_raw_state,
-                        info.get("error", "client request failed"),
-                    )
-                    if recovered_state is None or restart_episode:
-                        break
-                    raw_state = recovered_state
-                    final_raw_state = recovered_state
-                    continue
-            else:
-                reward, reward_details = reward_model.compute(
-                    prev_raw_state,
-                    next_raw_state,
-                    action,
-                )
-            auto_steps = []
-            if next_raw_state is not None and not done:
-                try:
-                    for advance_forced_states in (
-                        advance_forced_end_turn_states,
-                    ):
-                        if done:
-                            break
-                        (
-                            next_raw_state,
-                            auto_reward,
-                            auto_done,
-                            new_auto_steps,
-                        ) = advance_forced_states(
-                            game,
+            logging.info("%s starting episode %d base_url=%s", client_id, episode, base_url)
+
+            while raw_state.get("state_type") != "game_over" and not stop_event.is_set():
+                if dashboard is not None:
+                    dashboard.wait_if_paused()
+                prev_raw_state = raw_state
+                refresh_player_detail_for_map(game, player, raw_state)
+
+                with shared.agent_lock:
+                    forced_end_turn = is_forced_end_turn_state(agent, raw_state)
+                    skipped_agent = should_skip_agent(raw_state)
+                    if forced_end_turn:
+                        action = {"type": "end_turn"}
+                        q_values = forced_end_turn_q_values(raw_state)
+                        action_selection = forced_end_turn_action_selection()
+                    elif skipped_agent:
+                        action = {"type": "proceed"}
+                        q_values = current_q_values(agent, prev_raw_state, action)
+                        action_selection = action_selection_details(
                             agent,
-                            reward_model,
-                            next_raw_state,
+                            prev_raw_state,
+                            action,
+                            skipped_agent,
+                            q_values,
                         )
-                        auto_steps.extend(new_auto_steps)
-                        reward += auto_reward
-                        done = done or auto_done
+                    else:
+                        policy_state = {
+                            "screen_type": raw_state.get("state_type"),
+                            "raw_state": raw_state,
+                        }
+                        action = agent.choose_action(policy_state)
+                        q_values = current_q_values(agent, prev_raw_state, action)
+                        action_selection = action_selection_details(
+                            agent,
+                            prev_raw_state,
+                            action,
+                            skipped_agent,
+                            q_values,
+                        )
+
+                try:
+                    next_raw_state, done, info = game.step(action)
                 except Exception as exc:
                     recovered_state, restart_episode = recover_client_state_after_disconnect(
                         game,
@@ -614,7 +546,7 @@ def run_training_client(
                         dashboard,
                         stop_event,
                         episode,
-                        next_raw_state,
+                        prev_raw_state,
                         exc,
                     )
                     if recovered_state is None or restart_episode:
@@ -622,249 +554,301 @@ def run_training_client(
                     raw_state = recovered_state
                     final_raw_state = recovered_state
                     continue
-            final_raw_state = next_raw_state
-            reward_details = fold_reward_details(
-                reward_details,
-                reward,
-                auto_steps,
-            )
-            training_info = None
-            if not forced_end_turn:
-                with shared.agent_lock:
-                    training_info = agent.train_from_step(
-                        prev_raw_state,
-                        action,
-                        reward,
-                        next_raw_state,
-                        done,
-                        reward_details,
+
+                if info.get("action_error"):
+                    reward, reward_details = reward_model.action_error_reward(
+                        info.get("error", "client request failed")
                     )
+                    if is_connection_action_error(info):
+                        recovered_state, restart_episode = recover_client_state_after_disconnect(
+                            game,
+                            client_id,
+                            base_url,
+                            dashboard,
+                            stop_event,
+                            episode,
+                            prev_raw_state,
+                            info.get("error", "client request failed"),
+                        )
+                        if recovered_state is None or restart_episode:
+                            break
+                        raw_state = recovered_state
+                        final_raw_state = recovered_state
+                        continue
+                else:
+                    reward, reward_details = reward_model.compute(
+                        prev_raw_state,
+                        next_raw_state,
+                        action,
+                    )
+                auto_steps = []
+                if next_raw_state is not None and not done:
                     try:
-                        shared.save_milestone_if_needed()
+                        for advance_forced_states in (advance_forced_end_turn_states,):
+                            if done:
+                                break
+                            (
+                                next_raw_state,
+                                auto_reward,
+                                auto_done,
+                                new_auto_steps,
+                            ) = advance_forced_states(
+                                game,
+                                agent,
+                                reward_model,
+                                next_raw_state,
+                            )
+                            auto_steps.extend(new_auto_steps)
+                            reward += auto_reward
+                            done = done or auto_done
                     except Exception as exc:
-                        logging.exception(
-                            "Could not save battle agent milestone checkpoint at trained_steps=%d: %s",
-                            agent.battle_agent.trained_steps,
+                        recovered_state, restart_episode = recover_client_state_after_disconnect(
+                            game,
+                            client_id,
+                            base_url,
+                            dashboard,
+                            stop_event,
+                            episode,
+                            next_raw_state,
                             exc,
                         )
-            episode_reward += reward
-            folded_step_count = 1 + len(auto_steps)
-            episode_steps += folded_step_count
+                        if recovered_state is None or restart_episode:
+                            break
+                        raw_state = recovered_state
+                        final_raw_state = recovered_state
+                        continue
+                final_raw_state = next_raw_state
+                reward_details = fold_reward_details(
+                    reward_details,
+                    reward,
+                    auto_steps,
+                )
+                training_info = None
+                if not forced_end_turn:
+                    with shared.agent_lock:
+                        training_info = agent.train_from_step(
+                            prev_raw_state,
+                            action,
+                            reward,
+                            next_raw_state,
+                            done,
+                            reward_details,
+                        )
+                        try:
+                            shared.save_milestone_if_needed()
+                        except Exception as exc:
+                            logging.exception(
+                                "Could not save battle agent milestone checkpoint at trained_steps=%d: %s",
+                                agent.battle_agent.trained_steps,
+                                exc,
+                            )
+                episode_reward += reward
+                folded_step_count = 1 + len(auto_steps)
+                episode_steps += folded_step_count
 
-            loss = None
-            if reward_details.get("type") == "battle":
-                step_battle_reward = reward_details.get("total", reward)
-                battle_reward += step_battle_reward
-                current_battle_reward += step_battle_reward
-                current_battle_steps += folded_step_count
-                current_battle_hp_lost = reward_details.get("hp_lost", current_battle_hp_lost)
-                if reward_details.get("potion_used", False):
-                    current_battle_potions_used += 1
-                if reward_details.get("result") == "won":
-                    battle_wins += 1
-                if reward_details.get("result") == "lost":
-                    battle_losses += 1
+                loss = None
+                if reward_details.get("type") == "battle":
+                    step_battle_reward = reward_details.get("total", reward)
+                    battle_reward += step_battle_reward
+                    current_battle_reward += step_battle_reward
+                    current_battle_steps += folded_step_count
+                    current_battle_hp_lost = reward_details.get("hp_lost", current_battle_hp_lost)
+                    if reward_details.get("potion_used", False):
+                        current_battle_potions_used += 1
+                    if reward_details.get("result") == "won":
+                        battle_wins += 1
+                    if reward_details.get("result") == "lost":
+                        battle_losses += 1
 
-                if reward_details.get("result") in {"won", "lost"}:
-                    battle_number += 1
-                    result = reward_details.get("result")
-                    logging.info(
-                        "Episode %d battle %d finished: result=%s battle_reward=%.2f "
-                        "steps=%d hp=%s->%s hp_lost=%d gold_lost=%d max_hp_lost=%d "
-                        "potions_used=%d hp_penalty=%.2f gold_penalty=%.2f "
-                        "max_hp_penalty=%.2f win_reward=%.2f",
+                    if reward_details.get("result") in {"won", "lost"}:
+                        battle_number += 1
+                        result = reward_details.get("result")
+                        logging.info(
+                            "Episode %d battle %d finished: result=%s battle_reward=%.2f "
+                            "steps=%d hp=%s->%s hp_lost=%d gold_lost=%d max_hp_lost=%d "
+                            "potions_used=%d hp_penalty=%.2f gold_penalty=%.2f "
+                            "max_hp_penalty=%.2f win_reward=%.2f",
+                            episode,
+                            battle_number,
+                            result,
+                            current_battle_reward,
+                            current_battle_steps,
+                            reward_details.get("battle_start_hp"),
+                            reward_details.get("next_hp"),
+                            current_battle_hp_lost,
+                            reward_details.get("gold_lost", 0),
+                            reward_details.get("max_hp_lost", 0),
+                            current_battle_potions_used,
+                            reward_details.get("hp_penalty", 0.0),
+                            reward_details.get("gold_penalty", 0.0),
+                            reward_details.get("max_hp_penalty", 0.0),
+                            reward_details.get("win_reward", 0.0),
+                        )
+                        current_battle_reward = 0.0
+                        current_battle_steps = 0
+                        current_battle_hp_lost = 0
+                        current_battle_potions_used = 0
+
+                if training_info is not None:
+                    battle_steps += 1
+                    loss = training_info["loss"]
+                    action_count_key = (
+                        action.get("action_key")
+                        or action_selection.get("action_key")
+                        or training_info["action_type"]
+                    )
+                    action_counts[action_count_key] = action_counts.get(action_count_key, 0) + 1
+                    if training_info["updated"]:
+                        update_count += 1
+                        losses.append(loss)
+                        with shared.agent_lock:
+                            train_step = agent.battle_agent.trained_steps
+                            train_epsilon = agent.battle_agent.epsilon
+                            train_replay_size = agent.battle_agent.buffered_steps()
+                            train_learn_steps = agent.battle_agent.learn_steps
+                        tensorboard.add_scalars(
+                            f"clients/{client_id}/train",
+                            {
+                                "loss": loss,
+                                "reward": reward,
+                                "epsilon": train_epsilon,
+                                "replay_size": train_replay_size,
+                                "learn_steps": train_learn_steps,
+                            },
+                            train_step,
+                        )
+
+                with shared.agent_lock:
+                    print_replay_size = agent.battle_agent.buffered_steps()
+                    print_epsilon = agent.battle_agent.epsilon
+                print(
+                    client_id,
+                    action,
+                    "reward=",
+                    reward,
+                    "reward_details=",
+                    reward_details,
+                    "done=",
+                    done,
+                    "loss=",
+                    loss,
+                    "replay=",
+                    print_replay_size,
+                    "epsilon=",
+                    round(print_epsilon, 4),
+                )
+                if dashboard is not None:
+                    with shared.agent_lock:
+                        epsilon = agent.battle_agent.epsilon
+                        replay_size = agent.battle_agent.buffered_steps()
+                        trained_steps = agent.battle_agent.trained_steps
+                        learn_steps = agent.battle_agent.learn_steps
+                    dashboard.update_step(
+                        client_id,
+                        base_url,
                         episode,
-                        battle_number,
-                        result,
+                        episode_steps,
+                        prev_raw_state,
+                        next_raw_state,
+                        action,
+                        reward,
+                        reward_details,
+                        done,
+                        episode_reward,
+                        battle_reward,
                         current_battle_reward,
                         current_battle_steps,
-                        reward_details.get("battle_start_hp"),
-                        reward_details.get("next_hp"),
-                        current_battle_hp_lost,
-                        reward_details.get("gold_lost", 0),
-                        reward_details.get("max_hp_lost", 0),
-                        current_battle_potions_used,
-                        reward_details.get("hp_penalty", 0.0),
-                        reward_details.get("gold_penalty", 0.0),
-                        reward_details.get("max_hp_penalty", 0.0),
-                        reward_details.get("win_reward", 0.0),
+                        battle_steps,
+                        update_count,
+                        battle_wins,
+                        battle_losses,
+                        loss,
+                        epsilon,
+                        replay_size,
+                        trained_steps,
+                        learn_steps,
+                        action_counts,
+                        action_selection,
+                        q_values,
                     )
-                    current_battle_reward = 0.0
-                    current_battle_steps = 0
-                    current_battle_hp_lost = 0
-                    current_battle_potions_used = 0
+                if done:
+                    break
 
-            if training_info is not None:
-                battle_steps += 1
-                loss = training_info["loss"]
-                action_count_key = (
-                    action.get("action_key")
-                    or action_selection.get("action_key")
-                    or training_info["action_type"]
-                )
-                action_counts[action_count_key] = action_counts.get(action_count_key, 0) + 1
-                if training_info["updated"]:
-                    update_count += 1
-                    losses.append(loss)
-                    with shared.agent_lock:
-                        train_step = agent.battle_agent.trained_steps
-                        train_epsilon = agent.battle_agent.epsilon
-                        train_replay_size = agent.battle_agent.buffered_steps()
-                        train_learn_steps = agent.battle_agent.learn_steps
-                    tensorboard.add_scalars(
-                        f"clients/{client_id}/train",
-                        {
-                            "loss": loss,
-                            "reward": reward,
-                            "epsilon": train_epsilon,
-                            "replay_size": train_replay_size,
-                            "learn_steps": train_learn_steps,
-                        },
-                        train_step,
-                    )
+                raw_state = next_raw_state
+                time.sleep(0.1)
 
-            with shared.agent_lock:
-                print_replay_size = agent.battle_agent.buffered_steps()
-                print_epsilon = agent.battle_agent.epsilon
-            print(
-                client_id,
-                action,
-                "reward=", reward,
-                "reward_details=", reward_details,
-                "done=", done,
-                "loss=", loss,
-                "replay=", print_replay_size,
-                "epsilon=", round(print_epsilon, 4),
-            )
-            if dashboard is not None:
-                with shared.agent_lock:
-                    epsilon = agent.battle_agent.epsilon
-                    replay_size = agent.battle_agent.buffered_steps()
-                    trained_steps = agent.battle_agent.trained_steps
-                    learn_steps = agent.battle_agent.learn_steps
-                dashboard.update_step(
-                    client_id,
-                    base_url,
-                    episode,
-                    episode_steps,
-                    prev_raw_state,
-                    next_raw_state,
-                    action,
-                    reward,
-                    reward_details,
-                    done,
-                    episode_reward,
-                    battle_reward,
-                    current_battle_reward,
-                    current_battle_steps,
-                    battle_steps,
-                    update_count,
-                    battle_wins,
-                    battle_losses,
-                    loss,
-                    epsilon,
-                    replay_size,
-                    trained_steps,
-                    learn_steps,
-                    action_counts,
-                    action_selection,
-                    q_values,
-                )
-            if done:
+            if stop_event.is_set():
                 break
 
-            raw_state = next_raw_state
-            time.sleep(0.1)
+            if restart_episode:
+                if dashboard is not None:
+                    dashboard.update_client_status(
+                        client_id, base_url, "Starting new episode", episode
+                    )
+                logging.info(
+                    "%s episode %d discarded after reconnect; starting new episode",
+                    client_id,
+                    episode,
+                )
+                episode += 1
+                time.sleep(0.5)
+                continue
 
-        if stop_event.is_set():
-            break
+            avg_loss = sum(losses) / len(losses) if losses else None
+            min_loss = min(losses) if losses else None
+            max_loss = max(losses) if losses else None
+            with shared.agent_lock:
+                epsilon_end = agent.battle_agent.epsilon
+                replay_end = agent.battle_agent.buffered_steps()
+            final_run = final_raw_state.get("run", {})
+            final_floor = final_run.get("floor", 0)
+            final_act = final_run.get("act", 0)
+            final_state_type = final_raw_state.get("state_type")
+            action_summary = (
+                " ".join(
+                    f"{action_type}:{count}" for action_type, count in sorted(action_counts.items())
+                )
+                or "none"
+            )
+            loss_summary = (
+                f"avg_loss={avg_loss:.4f} min_loss={min_loss:.4f} max_loss={max_loss:.4f}"
+                if avg_loss is not None
+                else "avg_loss=n/a min_loss=n/a max_loss=n/a"
+            )
 
-        if restart_episode:
-            if dashboard is not None:
-                dashboard.update_client_status(client_id, base_url, "Starting new episode", episode)
-            logging.info("%s episode %d discarded after reconnect; starting new episode", client_id, episode)
-            episode += 1
-            time.sleep(0.5)
-            continue
+            logging.info(
+                "%s episode %d study summary: reward=%.2f battle_reward=%.2f steps=%d battle_steps=%d updates=%d "
+                "%s epsilon=%.4f->%.4f replay=%d->%d wins=%d losses=%d final_floor=%s final_act=%s "
+                "final_state=%s actions=%s",
+                client_id,
+                episode,
+                episode_reward,
+                battle_reward,
+                episode_steps,
+                battle_steps,
+                update_count,
+                loss_summary,
+                epsilon_start,
+                epsilon_end,
+                replay_start,
+                replay_end,
+                battle_wins,
+                battle_losses,
+                final_floor,
+                final_act,
+                final_state_type,
+                action_summary,
+            )
 
-        avg_loss = sum(losses) / len(losses) if losses else None
-        min_loss = min(losses) if losses else None
-        max_loss = max(losses) if losses else None
-        with shared.agent_lock:
-            epsilon_end = agent.battle_agent.epsilon
-            replay_end = agent.battle_agent.buffered_steps()
-        final_run = final_raw_state.get("run", {})
-        final_floor = final_run.get("floor", 0)
-        final_act = final_run.get("act", 0)
-        final_state_type = final_raw_state.get("state_type")
-        action_summary = " ".join(
-            f"{action_type}:{count}"
-            for action_type, count in sorted(action_counts.items())
-        ) or "none"
-        loss_summary = (
-            f"avg_loss={avg_loss:.4f} min_loss={min_loss:.4f} max_loss={max_loss:.4f}"
-            if avg_loss is not None
-            else "avg_loss=n/a min_loss=n/a max_loss=n/a"
-        )
-
-        logging.info(
-            "%s episode %d study summary: reward=%.2f battle_reward=%.2f steps=%d battle_steps=%d updates=%d "
-            "%s epsilon=%.4f->%.4f replay=%d->%d wins=%d losses=%d final_floor=%s final_act=%s "
-            "final_state=%s actions=%s",
-            client_id,
-            episode,
-            episode_reward,
-            battle_reward,
-            episode_steps,
-            battle_steps,
-            update_count,
-            loss_summary,
-            epsilon_start,
-            epsilon_end,
-            replay_start,
-            replay_end,
-            battle_wins,
-            battle_losses,
-            final_floor,
-            final_act,
-            final_state_type,
-            action_summary,
-        )
-
-        logging.info(
-            "%s episode %d ended; returning to main menu and starting a new run",
-            client_id,
-            episode,
-        )
-        episode_result = {
-            "client_id": client_id,
-            "base_url": base_url,
-            "episode": episode,
-            "reward": episode_reward,
-            "battle_reward": battle_reward,
-            "steps": episode_steps,
-            "battle_steps": battle_steps,
-            "updates": update_count,
-            "final_floor": final_floor,
-            "final_act": final_act,
-            "final_state_type": final_state_type,
-            "avg_loss": avg_loss,
-            "min_loss": min_loss,
-            "max_loss": max_loss,
-            "epsilon_start": epsilon_start,
-            "epsilon_end": epsilon_end,
-            "replay_start": replay_start,
-            "replay_end": replay_end,
-            "wins": battle_wins,
-            "losses": battle_losses,
-            "action_counts": dict(action_counts),
-        }
-        episode_log.append(episode_result)
-        with shared.agent_lock:
-            tensorboard_step = agent.battle_agent.trained_steps
-        tensorboard.add_scalars(
-            f"clients/{client_id}/episode",
-            {
+            logging.info(
+                "%s episode %d ended; returning to main menu and starting a new run",
+                client_id,
+                episode,
+            )
+            episode_result = {
+                "client_id": client_id,
+                "base_url": base_url,
+                "episode": episode,
                 "reward": episode_reward,
                 "battle_reward": battle_reward,
                 "steps": episode_steps,
@@ -872,6 +856,7 @@ def run_training_client(
                 "updates": update_count,
                 "final_floor": final_floor,
                 "final_act": final_act,
+                "final_state_type": final_state_type,
                 "avg_loss": avg_loss,
                 "min_loss": min_loss,
                 "max_loss": max_loss,
@@ -881,32 +866,56 @@ def run_training_client(
                 "replay_end": replay_end,
                 "wins": battle_wins,
                 "losses": battle_losses,
-            },
-            tensorboard_step,
-        )
-        for action_key, count in action_counts.items():
-            tensorboard.add_scalar(
-                f"clients/{client_id}/actions/{action_key}",
-                count,
+                "action_counts": dict(action_counts),
+            }
+            episode_log.append(episode_result)
+            with shared.agent_lock:
+                tensorboard_step = agent.battle_agent.trained_steps
+            tensorboard.add_scalars(
+                f"clients/{client_id}/episode",
+                {
+                    "reward": episode_reward,
+                    "battle_reward": battle_reward,
+                    "steps": episode_steps,
+                    "battle_steps": battle_steps,
+                    "updates": update_count,
+                    "final_floor": final_floor,
+                    "final_act": final_act,
+                    "avg_loss": avg_loss,
+                    "min_loss": min_loss,
+                    "max_loss": max_loss,
+                    "epsilon_start": epsilon_start,
+                    "epsilon_end": epsilon_end,
+                    "replay_start": replay_start,
+                    "replay_end": replay_end,
+                    "wins": battle_wins,
+                    "losses": battle_losses,
+                },
                 tensorboard_step,
             )
-        tensorboard.flush()
-        if dashboard is not None:
-            dashboard.add_episode_result(episode_result)
-        if episode % SAVE_INTERVAL == 0:
-            try:
-                with shared.agent_lock:
-                    shared.save_latest(f"{client_id} episode {episode}")
-            except Exception as exc:
-                logging.exception(
-                    "Could not save agent models after %s episode %d: %s",
-                    client_id,
-                    episode,
-                    exc,
+            for action_key, count in action_counts.items():
+                tensorboard.add_scalar(
+                    f"clients/{client_id}/actions/{action_key}",
+                    count,
+                    tensorboard_step,
                 )
+            tensorboard.flush()
+            if dashboard is not None:
+                dashboard.add_episode_result(episode_result)
+            if episode % SAVE_INTERVAL == 0:
+                try:
+                    with shared.agent_lock:
+                        shared.save_latest(f"{client_id} episode {episode}")
+                except Exception as exc:
+                    logging.exception(
+                        "Could not save agent models after %s episode %d: %s",
+                        client_id,
+                        episode,
+                        exc,
+                    )
 
-        episode += 1
-        time.sleep(0.5)
+            episode += 1
+            time.sleep(0.5)
     except Exception as exc:
         final_client_status = f"Error: {exc}"
         logging.exception("%s stopped with error: %s", client_id, exc)

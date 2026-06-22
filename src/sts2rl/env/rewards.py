@@ -60,9 +60,7 @@ class BattleProgressReward(RewardModel):
 
     def reset(self, raw_state: dict | None = None) -> None:
         """Clear battle bookkeeping and seed HP tracking from an optional state."""
-        self._last_player_hp = (
-            player_hp(raw_state, None) if raw_state is not None else None
-        )
+        self._last_player_hp = player_hp(raw_state, None) if raw_state is not None else None
         self._battle_start_hp = None
         self._battle_start_gold = None
         self._battle_start_max_hp = None
@@ -154,14 +152,10 @@ class BattleProgressReward(RewardModel):
         step_hp_lost = max(0, prev_hp - next_hp)
         battle_start_hp = self._battle_start_hp if self._battle_start_hp is not None else prev_hp
         battle_start_gold = (
-            self._battle_start_gold
-            if self._battle_start_gold is not None
-            else prev_gold
+            self._battle_start_gold if self._battle_start_gold is not None else prev_gold
         )
         battle_start_max_hp = (
-            self._battle_start_max_hp
-            if self._battle_start_max_hp is not None
-            else prev_max_hp
+            self._battle_start_max_hp if self._battle_start_max_hp is not None else prev_max_hp
         )
         total_hp_lost = max(0, battle_start_hp - next_hp)
         total_gold_lost = max(0, battle_start_gold - next_gold)
@@ -172,9 +166,7 @@ class BattleProgressReward(RewardModel):
         # Discarding a potion spends the consumable for no benefit, so it carries
         # the same penalty as using one (the agent still prefers use, which also
         # earns combat reward).
-        potion_penalty = (
-            -BATTLE_POTION_USE_PENALTY if (potion_used or potion_discarded) else 0.0
-        )
+        potion_penalty = -BATTLE_POTION_USE_PENALTY if (potion_used or potion_discarded) else 0.0
         prev_state_type = prev_state.get("state_type")
         next_state_type = next_state.get("state_type")
         battle_result = self._battle_result(prev_state, next_state)
@@ -190,9 +182,7 @@ class BattleProgressReward(RewardModel):
         loss_penalty = -BATTLE_LOSS_PENALTY if battle_result == "lost" else 0.0
         hp_penalty = -float(step_hp_lost) * BATTLE_HP_LOSS_PENALTY
         gold_penalty = (
-            -float(total_gold_lost) * BATTLE_GOLD_LOSS_PENALTY
-            if battle_result is not None
-            else 0.0
+            -float(total_gold_lost) * BATTLE_GOLD_LOSS_PENALTY if battle_result is not None else 0.0
         )
         max_hp_penalty = (
             -float(total_max_hp_lost) * BATTLE_MAX_HP_LOSS_PENALTY
@@ -252,7 +242,6 @@ class BattleProgressReward(RewardModel):
 
     def _battle_result(self, prev_state: dict, next_state: dict) -> str | None:
         """Infer battle termination status from adjacent raw states."""
-        prev_state_type = prev_state.get("state_type")
         next_state_type = next_state.get("state_type")
         if not self._is_battle_reward_state(prev_state):
             return None

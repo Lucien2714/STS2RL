@@ -5,7 +5,6 @@ from typing import Any
 
 from sts2rl.env.rewards import RewardModel
 
-
 COMBAT_SCREEN_TYPES = {"monster", "elite", "boss"}
 MAX_FORCED_END_TURN_ADVANCES = 5
 MAX_FORCED_HAND_SELECT_ADVANCES = 20
@@ -17,10 +16,7 @@ def should_skip_agent(raw_state: dict) -> bool:
         return False
 
     battle = raw_state.get("battle", {})
-    return not (
-        battle.get("turn") == "player"
-        and battle.get("is_play_phase") is True
-    )
+    return not (battle.get("turn") == "player" and battle.get("is_play_phase") is True)
 
 
 def is_forced_end_turn_state(agent: Any, raw_state: dict) -> bool:
@@ -189,19 +185,18 @@ def fold_reward_details(
     folded["total"] = float(total_reward)
     folded["auto_steps"] = len(auto_steps)
     folded["auto_end_turns"] = sum(
-        1 for step in auto_steps
-        if step.get("action", {}).get("type") == "end_turn"
+        1 for step in auto_steps if step.get("action", {}).get("type") == "end_turn"
     )
     folded["auto_hand_selects"] = sum(
-        1 for step in auto_steps
-        if step.get("action", {}).get("type") in {
+        1
+        for step in auto_steps
+        if step.get("action", {}).get("type")
+        in {
             "combat_select_card",
             "combat_confirm_selection",
         }
     )
-    folded["auto_step_reward"] = sum(
-        float(step.get("reward", 0.0)) for step in auto_steps
-    )
+    folded["auto_step_reward"] = sum(float(step.get("reward", 0.0)) for step in auto_steps)
     folded["auto_end_turn_reward"] = folded["auto_step_reward"]
 
     reward_component_keys = {

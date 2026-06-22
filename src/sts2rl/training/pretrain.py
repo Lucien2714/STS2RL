@@ -14,10 +14,10 @@ candidate interface (``encode_state``, ``encode_action``, ``valid_action_candida
 from __future__ import annotations
 
 import argparse
-from dataclasses import dataclass
 import logging
-from pathlib import Path
 import random
+from dataclasses import dataclass
+from pathlib import Path
 
 import torch
 from torch.nn import functional as F
@@ -106,7 +106,9 @@ def build_examples(agent, samples) -> tuple[list[Example], BuildStats]:
     return examples, stats
 
 
-def _run_epoch(agent, examples: list[Example], *, train: bool, batch_size: int) -> tuple[float, float]:
+def _run_epoch(
+    agent, examples: list[Example], *, train: bool, batch_size: int
+) -> tuple[float, float]:
     """Run one pass over examples, returning (mean_loss, top1_accuracy)."""
     device = agent.device
     order = list(range(len(examples)))
@@ -162,22 +164,26 @@ def pretrain(
 
     for epoch in range(1, epochs + 1):
         agent.model.train()
-        train_loss, train_acc = _run_epoch(
-            agent, train_examples, train=True, batch_size=batch_size
-        )
+        train_loss, train_acc = _run_epoch(agent, train_examples, train=True, batch_size=batch_size)
         if val_examples:
             agent.model.eval()
-            val_loss, val_acc = _run_epoch(
-                agent, val_examples, train=False, batch_size=batch_size
-            )
+            val_loss, val_acc = _run_epoch(agent, val_examples, train=False, batch_size=batch_size)
             logger.info(
                 "epoch %d/%d  train_loss=%.4f train_acc=%.3f  val_loss=%.4f val_acc=%.3f",
-                epoch, epochs, train_loss, train_acc, val_loss, val_acc,
+                epoch,
+                epochs,
+                train_loss,
+                train_acc,
+                val_loss,
+                val_acc,
             )
         else:
             logger.info(
                 "epoch %d/%d  train_loss=%.4f train_acc=%.3f",
-                epoch, epochs, train_loss, train_acc,
+                epoch,
+                epochs,
+                train_loss,
+                train_acc,
             )
 
 
@@ -195,7 +201,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--battle-agent", default="DQN", help="Battle agent type (DQN or PPO).")
     parser.add_argument("--epochs", type=int, default=10)
     parser.add_argument("--batch-size", type=int, default=32)
-    parser.add_argument("--lr", type=float, default=None, help="Override the agent's learning rate.")
+    parser.add_argument(
+        "--lr", type=float, default=None, help="Override the agent's learning rate."
+    )
     parser.add_argument("--val-split", type=float, default=0.1)
     parser.add_argument(
         "--epsilon",
@@ -240,7 +248,11 @@ def main(argv: list[str] | None = None) -> None:
     examples, stats = build_examples(agent, samples)
     logger.info(
         "Recordings: %d total, %d matched (%.1f%%), %d no_candidates, %d no_match",
-        stats.total, stats.matched, stats.match_rate * 100, stats.no_candidates, stats.no_match,
+        stats.total,
+        stats.matched,
+        stats.match_rate * 100,
+        stats.no_candidates,
+        stats.no_match,
     )
     if not examples:
         raise SystemExit("No usable training examples; check recordings and action schema.")
@@ -257,8 +269,10 @@ def main(argv: list[str] | None = None) -> None:
     # Set a low exploration rate (if the agent uses one) so RL fine-tuning
     # exploits the cloned policy instead of overwriting it with random play.
     if hasattr(agent, "epsilon"):
-        agent.epsilon = args.epsilon if args.epsilon is not None else getattr(
-            agent, "epsilon_min", agent.epsilon
+        agent.epsilon = (
+            args.epsilon
+            if args.epsilon is not None
+            else getattr(agent, "epsilon_min", agent.epsilon)
         )
     agent.learn_steps = args.epochs
 

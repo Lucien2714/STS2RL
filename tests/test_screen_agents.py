@@ -4,8 +4,8 @@ import pytest
 
 from sts2rl.agents.candidate_ppo_agent import PPOCandidateAgent
 from sts2rl.agents.orchestrator import (
-    Agent,
     SCREEN_ENCODERS,
+    Agent,
     create_screen_agents,
     screen_name_for_state,
 )
@@ -40,10 +40,15 @@ def test_rest_encoder_candidates_and_dims():
     assert keys == {"choose_rest_option:0", "choose_rest_option:1"}
 
     # A disabled option is excluded.
-    keys_disabled = {c["action_key"] for c in agent.valid_action_candidates(rest_state(enabled=False))}
+    keys_disabled = {
+        c["action_key"] for c in agent.valid_action_candidates(rest_state(enabled=False))
+    }
     assert keys_disabled == {"choose_rest_option:0"}
 
-    assert agent.action_key({"type": "choose_rest_option", "index": 1}, state) == "choose_rest_option:1"
+    assert (
+        agent.action_key({"type": "choose_rest_option", "index": 1}, state)
+        == "choose_rest_option:1"
+    )
     assert len(agent.encode_state(state)) == agent.state_size
     assert len(agent.encode_action(state, {"type": "choose_rest_option", "index": 0})) == (
         agent.action_feature_size
@@ -95,43 +100,71 @@ def test_create_screen_agents_registers_all_screens():
 SCREEN_STATES = {
     "map": {
         "state_type": "map",
-        "map": {"next_options": [
-            {"index": 0, "type": "Monster", "col": 2, "row": 3},
-            {"index": 1, "type": "Shop", "col": 3, "row": 3},
-        ]},
+        "map": {
+            "next_options": [
+                {"index": 0, "type": "Monster", "col": 2, "row": 3},
+                {"index": 1, "type": "Shop", "col": 3, "row": 3},
+            ]
+        },
         "player": {"hp": 40, "max_hp": 80, "gold": 99},
         "run": {"floor": 3, "act": 1},
     },
     "reward": {
         "state_type": "rewards",
-        "rewards": {"items": [{"index": 0, "type": "card"}, {"index": 1, "type": "gold"}], "can_proceed": True},
+        "rewards": {
+            "items": [{"index": 0, "type": "card"}, {"index": 1, "type": "gold"}],
+            "can_proceed": True,
+        },
         "player": {"hp": 40, "max_hp": 80, "gold": 99},
         "run": {"floor": 3, "act": 1},
     },
     "shop": {
         "state_type": "shop",
-        "shop": {"items": [
-            {"index": 0, "category": "card", "price": 75, "is_stocked": True, "can_afford": True, "card_id": "OFFERING"},
-            {"index": 5, "category": "relic", "price": 150, "is_stocked": True, "can_afford": False, "relic_id": "VAJRA"},
-        ], "can_proceed": True},
+        "shop": {
+            "items": [
+                {
+                    "index": 0,
+                    "category": "card",
+                    "price": 75,
+                    "is_stocked": True,
+                    "can_afford": True,
+                    "card_id": "OFFERING",
+                },
+                {
+                    "index": 5,
+                    "category": "relic",
+                    "price": 150,
+                    "is_stocked": True,
+                    "can_afford": False,
+                    "relic_id": "VAJRA",
+                },
+            ],
+            "can_proceed": True,
+        },
         "player": {"hp": 40, "max_hp": 80, "gold": 99},
         "run": {"floor": 3, "act": 1},
     },
     "rest": {
         "state_type": "rest_site",
-        "rest_site": {"options": [
-            {"index": 0, "id": "rest", "is_enabled": True},
-            {"index": 1, "id": "smith", "is_enabled": True},
-        ]},
+        "rest_site": {
+            "options": [
+                {"index": 0, "id": "rest", "is_enabled": True},
+                {"index": 1, "id": "smith", "is_enabled": True},
+            ]
+        },
         "player": {"hp": 30, "max_hp": 80, "gold": 50},
         "run": {"floor": 5, "act": 1},
     },
     "event": {
         "state_type": "event",
-        "event": {"event_id": "NEOW", "in_dialogue": False, "options": [
-            {"index": 0, "title": "A", "is_locked": False, "is_proceed": False},
-            {"index": 1, "title": "B", "is_locked": True},
-        ]},
+        "event": {
+            "event_id": "NEOW",
+            "in_dialogue": False,
+            "options": [
+                {"index": 0, "title": "A", "is_locked": False, "is_proceed": False},
+                {"index": 1, "title": "B", "is_locked": True},
+            ],
+        },
         "player": {"hp": 40, "max_hp": 80, "gold": 99},
         "run": {"floor": 0, "act": 1},
     },

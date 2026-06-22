@@ -5,7 +5,6 @@ from typing import Any
 
 from sts2rl.env.player import Player
 
-
 logger = logging.getLogger(__name__)
 
 

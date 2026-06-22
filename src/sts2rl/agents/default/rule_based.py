@@ -2,7 +2,6 @@
 
 import logging
 
-
 logger = logging.getLogger(__name__)
 
 
@@ -15,8 +14,6 @@ class DefaultPolicy:
             "DefaultPolicy: choosing action state_type=%s",
             state.get("state_type"),
         )
-        action = {
-            "type": "proceed"
-        }
+        action = {"type": "proceed"}
         logger.debug("DefaultPolicy: selected action=%s", action)
         return action

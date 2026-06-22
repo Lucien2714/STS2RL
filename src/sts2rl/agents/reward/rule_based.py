@@ -2,7 +2,6 @@
 
 import logging
 
-
 logger = logging.getLogger(__name__)
 
 
@@ -61,9 +60,7 @@ class RewardPolicy:
         )
 
         if not items:
-            action = {
-                "type": "proceed"
-            }
+            action = {"type": "proceed"}
             logger.debug("RewardPolicy: selected action=%s", action)
             return action
 
@@ -111,15 +108,11 @@ class RewardPolicy:
             return action
 
         if card_reward.get("can_skip", False):
-            action = {
-                "type": "skip_card_reward"
-            }
+            action = {"type": "skip_card_reward"}
             logger.debug("RewardPolicy: selected action=%s", action)
             return action
 
-        action = {
-            "type": "skip_card_reward"
-        }
+        action = {"type": "skip_card_reward"}
         logger.debug("RewardPolicy: selected fallback action=%s", action)
         return action
 

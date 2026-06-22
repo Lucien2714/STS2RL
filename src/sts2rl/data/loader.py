@@ -1,9 +1,8 @@
 """Load bundled STS2 JSON data and expose stable id-index mappings."""
 
+import json
 from dataclasses import dataclass
 from pathlib import Path
-import json
-
 
 DEFAULT_DATA_DIR = Path(__file__).resolve().parent / "json"
 
@@ -53,6 +52,7 @@ class CardInstance:
     def update_star_cost(self, new_star_cost: int) -> None:
         """Update the star energy cost."""
         self.star_cost = new_star_cost
+
 
 class DataStore:
     """Lazy in-memory lookup for raw JSON objects keyed by data type and id."""
@@ -147,9 +147,7 @@ class DataIdMap:
 
             cls.id_maps[data_type] = id_map
             cls.lookup_maps[data_type] = lookup_map
-            cls.reverse_id_maps[data_type] = {
-                index: item_id for item_id, index in id_map.items()
-            }
+            cls.reverse_id_maps[data_type] = {index: item_id for item_id, index in id_map.items()}
 
         cls.loaded = True
 
@@ -291,7 +289,7 @@ def get_relic_index(relic_id: str | None, default: int = -1) -> int:
 def get_potion_index(potion_id: str | None, default: int = -1) -> int:
     """Return the numeric index for a potion id."""
     return get_data_index_or_default("potions", potion_id, default)
-    
+
 
 def load_card(card: dict) -> CardInstance:
     """Create a mutable card instance from a raw card data object."""
@@ -307,6 +305,8 @@ def load_card(card: dict) -> CardInstance:
         star_cost=star_cost,
         upgraded=upgraded,
     )
+
+
 # data_map = DataIdMap()
 
 # cards_map = data_map.get_id_map("cards")

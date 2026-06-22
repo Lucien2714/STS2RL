@@ -2,7 +2,11 @@
 
 from pathlib import Path
 
-from sts2rl.checkpoints.manager import battle_agent_checkpoint_dir, battle_backup_path, battle_latest_path
+from sts2rl.checkpoints.manager import (
+    battle_agent_checkpoint_dir,
+    battle_backup_path,
+    battle_latest_path,
+)
 from sts2rl.evaluation.checkpoints import checkpoint_sort_key
 
 

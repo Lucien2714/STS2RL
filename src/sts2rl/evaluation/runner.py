@@ -7,6 +7,10 @@ from pathlib import Path
 from typing import Callable
 
 from sts2rl.agents.orchestrator import Agent, is_battle_policy_state, normalize_battle_agent_type
+from sts2rl.env.game_env import Game
+from sts2rl.env.player import Player
+from sts2rl.env.rewards import BattleProgressReward
+from sts2rl.evaluation.dashboard import LiveEvaluationDashboard
 from sts2rl.flow.battle_flow import (
     advance_forced_end_turn_states,
     fold_reward_details,
@@ -14,12 +18,7 @@ from sts2rl.flow.battle_flow import (
     is_forced_end_turn_state,
     should_skip_agent,
 )
-from sts2rl.env.game_env import Game
-from sts2rl.env.player import Player
-from sts2rl.env.rewards import BattleProgressReward
 from sts2rl.flow.player_detail import refresh_player_detail_for_map
-
-from sts2rl.evaluation.dashboard import LiveEvaluationDashboard
 
 
 def choose_eval_action(agent: Agent, raw_state: dict) -> dict:
@@ -94,9 +93,7 @@ def evaluate_episode(
     battle_losses = 0
     has_step_limit = max_steps > 0
 
-    while raw_state.get("state_type") != "game_over" and (
-        not has_step_limit or steps < max_steps
-    ):
+    while raw_state.get("state_type") != "game_over" and (not has_step_limit or steps < max_steps):
         if dashboard is not None:
             dashboard.wait_if_paused()
 
@@ -122,9 +119,7 @@ def evaluate_episode(
             reward, reward_details = reward_model.compute(raw_state, next_raw_state, action)
         auto_steps = []
         if next_raw_state is not None and not done:
-            for advance_forced_states in (
-                advance_forced_end_turn_states,
-            ):
+            for advance_forced_states in (advance_forced_end_turn_states,):
                 if done:
                     break
                 (
@@ -297,9 +292,7 @@ def evaluate_checkpoint(
             "game_mode": game_mode,
             "start_mode": "reset" if reset_environment else "current_state",
             "seeds": ",".join(result["seed"] for result in episode_results),
-            "ending_steps": ",".join(
-                str(result["steps"]) for result in episode_results
-            ),
+            "ending_steps": ",".join(str(result["steps"]) for result in episode_results),
         }
     )
     return summary

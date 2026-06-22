@@ -27,9 +27,7 @@ def selection_selected_count(
     fallback_count: int = 0,
 ) -> int:
     """Return the backend-selected count, falling back to local selected indices."""
-    selected_count = parse_optional_int(
-        selection_field(raw_state, selection_key, "selected_count")
-    )
+    selected_count = parse_optional_int(selection_field(raw_state, selection_key, "selected_count"))
     if selected_count is None:
         return max(0, fallback_count)
     return max(0, selected_count, fallback_count)
@@ -83,9 +81,7 @@ def exact_required_count(raw_state: dict, selection_key: str) -> int | None:
 
 def remaining_to_min(raw_state: dict, selection_key: str) -> int | None:
     """Return the MCP-reported number of additional selections needed."""
-    remaining = parse_optional_int(
-        selection_field(raw_state, selection_key, "remaining_to_min")
-    )
+    remaining = parse_optional_int(selection_field(raw_state, selection_key, "remaining_to_min"))
     if remaining is not None:
         return max(0, remaining)
     return None

@@ -12,9 +12,9 @@ candidate logic can consume them. Encoding and loss live in the trainer, not her
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Iterator
 import json
 import logging
+from collections.abc import Iterable, Iterator
 from pathlib import Path
 
 logger = logging.getLogger(__name__)

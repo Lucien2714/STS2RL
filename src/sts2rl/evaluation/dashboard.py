@@ -13,7 +13,6 @@ import time
 from pathlib import Path
 from typing import Callable
 
-
 DASHBOARD_TEMPLATE_PATH = Path(__file__).with_name("dashboard_template.html")
 
 
@@ -111,9 +110,7 @@ class LiveEvaluationWebSocketHandler(socketserver.BaseRequestHandler):
     def send_handshake(self, key: str) -> None:
         """Send the RFC 6455 WebSocket upgrade response."""
         accept = base64.b64encode(
-            hashlib.sha1(
-                (key + "258EAFA5-E914-47DA-95CA-C5AB0DC85B11").encode("ascii")
-            ).digest()
+            hashlib.sha1((key + "258EAFA5-E914-47DA-95CA-C5AB0DC85B11").encode("ascii")).digest()
         ).decode("ascii")
         response = (
             "HTTP/1.1 101 Switching Protocols\r\n"
@@ -372,7 +369,9 @@ class LiveEvaluationDashboard:
                     "base_url": base_url,
                     "client_status": status,
                     "checkpoint": checkpoint_name or current.get("checkpoint"),
-                    "episode": episode_index if episode_index is not None else current.get("episode"),
+                    "episode": episode_index
+                    if episode_index is not None
+                    else current.get("episode"),
                     "updated_at": time.strftime("%Y-%m-%d %H:%M:%S"),
                 }
             )
@@ -400,7 +399,9 @@ class LiveEvaluationDashboard:
         """Pause the dashboard after an episode when auto-pause is enabled."""
         with self._pause_condition:
             self.paused = True
-        self.status = f"Episode {episode_index} complete for {checkpoint_name}; waiting to start eval"
+        self.status = (
+            f"Episode {episode_index} complete for {checkpoint_name}; waiting to start eval"
+        )
         self.broadcast()
 
     def resume_waiters(self) -> None:
@@ -437,8 +438,7 @@ class LiveEvaluationDashboard:
         with self._data_lock:
             current_step = dict(self.current_step)
             current_steps = {
-                client_id: dict(step)
-                for client_id, step in self.current_steps.items()
+                client_id: dict(step) for client_id, step in self.current_steps.items()
             }
             rows = list(self.rows)
         return {

@@ -13,7 +13,6 @@ from sts2rl.agents.selection import (
     selection_selected_count,
 )
 
-
 logger = logging.getLogger(__name__)
 
 
@@ -49,10 +48,7 @@ class EventPolicy(EventAgent):
             logger.debug("EventPolicy: selected action=%s", action)
             return action
 
-        available_options = [
-            option for option in options
-            if not option.get("is_locked", False)
-        ]
+        available_options = [option for option in options if not option.get("is_locked", False)]
 
         if not available_options:
             action = {"type": "advance_dialogue"}
@@ -131,11 +127,15 @@ class EventPolicy(EventAgent):
             selected_count,
             fallback_required_count,
         ) or not card_select.get("can_confirm", False)
-        if cards and should_select and can_select_more(
-            state,
-            "card_select",
-            selected_count,
-            fallback_required_count,
+        if (
+            cards
+            and should_select
+            and can_select_more(
+                state,
+                "card_select",
+                selected_count,
+                fallback_required_count,
+            )
         ):
             card = self._choose_card(cards, screen_type, selected_indices)
             card_index = self._card_index(card)
@@ -179,10 +179,7 @@ class EventPolicy(EventAgent):
     ) -> dict:
         """Pick the next card, preferring unupgraded cards for upgrade screens."""
         selected_indices = selected_indices or set()
-        available_cards = [
-            card for card in cards
-            if self._card_index(card) not in selected_indices
-        ]
+        available_cards = [card for card in cards if self._card_index(card) not in selected_indices]
 
         if not available_cards:
             return cards[0]

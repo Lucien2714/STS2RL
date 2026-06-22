@@ -7,7 +7,6 @@ from dataclasses import dataclass, field
 
 from sts2rl.agents.base import MapAgent
 
-
 logger = logging.getLogger(__name__)
 
 
