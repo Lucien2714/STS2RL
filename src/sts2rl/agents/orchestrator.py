@@ -21,6 +21,7 @@ BATTLE_ACTION_TYPES = {
     "end_turn",
     "play_card",
     "use_potion",
+    "discard_potion",
     "combat_select_card",
     "combat_confirm_selection",
     "select_card",

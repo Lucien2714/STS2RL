@@ -22,6 +22,8 @@ class ActionDispatcher:
             return self.client.play_card(action["card_index"], target=action.get("target"))
         if action_type == "use_potion":
             return self.client.use_potion(action["slot"], target=action.get("target"))
+        if action_type == "discard_potion":
+            return self.client.discard_potion(action["slot"])
         if action_type == "combat_select_card":
             return self.client.combat_select_card(action["card_index"])
         if action_type == "combat_confirm_selection":

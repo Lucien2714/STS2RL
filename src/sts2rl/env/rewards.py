@@ -168,7 +168,13 @@ class BattleProgressReward(RewardModel):
         total_max_hp_lost = max(0, battle_start_max_hp - next_max_hp)
 
         potion_used = bool(action and action.get("type") == "use_potion")
-        potion_penalty = -BATTLE_POTION_USE_PENALTY if potion_used else 0.0
+        potion_discarded = bool(action and action.get("type") == "discard_potion")
+        # Discarding a potion spends the consumable for no benefit, so it carries
+        # the same penalty as using one (the agent still prefers use, which also
+        # earns combat reward).
+        potion_penalty = (
+            -BATTLE_POTION_USE_PENALTY if (potion_used or potion_discarded) else 0.0
+        )
         prev_state_type = prev_state.get("state_type")
         next_state_type = next_state.get("state_type")
         battle_result = self._battle_result(prev_state, next_state)
@@ -237,6 +243,7 @@ class BattleProgressReward(RewardModel):
             "enemy_kill_reward": enemy_kill_reward,
             "end_turn_energy_penalty": end_turn_energy_penalty,
             "potion_used": potion_used,
+            "potion_discarded": potion_discarded,
             "potion_penalty": potion_penalty,
             "win_reward": win_reward,
             "loss_penalty": loss_penalty,

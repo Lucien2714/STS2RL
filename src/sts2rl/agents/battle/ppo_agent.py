@@ -9,7 +9,7 @@ import torch
 from torch import nn
 from torch.distributions import Categorical
 
-from sts2rl.agents.battle.dqn_agent import BattleDQNAgent
+from sts2rl.agents.battle.base import CandidateActionAgent
 
 
 logger = logging.getLogger(__name__)
@@ -168,16 +168,18 @@ class PPORolloutCollector:
     self._pending = None
 
 
-class BattlePPOAgent(BattleDQNAgent):
+class BattlePPOAgent(CandidateActionAgent):
   """Battle agent that samples legal candidate actions with PPO.
 
   The agent owns the shared model/optimizer and the update logic; per-trajectory
   rollout state lives in :class:`PPORolloutCollector` instances created via
   :meth:`new_rollout`. A built-in default collector keeps single-agent use
-  (tests, evaluation, direct calls) working unchanged.
+  (tests, evaluation, direct calls) working unchanged. It composes the same
+  :class:`~sts2rl.encoders.battle_encoder.BattleStateEncoder` as the DQN agent
+  (via :class:`CandidateActionAgent`) rather than subclassing it.
   """
 
-  ACTION_SCHEMA = "candidate_action_ppo_v2"
+  ACTION_SCHEMA = "candidate_action_ppo_v3"
 
   def __init__(
     self,
@@ -194,14 +196,8 @@ class BattlePPOAgent(BattleDQNAgent):
     max_grad_norm=0.5,
     device=None,
   ):
-    super().__init__(
-      gamma=gamma,
-      epsilon=0.0,
-      learning_rate=learning_rate,
-      hidden_size=hidden_size,
-      batch_size=rollout_steps,
-      device=device,
-    )
+    super().__init__(device=device)
+    self.gamma = gamma
     self.rollout_steps = rollout_steps
     self.minibatch_size = minibatch_size
     self.update_epochs = update_epochs
@@ -216,7 +212,6 @@ class BattlePPOAgent(BattleDQNAgent):
       self.model_input_size,
       hidden_size,
     ).to(self.device)
-    self.target_model = None
     self.optimizer = torch.optim.Adam(self.model.parameters(), lr=learning_rate, eps=1e-5)
 
     self.collectors: list[PPORolloutCollector] = []

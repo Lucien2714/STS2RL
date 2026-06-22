@@ -3,8 +3,11 @@
 STS2RL separates the project into stable layers:
 
 - `env/`: STS2MCP client integration, reset flow, environment stepping, reward boundaries.
-- `agents/`: abstract agent interfaces and concrete screen agents.
-- `algorithms/`: reusable algorithm internals such as DQN components.
+- `agents/`: abstract agent interfaces and concrete screen agents. The trainable
+  battle agents (`agents/battle/`) subclass `CandidateActionAgent`, which composes
+  a `BattleStateEncoder`; each agent owns only its network and training logic.
+- `encoders/`: model-free battle state/action encoding and legal-action enumeration
+  (`BattleStateEncoder`), shared by the DQN and PPO battle agents.
 - `training/`: training CLI, runner, telemetry, dashboard, and episode logs.
 - `evaluation/`: checkpoint evaluation, seeded custom runs, dashboard, and CSV output.
 - `checkpoints/`: checkpoint paths and discovery helpers.

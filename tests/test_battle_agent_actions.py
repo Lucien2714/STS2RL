@@ -473,3 +473,44 @@ def test_dqn_greedy_breaks_ties_randomly_not_always_end_turn():
     # Old behavior (first-index argmax) would always return end_turn.
     assert chosen != {"end_turn"}
     assert len(chosen) >= 2
+
+
+def test_potion_candidates_include_discard():
+    """Every held potion is discardable; only combat-usable potions can be used."""
+    agent = BattleDQNAgent()
+    raw_state = {
+        "state_type": "monster",
+        "battle": {
+            "turn": "player",
+            "is_play_phase": True,
+            "enemies": [{"entity_id": "JAW_WORM_0", "hp": 20, "max_hp": 40}],
+        },
+        "player": {
+            "energy": 3,
+            "max_energy": 3,
+            "hand": [],
+            "potions": [
+                {"slot": 0, "id": "FIRE_POTION", "target_type": "Enemy", "can_use_in_combat": True},
+                {"slot": 1, "id": "FAIRY_POTION", "target_type": "None", "can_use_in_combat": False},
+            ],
+            "status": [],
+            "relics": [],
+        },
+    }
+
+    action_keys = {
+        candidate["action_key"]
+        for candidate in agent.valid_action_candidates(raw_state)
+    }
+
+    # Both potions can be discarded, even the one that cannot be used in combat.
+    assert "discard_potion:0" in action_keys
+    assert "discard_potion:1" in action_keys
+    # The enemy-target potion is usable; the non-combat potion is not.
+    assert "use_potion:0:target:0" in action_keys
+    assert "use_potion:1:self" not in action_keys
+
+    assert agent.action_key({"type": "discard_potion", "slot": 1}, raw_state) == "discard_potion:1"
+    assert len(agent.encode_action(raw_state, {"type": "discard_potion", "slot": 0})) == (
+        agent.action_feature_size
+    )
