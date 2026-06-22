@@ -13,6 +13,8 @@ components) rather than in the model-free ``encoders/`` package.
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import torch
 from torch import nn
 
@@ -31,6 +33,8 @@ _RESERVED = 1
 
 class CardModelEncoder(nn.Module):
     """Encode a card as a learned ``out_dim``-d vector from id/upgrade/enchantment."""
+
+    SCHEMA = "card_model_v1"
 
     def __init__(
         self,
@@ -74,6 +78,48 @@ class CardModelEncoder(nn.Module):
             dim=-1,
         )
         return self.project(features)
+
+    def save(self, path: str | Path) -> None:
+        """Persist the embedding weights and table configuration to a checkpoint."""
+        torch.save(
+            {
+                "schema": self.SCHEMA,
+                "config": self._config(),
+                "state_dict": self.state_dict(),
+            },
+            str(path),
+        )
+
+    def load(self, path: str | Path) -> None:
+        """Load weights from a checkpoint, validating schema and table shapes.
+
+        Raises ``ValueError`` if the checkpoint's schema or table configuration
+        (embedding dims / card / enchantment vocabulary sizes) differs, since the
+        embedding rows are keyed by card index and would otherwise mis-map.
+        """
+        checkpoint = torch.load(str(path), map_location=self.device)
+        schema = checkpoint.get("schema")
+        if schema != self.SCHEMA:
+            raise ValueError(
+                f"Incompatible card-model checkpoint schema={schema!r}; expected {self.SCHEMA!r}."
+            )
+        config = checkpoint.get("config", {})
+        if config != self._config():
+            raise ValueError(
+                f"Incompatible card-model config {config!r}; expected {self._config()!r}. "
+                "The embedding dims or card/enchantment vocabulary differ."
+            )
+        self.load_state_dict(checkpoint["state_dict"])
+
+    def _config(self) -> dict:
+        """Return the table configuration a checkpoint must match to load."""
+        return {
+            "out_dim": self.out_dim,
+            "id_dim": self.id_emb.embedding_dim,
+            "ench_dim": self.ench_emb.embedding_dim,
+            "num_cards": self.num_cards,
+            "num_enchantments": self.num_enchantments,
+        }
 
     def encode_card(self, card: Card | CardIdentity | dict) -> torch.Tensor:
         """Encode one card object into its ``out_dim``-d embedding (shape ``[out_dim]``)."""

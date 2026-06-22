@@ -1,5 +1,6 @@
 """Tests for the learned per-card embedding (models.card_encoder)."""
 
+import pytest
 import torch
 
 from sts2rl.data.card import Card, CardIdentity
@@ -81,3 +82,28 @@ def test_gradient_flows_to_embeddings():
     encoder.encode_card({"id": "STRIKE", "is_upgraded": True}).sum().backward()
     assert encoder.id_emb.weight.grad is not None
     assert encoder.id_emb.weight.grad.abs().sum() > 0
+
+
+def test_save_load_roundtrip(tmp_path):
+    encoder = make_encoder()
+    card = {"id": "STRIKE", "is_upgraded": True}
+    before = encoder.encode_card(card)
+
+    path = tmp_path / "card_model.pt"
+    encoder.save(path)
+
+    # A fresh, differently-initialized encoder loads back the same weights.
+    torch.manual_seed(1)
+    loaded = CardModelEncoder(out_dim=16, device="cpu")
+    assert not torch.allclose(loaded.encode_card(card), before)  # different before load
+    loaded.load(path)
+    assert torch.allclose(loaded.encode_card(card), before)
+
+
+def test_load_rejects_config_mismatch(tmp_path):
+    path = tmp_path / "card_model.pt"
+    make_encoder(out_dim=16).save(path)
+
+    other = CardModelEncoder(out_dim=8, device="cpu")  # different out_dim
+    with pytest.raises(ValueError):
+        other.load(path)
