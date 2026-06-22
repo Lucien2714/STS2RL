@@ -7,6 +7,9 @@ from pathlib import Path
 import threading
 import time
 from sts2rl.checkpoints.manager import (
+    agent_backup_path,
+    agent_checkpoint_dir,
+    agent_latest_path,
     battle_agent_checkpoint_dir,
     battle_backup_path,
     battle_latest_path,
@@ -17,7 +20,12 @@ from sts2rl.env.game_env import Game
 from sts2rl.env.player import Player
 from sts2rl.env.rewards import BattleProgressReward
 from sts2rl.flow.player_detail import refresh_player_detail_for_map
-from sts2rl.agents.orchestrator import Agent, create_battle_agent
+from sts2rl.agents.orchestrator import (
+    Agent,
+    create_battle_agent,
+    create_screen_agents,
+    normalize_screen_agent_type,
+)
 from sts2rl.flow.battle_flow import (
     advance_forced_end_turn_states,
     fold_reward_details,
@@ -43,16 +51,34 @@ DEFAULT_CLIENT_PORT = 15526
 RECONNECT_POLL_SECONDS = 2.0
 
 
-def save_battle_checkpoint(battle_agent, path: Path, reason: str) -> None:
-    """Save the battle agent and log the checkpoint reason."""
-    battle_agent.save(str(path))
+def save_battle_checkpoint(agent, path: Path, reason: str) -> None:
+    """Save a trainable agent and log the checkpoint reason."""
+    agent.save(str(path))
     logging.info(
-        "Saved battle agent checkpoint (%s) to %s trained_steps=%d learn_steps=%d",
+        "Saved agent checkpoint (%s) to %s trained_steps=%d learn_steps=%d",
         reason,
         path,
-        battle_agent.trained_steps,
-        battle_agent.learn_steps,
+        agent.trained_steps,
+        agent.learn_steps,
     )
+
+
+def load_agent_checkpoint(agent, latest_path: Path, label: str) -> None:
+    """Load an agent's latest checkpoint when present, else start fresh."""
+    latest_path.parent.mkdir(parents=True, exist_ok=True)
+    if latest_path.exists():
+        try:
+            agent.load(str(latest_path))
+            logging.info("Loaded %s model from %s", label, latest_path)
+        except Exception as exc:
+            logging.warning(
+                "Could not load %s model from %s; starting fresh. error=%s",
+                label,
+                latest_path,
+                exc,
+            )
+    else:
+        logging.info("No %s checkpoint found at %s; starting fresh", label, latest_path)
 
 
 def parse_args() -> argparse.Namespace:
@@ -63,6 +89,15 @@ def parse_args() -> argparse.Namespace:
         choices=["DQN", "PPO"],
         default="DQN",
         help="Battle agent implementation to train.",
+    )
+    parser.add_argument(
+        "--screen-agent",
+        choices=["DQN", "PPO", "none"],
+        default="PPO",
+        help=(
+            "Trainable agent for non-battle screens (map/reward/shop/rest/event). "
+            "Use 'none' to keep all non-battle screens rule-based."
+        ),
     )
     parser.add_argument(
         "--live",
@@ -156,9 +191,16 @@ def training_client_urls(args: argparse.Namespace) -> list[str]:
 class SharedTrainingState:
     """Synchronize one trainable agent across multiple training clients."""
 
-    def __init__(self, battle_agent, battle_agent_type: str) -> None:
+    def __init__(
+        self,
+        battle_agent,
+        battle_agent_type: str,
+        screen_agents: dict | None = None,
+        screen_agent_type: str = "PPO",
+    ) -> None:
         # One shared battle agent (model + optimizer); each client builds its own
-        # orchestrator + rollout collector over it.
+        # orchestrator + rollout collector over it. The non-battle screen agents
+        # are shared the same way.
         self.battle_agent = battle_agent
         self.battle_agent_type = normalize_battle_agent_type(battle_agent_type)
         self.checkpoint_dir = battle_agent_checkpoint_dir(self.battle_agent_type)
@@ -166,28 +208,62 @@ class SharedTrainingState:
         self.agent_lock = threading.RLock()
         self.last_backup_index = battle_agent.trained_steps // TRAINING_BACKUP_INTERVAL
 
+        self.screen_agents = screen_agents or {}
+        self.screen_agent_type = (
+            normalize_screen_agent_type(screen_agent_type) if self.screen_agents else None
+        )
+        self.screen_latest_paths = {
+            screen: agent_latest_path(screen, self.screen_agent_type)
+            for screen in self.screen_agents
+        }
+        self.screen_last_backup_index = {
+            screen: agent.trained_steps // TRAINING_BACKUP_INTERVAL
+            for screen, agent in self.screen_agents.items()
+        }
+
     def new_client_agent(self) -> Agent:
-        """Build a per-client orchestrator that shares the battle model."""
-        return Agent(battle_agent=self.battle_agent)
+        """Build a per-client orchestrator sharing the battle + screen models."""
+        return Agent(battle_agent=self.battle_agent, screen_agents=self.screen_agents)
+
+    def save_latest(self, reason: str) -> None:
+        """Save the latest checkpoint for every shared agent."""
+        save_battle_checkpoint(self.battle_agent, self.latest_path, reason)
+        for screen, agent in self.screen_agents.items():
+            save_battle_checkpoint(agent, self.screen_latest_paths[screen], f"{screen} {reason}")
 
     def save_milestone_if_needed(self) -> None:
         """Save periodic latest and milestone checkpoints after enough steps."""
         backup_index = self.battle_agent.trained_steps // TRAINING_BACKUP_INTERVAL
-        if backup_index <= self.last_backup_index:
-            return
+        if backup_index > self.last_backup_index:
+            self.last_backup_index = backup_index
+            backup_step = backup_index * TRAINING_BACKUP_INTERVAL
+            save_battle_checkpoint(
+                self.battle_agent,
+                self.latest_path,
+                f"training milestone {backup_step}",
+            )
+            save_battle_checkpoint(
+                self.battle_agent,
+                battle_backup_path(backup_step, self.battle_agent_type),
+                f"training milestone backup {backup_step}",
+            )
 
-        self.last_backup_index = backup_index
-        backup_step = backup_index * TRAINING_BACKUP_INTERVAL
-        save_battle_checkpoint(
-            self.battle_agent,
-            self.latest_path,
-            f"training milestone {backup_step}",
-        )
-        save_battle_checkpoint(
-            self.battle_agent,
-            battle_backup_path(backup_step, self.battle_agent_type),
-            f"training milestone backup {backup_step}",
-        )
+        for screen, agent in self.screen_agents.items():
+            backup_index = agent.trained_steps // TRAINING_BACKUP_INTERVAL
+            if backup_index <= self.screen_last_backup_index[screen]:
+                continue
+            self.screen_last_backup_index[screen] = backup_index
+            backup_step = backup_index * TRAINING_BACKUP_INTERVAL
+            save_battle_checkpoint(
+                agent,
+                self.screen_latest_paths[screen],
+                f"{screen} milestone {backup_step}",
+            )
+            save_battle_checkpoint(
+                agent,
+                agent_backup_path(screen, backup_step, self.screen_agent_type),
+                f"{screen} milestone backup {backup_step}",
+            )
 
 
 def state_signature(raw_state: dict | None) -> str:
@@ -820,14 +896,10 @@ def run_training_client(
         if episode % SAVE_INTERVAL == 0:
             try:
                 with shared.agent_lock:
-                    save_battle_checkpoint(
-                        shared.battle_agent,
-                        shared.latest_path,
-                        f"{client_id} episode {episode}",
-                    )
+                    shared.save_latest(f"{client_id} episode {episode}")
             except Exception as exc:
                 logging.exception(
-                    "Could not save battle agent model after %s episode %d: %s",
+                    "Could not save agent models after %s episode %d: %s",
                     client_id,
                     episode,
                     exc,
@@ -881,32 +953,37 @@ def main():
         logging.info("Writing TensorBoard training metrics to %s", tensorboard.log_dir)
 
     battle_agent = create_battle_agent(battle_agent_type)
-    checkpoint_dir = battle_agent_checkpoint_dir(battle_agent_type)
-    latest_path = battle_latest_path(battle_agent_type)
-    checkpoint_dir.mkdir(parents=True, exist_ok=True)
-    if latest_path.exists():
-        try:
-            battle_agent.load(str(latest_path))
-            logging.info(
-                "Loaded %s battle agent model from %s",
-                battle_agent_type,
-                latest_path,
-            )
-        except Exception as exc:
-            logging.warning(
-                "Could not load %s battle agent model from %s; starting fresh. error=%s",
-                battle_agent_type,
-                latest_path,
-                exc,
-            )
-    else:
-        logging.info(
-            "No %s battle agent checkpoint found at %s; starting fresh",
-            battle_agent_type,
-            latest_path,
-        )
+    load_agent_checkpoint(
+        battle_agent,
+        battle_latest_path(battle_agent_type),
+        f"{battle_agent_type} battle agent",
+    )
 
-    shared = SharedTrainingState(battle_agent, battle_agent_type)
+    screen_agents = {}
+    screen_agent_type = None
+    if args.screen_agent.lower() != "none":
+        screen_agent_type = normalize_screen_agent_type(args.screen_agent)
+        screen_agents = create_screen_agents(screen_agent_type)
+        for screen, agent in screen_agents.items():
+            load_agent_checkpoint(
+                agent,
+                agent_latest_path(screen, screen_agent_type),
+                f"{screen_agent_type} {screen} agent",
+            )
+        logging.info(
+            "Training %s screen agents: %s",
+            screen_agent_type,
+            ", ".join(sorted(screen_agents)),
+        )
+    else:
+        logging.info("Screen agents disabled; non-battle screens stay rule-based")
+
+    shared = SharedTrainingState(
+        battle_agent,
+        battle_agent_type,
+        screen_agents=screen_agents,
+        screen_agent_type=screen_agent_type or "PPO",
+    )
     stop_event = threading.Event()
     client_urls = training_client_urls(args)
     threads = []

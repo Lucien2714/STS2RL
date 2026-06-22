@@ -2,14 +2,19 @@
 
 import logging
 
-from sts2rl.agents.battle.dqn_agent import BattleDQNAgent
-from sts2rl.agents.battle.ppo_agent import BattlePPOAgent
+from sts2rl.agents.candidate_dqn_agent import DQNCandidateAgent
+from sts2rl.agents.candidate_ppo_agent import PPOCandidateAgent
 from sts2rl.agents.map.rule_based import MapPolicy
 from sts2rl.agents.reward.rule_based import RewardPolicy
 from sts2rl.agents.shop.rule_based import ShopPolicy
 from sts2rl.agents.rest.rule_based import RestPolicy
 from sts2rl.agents.event.rule_based import EventPolicy
 from sts2rl.agents.default.rule_based import DefaultPolicy
+from sts2rl.encoders.map_encoder import MapEncoder
+from sts2rl.encoders.reward_encoder import RewardEncoder
+from sts2rl.encoders.rest_encoder import RestEncoder
+from sts2rl.encoders.shop_encoder import ShopEncoder
+from sts2rl.encoders.event_encoder import EventEncoder
 
 
 logger = logging.getLogger(__name__)
@@ -29,8 +34,34 @@ BATTLE_ACTION_TYPES = {
     "cancel_selection",
 }
 BATTLE_AGENT_TYPES = {
-    "DQN": BattleDQNAgent,
-    "PPO": BattlePPOAgent,
+    "DQN": DQNCandidateAgent,
+    "PPO": PPOCandidateAgent,
+}
+
+# --- non-battle screen agents -------------------------------------------------
+# Trainable candidate-action agents for the non-battle screens. Each screen maps
+# to an encoder; agents are created via create_screen_agents() and shared across
+# clients (one model/optimizer each), mirroring the battle agent.
+SCREEN_ENCODERS = {
+    "map": MapEncoder,
+    "reward": RewardEncoder,
+    "shop": ShopEncoder,
+    "rest": RestEncoder,
+    "event": EventEncoder,
+}
+SCREEN_AGENT_TYPES = {"DQN": DQNCandidateAgent, "PPO": PPOCandidateAgent}
+
+# Map raw state_type -> screen name used for routing/training.
+SCREEN_BY_STATE_TYPE = {
+    "map": "map",
+    "rewards": "reward",
+    "card_reward": "reward",
+    "treasure": "reward",
+    "shop": "shop",
+    "fake_merchant": "shop",
+    "rest": "rest",
+    "rest_site": "rest",
+    "event": "event",
 }
 
 
@@ -42,9 +73,26 @@ def normalize_battle_agent_type(agent_type: str) -> str:
     return agent_type
 
 
+def normalize_screen_agent_type(agent_type: str) -> str:
+    """Return a canonical screen agent type name."""
+    agent_type = str(agent_type).strip().upper()
+    if agent_type not in SCREEN_AGENT_TYPES:
+        raise ValueError(f"Unsupported screen agent type: {agent_type!r}")
+    return agent_type
+
+
 def create_battle_agent(agent_type: str):
     """Create a battle agent implementation by type name."""
     return BATTLE_AGENT_TYPES[normalize_battle_agent_type(agent_type)]()
+
+
+def create_screen_agents(agent_type: str = "PPO") -> dict:
+    """Create one trainable agent per registered non-battle screen."""
+    agent_cls = SCREEN_AGENT_TYPES[normalize_screen_agent_type(agent_type)]
+    return {
+        screen: agent_cls(encoder=encoder_cls())
+        for screen, encoder_cls in SCREEN_ENCODERS.items()
+    }
 
 
 def is_battle_policy_state(raw_state: dict) -> bool:
@@ -55,15 +103,34 @@ def is_battle_policy_state(raw_state: dict) -> bool:
     return state_type == "card_select" and raw_state.get("in_battle") is True
 
 
+def screen_name_for_state(raw_state: dict) -> str | None:
+    """Return the non-battle screen name controlling this state, if any."""
+    state_type = raw_state.get("state_type")
+    if state_type == "card_select" and not raw_state.get("in_battle"):
+        return "event"
+    return SCREEN_BY_STATE_TYPE.get(state_type)
+
+
 class Agent:
     """Coordinate battle, map, reward, shop, rest, event, and fallback policies."""
 
-    def __init__(self, battle_agent=None, battle_agent_type: str = "DQN"):
+    def __init__(
+        self,
+        battle_agent=None,
+        battle_agent_type: str = "DQN",
+        screen_agents: dict | None = None,
+    ):
         self.battle_agent = battle_agent or create_battle_agent(battle_agent_type)
         # Each orchestrator drives one trajectory/client, so it gets its own
         # rollout collector over the shared battle model. This keeps concurrent
         # clients from clobbering each other's on-policy rollout state.
         self.rollout = self.battle_agent.new_rollout()
+        # Optional trainable screen agents (shared models); each gets its own
+        # per-client rollout collector here. Absent screens stay rule-based.
+        self.screen_agents = screen_agents or {}
+        self.screen_rollouts = {
+            screen: agent.new_rollout() for screen, agent in self.screen_agents.items()
+        }
         self.map_policy = MapPolicy()
         self.reward_policy = RewardPolicy()
         self.shop_policy = ShopPolicy()
@@ -87,34 +154,28 @@ class Agent:
             )
             return action
 
+        # Trainable screen agent, when one is registered and has legal candidates.
+        screen = screen_name_for_state(raw_state)
+        if screen in self.screen_agents and self.screen_agents[screen].valid_action_candidates(raw_state):
+            action = self.screen_rollouts[screen].choose_action(raw_state, training=True)
+            logger.debug("Agent: selected %s screen agent action=%s", screen, action)
+            return action
+
+        return self._rule_based_action(screen_type, raw_state)
+
+    def _rule_based_action(self, screen_type: str | None, raw_state: dict) -> dict:
+        """Fall back to the hand-written policy for a screen type."""
         if screen_type == "map":
-            action = self.map_policy.choose_action(raw_state)
-            logger.debug("Agent: selected MapPolicy action=%s", action)
-            return action
-
+            return self.map_policy.choose_action(raw_state)
         if screen_type in ["rewards", "card_reward", "treasure"]:
-            action = self.reward_policy.choose_action(raw_state)
-            logger.debug("Agent: selected RewardPolicy action=%s", action)
-            return action
-
+            return self.reward_policy.choose_action(raw_state)
         if screen_type == "shop":
-            action = self.shop_policy.choose_action(raw_state)
-            logger.debug("Agent: selected ShopPolicy action=%s", action)
-            return action
-
+            return self.shop_policy.choose_action(raw_state)
         if screen_type in ["rest", "rest_site"]:
-            action = self.rest_policy.choose_action(raw_state)
-            logger.debug("Agent: selected RestPolicy action=%s", action)
-            return action
-
+            return self.rest_policy.choose_action(raw_state)
         if screen_type in ["event", "card_select"]:
-            action = self.event_policy.choose_action(raw_state)
-            logger.debug("Agent: selected EventPolicy action=%s", action)
-            return action
-
-        action = self.default_policy.choose_action(raw_state)
-        logger.debug("Agent: selected DefaultPolicy action=%s", action)
-        return action
+            return self.event_policy.choose_action(raw_state)
+        return self.default_policy.choose_action(raw_state)
 
     def _forced_transition_action(self, raw_state: dict) -> dict | None:
         """Return required confirmation actions before normal policy selection."""
@@ -129,10 +190,28 @@ class Agent:
         done: bool,
         reward_details: dict | None = None,
     ) -> dict | None:
-        """Train the battle agent when a step belongs to the battle action space."""
-        if not is_battle_policy_state(prev_raw_state):
-            return None
+        """Train the agent that controls the previous state (battle or screen)."""
+        if is_battle_policy_state(prev_raw_state):
+            return self._train_battle(
+                prev_raw_state, action, reward, next_raw_state, done, reward_details
+            )
 
+        screen = screen_name_for_state(prev_raw_state)
+        if screen in self.screen_agents:
+            return self._train_screen(
+                screen, prev_raw_state, action, reward, next_raw_state, done, reward_details
+            )
+        return None
+
+    def _train_battle(
+        self,
+        prev_raw_state: dict,
+        action: dict,
+        reward: float,
+        next_raw_state: dict,
+        done: bool,
+        reward_details: dict | None,
+    ) -> dict | None:
         if action.get("type") not in BATTLE_ACTION_TYPES:
             return None
 
@@ -175,4 +254,65 @@ class Agent:
             "won_battle": won_battle,
             "lost_battle": lost_battle,
             "reward_details": reward_details,
+        }
+
+    def _train_screen(
+        self,
+        screen: str,
+        prev_raw_state: dict,
+        action: dict,
+        reward: float,
+        next_raw_state: dict,
+        done: bool,
+        reward_details: dict | None,
+    ) -> dict | None:
+        """Train a screen agent, but only on transitions it actually chose.
+
+        Fallback (rule-based) steps are skipped: they are exactly the steps where
+        the screen had no legal candidates, so the agent never acted on-policy.
+        """
+        agent = self.screen_agents[screen]
+        rollout = self.screen_rollouts[screen]
+
+        candidates = agent.valid_action_candidates(prev_raw_state)
+        if not candidates:
+            return None
+        try:
+            key = agent.action_key(action, prev_raw_state)
+        except (KeyError, ValueError):
+            return None
+        if key not in {candidate["action_key"] for candidate in candidates}:
+            return None
+
+        state = agent.encode_state(prev_raw_state)
+        action_vector = agent.encode_action(prev_raw_state, action)
+        next_state = agent.encode_state(next_raw_state)
+        next_action_vectors = agent.candidate_action_vectors(next_raw_state)
+
+        rollout.remember(
+            state,
+            action_vector,
+            reward,
+            next_state,
+            bool(done),
+            next_action_vectors,
+        )
+        loss = agent.train_step()
+        logger.debug(
+            "Agent: %s screen training step reward=%.2f loss=%s replay_size=%d",
+            screen,
+            reward,
+            loss,
+            agent.buffered_steps(),
+        )
+        return {
+            "loss": loss,
+            "updated": loss is not None,
+            "reward": float(reward),
+            "action_type": action.get("type"),
+            "screen": screen,
+            "epsilon": agent.epsilon,
+            "replay_size": agent.buffered_steps(),
+            "learn_steps": agent.learn_steps,
+            "reward_details": reward_details or {},
         }

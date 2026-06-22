@@ -70,6 +70,10 @@ class BattleStateEncoder:
   PLAYER_FEATURES = BATTLE_PLAYER_FEATURES
   ACTION_SCHEMA = BATTLE_ACTION_SCHEMA
   ACTION_TYPES = BATTLE_ACTION_TYPES
+  # Per-algorithm checkpoint schema strings (kept as the existing literals so
+  # battle checkpoints stay compatible). Each screen encoder declares its own.
+  DQN_SCHEMA = "candidate_action_v3"
+  PPO_SCHEMA = "candidate_action_ppo_v3"
 
   def __init__(self):
     self.card_vector_size = get_card_map_size() * 2
