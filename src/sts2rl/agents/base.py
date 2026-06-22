@@ -16,12 +16,17 @@ class ScreenAgent(ABC):
         """Choose a game action for the current raw screen state."""
 
 
-class BattleAgent(ScreenAgent):
-    """Interface for battle agents, including trainable implementations."""
+class TrainableScreenAgent(ScreenAgent):
+    """Interface for trainable screen agents (battle and non-battle screens).
+
+    Adds a training-aware ``choose_action`` plus optional learning/persistence
+    hooks on top of :class:`ScreenAgent`. Nothing here is battle-specific; the
+    battle agents were simply the first implementations.
+    """
 
     @abstractmethod
     def choose_action(self, state: dict, *, training: bool = False) -> dict:
-        """Choose a battle action. Training mode may enable exploration."""
+        """Choose an action. Training mode may enable exploration."""
 
     def observe(self, transition: Transition) -> TrainingInfo | None:
         """Learn from a transition. Rule-based agents can ignore experience."""
@@ -34,6 +39,10 @@ class BattleAgent(ScreenAgent):
     def load(self, path: Path) -> None:
         """Load trainable state."""
         raise NotImplementedError(f"{type(self).__name__} does not support load()")
+
+
+# Backward-compatible alias: this interface began life as the battle-agent base.
+BattleAgent = TrainableScreenAgent
 
 
 class MapAgent(ScreenAgent):

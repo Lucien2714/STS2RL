@@ -15,10 +15,10 @@ from __future__ import annotations
 
 import torch
 
-from sts2rl.agents.base import BattleAgent
+from sts2rl.agents.base import TrainableScreenAgent
 
 
-class CandidateActionAgent(BattleAgent):
+class CandidateActionAgent(TrainableScreenAgent):
   """Base for agents that score a set of legal action candidates for one screen."""
 
   def __init__(self, encoder, device=None):

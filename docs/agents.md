@@ -2,10 +2,12 @@
 
 Agent interfaces live in `sts2rl.agents.base`.
 
-`ScreenAgent` is the minimal screen-control interface. `BattleAgent`,
+`ScreenAgent` is the minimal screen-control interface. `TrainableScreenAgent`,
 `MapAgent`, and `EventAgent` specialize it for important screen families.
+(`BattleAgent` is a backward-compatible alias of `TrainableScreenAgent` — the
+interface began life as the battle-agent base and is not battle-specific.)
 
-`BattleAgent` adds optional learning and persistence hooks:
+`TrainableScreenAgent` adds optional learning and persistence hooks:
 
 ```python
 choose_action(state, training=False)
