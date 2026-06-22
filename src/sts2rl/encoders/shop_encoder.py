@@ -48,18 +48,7 @@ class ShopEncoder(CandidateEncoder):
     return candidates
 
   def encode_state(self, raw_state: dict, action_mask=None) -> list[float]:
-    player = raw_state.get("player", {})
-    run = raw_state.get("run", {})
-    hp = self._parse_int(player.get("hp", player.get("current_hp", 0)))
-    max_hp = max(1, self._parse_int(player.get("max_hp", 1)))
-    features = [
-      max(0.0, min(hp / max_hp, 1.0)),
-      self._scale(hp, max_hp),
-      self._scale(max_hp, 200),
-      self._scale(player.get("gold", 0), 999),
-      self._scale(run.get("floor", 0), 60),
-      self._scale(run.get("act", 0), 4),
-    ]
+    features = self._player_run_features(raw_state)
     affordable = self._affordable_items(raw_state)
     presence = [0.0 for _ in SHOP_CATEGORY_VOCAB]
     for item in affordable:

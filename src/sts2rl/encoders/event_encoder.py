@@ -50,18 +50,7 @@ class EventEncoder(CandidateEncoder):
     return self._event_candidates(raw_state)
 
   def encode_state(self, raw_state: dict, action_mask=None) -> list[float]:
-    player = raw_state.get("player", {})
-    run = raw_state.get("run", {})
-    hp = self._parse_int(player.get("hp", player.get("current_hp", 0)))
-    max_hp = max(1, self._parse_int(player.get("max_hp", 1)))
-    features = [
-      max(0.0, min(hp / max_hp, 1.0)),
-      self._scale(hp, max_hp),
-      self._scale(max_hp, 200),
-      self._scale(player.get("gold", 0), 999),
-      self._scale(run.get("floor", 0), 60),
-      self._scale(run.get("act", 0), 4),
-    ]
+    features = self._player_run_features(raw_state)
     event = raw_state.get("event", {})
     card_select = raw_state.get("card_select", {})
     is_card_select = raw_state.get("state_type") == "card_select"

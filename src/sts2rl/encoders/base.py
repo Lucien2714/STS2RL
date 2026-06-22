@@ -68,3 +68,19 @@ class CandidateEncoder:
   def _scale(self, value: object, denominator: int | float) -> float:
     denominator = max(float(denominator), 1.0)
     return max(0.0, min(float(self._parse_int(value)) / denominator, 1.0))
+
+  def _player_run_features(self, raw_state: dict) -> list[float]:
+    """Six shared scalar features common to every screen: hp_ratio, hp, max_hp,
+    gold, floor, act. Every screen encoder prefixes its state vector with these."""
+    player = raw_state.get("player", {})
+    run = raw_state.get("run", {})
+    hp = self._parse_int(player.get("hp", player.get("current_hp", 0)))
+    max_hp = max(1, self._parse_int(player.get("max_hp", 1)))
+    return [
+      max(0.0, min(hp / max_hp, 1.0)),
+      self._scale(hp, max_hp),
+      self._scale(max_hp, 200),
+      self._scale(player.get("gold", 0), 999),
+      self._scale(run.get("floor", 0), 60),
+      self._scale(run.get("act", 0), 4),
+    ]

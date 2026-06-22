@@ -51,7 +51,7 @@ class RewardEncoder(CandidateEncoder):
     return self._rewards_candidates(raw_state)
 
   def encode_state(self, raw_state: dict, action_mask=None) -> list[float]:
-    features = self._base_features(raw_state)
+    features = self._player_run_features(raw_state)
     presence = [0.0 for _ in REWARD_ITEM_VOCAB]
     for item in self._reward_items(raw_state):
       for index, value in enumerate(self._onehot(item.get("type"), REWARD_ITEM_VOCAB)):
@@ -174,17 +174,3 @@ class RewardEncoder(CandidateEncoder):
       if self._parse_int(relic.get("index", fallback_index), fallback_index) == index:
         return relic
     return None
-
-  def _base_features(self, raw_state: dict) -> list[float]:
-    player = raw_state.get("player", {})
-    run = raw_state.get("run", {})
-    hp = self._parse_int(player.get("hp", player.get("current_hp", 0)))
-    max_hp = max(1, self._parse_int(player.get("max_hp", 1)))
-    return [
-      max(0.0, min(hp / max_hp, 1.0)),
-      self._scale(hp, max_hp),
-      self._scale(max_hp, 200),
-      self._scale(player.get("gold", 0), 999),
-      self._scale(run.get("floor", 0), 60),
-      self._scale(run.get("act", 0), 4),
-    ]
