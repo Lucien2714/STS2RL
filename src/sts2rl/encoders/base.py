@@ -12,8 +12,10 @@ it is intentionally not migrated to avoid touching the trained battle schema.)
 
 from __future__ import annotations
 
+from abc import ABC, abstractmethod
 
-class CandidateEncoder:
+
+class CandidateEncoder(ABC):
     """Base for candidate-action screen encoders."""
 
     ACTION_TYPES: tuple[str, ...] = ()
@@ -21,6 +23,24 @@ class CandidateEncoder:
     DQN_SCHEMA: str = "screen_dqn_v1"
     PPO_SCHEMA: str = "screen_ppo_v1"
 
+    # --- primitives every concrete encoder must implement ------------------
+    @abstractmethod
+    def valid_action_candidates(self, raw_state: dict) -> list[dict]:
+        """Enumerate currently legal candidates (each a dict with 'action' and 'action_key')."""
+
+    @abstractmethod
+    def encode_state(self, raw_state: dict, action_mask=None) -> list[float]:
+        """Encode the screen state as a fixed-width vector of length ``state_size``."""
+
+    @abstractmethod
+    def encode_action(self, raw_state: dict, action: dict) -> list[float]:
+        """Encode one action as a fixed-width vector of length ``action_feature_size``."""
+
+    @abstractmethod
+    def action_key(self, action: dict, raw_state: dict | None = None) -> str:
+        """Return a stable string key identifying an action."""
+
+    # --- shared plumbing built on the primitives above ---------------------
     def candidate_action_vectors(self, raw_state: dict) -> list[list[float]]:
         """Encode every currently legal action candidate."""
         return [
