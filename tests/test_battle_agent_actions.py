@@ -6,12 +6,18 @@ from sts2rl.agents.battle.dqn_agent import BattleDQNAgent
 from sts2rl.agents.event.rule_based import EventPolicy
 from sts2rl.agents.orchestrator import Agent
 from sts2rl.env.constants import (
-    BATTLE_ENEMY_DAMAGE_REWARD,
-    BATTLE_ENEMY_KILL_REWARD,
+    BATTLE_GOLD_LOSS_PENALTY,
+    BATTLE_HP_LOSS_PENALTY,
+    BATTLE_LOSS_PENALTY,
+    BATTLE_MAX_HP_LOSS_PENALTY,
+    BATTLE_POTION_USE_PENALTY,
     BATTLE_UNUSED_ENERGY_PENALTY,
     BATTLE_WIN_REWARD,
+    RUN_ACT_REWARD,
+    RUN_FLOOR_REWARD,
+    RUN_GAME_OVER_PENALTY,
 )
-from sts2rl.env.rewards import BattleProgressReward
+from sts2rl.env.rewards import ScopedRewardModel
 
 
 def test_status_card_with_can_play_is_valid_self_action():
@@ -361,7 +367,7 @@ def test_non_battle_card_select_still_uses_event_policy():
 
 def test_rewards_after_battle_counts_as_win_reward():
     """Reward screens should terminate the battle reward as a win."""
-    reward_model = BattleProgressReward()
+    reward_model = ScopedRewardModel()
     prev_state = {
         "state_type": "elite",
         "battle": {
@@ -392,14 +398,66 @@ def test_rewards_after_battle_counts_as_win_reward():
 
     assert details["result"] == "won"
     assert details["win_reward"] == BATTLE_WIN_REWARD
-    assert details["enemy_damage_reward"] == BATTLE_ENEMY_DAMAGE_REWARD
-    assert details["enemy_kill_reward"] == BATTLE_ENEMY_KILL_REWARD
-    assert reward == (BATTLE_WIN_REWARD + BATTLE_ENEMY_DAMAGE_REWARD + BATTLE_ENEMY_KILL_REWARD)
+    assert details["enemy_hp_lost"] == 1
+    assert details["enemies_killed"] == 1
+    assert details["enemy_damage_reward"] == 0.0
+    assert details["enemy_kill_reward"] == 0.0
+    assert details["battle_reward"] == BATTLE_WIN_REWARD
+    assert details["run_reward"] == 0.0
+    assert reward == details["total"] == BATTLE_WIN_REWARD
 
 
-def test_reward_shaping_uses_small_unused_energy_penalty():
-    """Ending a turn with unused energy should be a small nudge, not a hard rule."""
-    reward_model = BattleProgressReward()
+def test_battle_reward_applies_resource_penalties_to_battle_scope():
+    """HP, potion, gold, and max HP penalties should stay in the battle scope."""
+    reward_model = ScopedRewardModel()
+    prev_state = {
+        "state_type": "monster",
+        "battle": {"enemies": [{"entity_id": "ENEMY_0", "hp": 1, "max_hp": 10}]},
+        "player": {"hp": 50, "max_hp": 80, "gold": 20},
+    }
+    next_state = {
+        "state_type": "rewards",
+        "player": {"hp": 45, "max_hp": 75, "gold": 10},
+    }
+
+    reward, details = reward_model.compute(prev_state, next_state, {"type": "use_potion"})
+
+    expected = (
+        BATTLE_WIN_REWARD
+        - 5 * BATTLE_HP_LOSS_PENALTY
+        - BATTLE_POTION_USE_PENALTY
+        - 10 * BATTLE_GOLD_LOSS_PENALTY
+        - 5 * BATTLE_MAX_HP_LOSS_PENALTY
+    )
+    assert details["battle_reward"] == expected
+    assert details["run_reward"] == 0.0
+    assert reward == details["total"] == expected
+
+
+def test_battle_loss_returns_negative_battle_terminal_reward():
+    """Game over from battle should emit the battle loss reward and run death penalty."""
+    reward_model = ScopedRewardModel()
+    prev_state = {
+        "state_type": "monster",
+        "battle": {"enemies": [{"entity_id": "ENEMY_0", "hp": 10, "max_hp": 10}]},
+        "player": {"hp": 1, "max_hp": 80, "gold": 20},
+    }
+    next_state = {
+        "state_type": "game_over",
+        "player": {"hp": 0, "max_hp": 80, "gold": 20},
+    }
+
+    reward, details = reward_model.compute(prev_state, next_state, {"type": "end_turn"})
+
+    assert details["result"] == "lost"
+    assert details["battle_reward"] == -BATTLE_LOSS_PENALTY - BATTLE_HP_LOSS_PENALTY
+    assert details["run_reward"] == -RUN_GAME_OVER_PENALTY
+    assert reward == details["battle_reward"] + details["run_reward"]
+
+
+def test_unused_energy_no_longer_changes_training_reward():
+    """Ending a turn with unused energy should be diagnostic-only by default."""
+    reward_model = ScopedRewardModel()
     prev_state = {
         "state_type": "monster",
         "battle": {"enemies": [{"entity_id": "ENEMY_0", "hp": 10, "max_hp": 10}]},
@@ -413,8 +471,32 @@ def test_reward_shaping_uses_small_unused_energy_penalty():
 
     reward, details = reward_model.compute(prev_state, next_state, {"type": "end_turn"})
 
-    assert details["end_turn_energy_penalty"] == -3 * BATTLE_UNUSED_ENERGY_PENALTY
-    assert reward == details["end_turn_energy_penalty"]
+    assert BATTLE_UNUSED_ENERGY_PENALTY == 0.0
+    assert details["end_turn_energy_penalty"] == 0.0
+    assert details["battle_reward"] == 0.0
+    assert reward == 0.0
+
+
+def test_run_reward_tracks_floor_act_and_game_over_separately():
+    """Run-progress reward should not leak into battle reward."""
+    reward_model = ScopedRewardModel()
+    prev_state = {
+        "state_type": "map",
+        "run": {"floor": 15, "act": 1},
+        "player": {"hp": 50, "max_hp": 80, "gold": 20},
+    }
+    next_state = {
+        "state_type": "game_over",
+        "run": {"floor": 17, "act": 2},
+        "player": {"hp": 0, "max_hp": 80, "gold": 20},
+    }
+
+    reward, details = reward_model.compute(prev_state, next_state, {"type": "proceed"})
+
+    expected_run = 2 * RUN_FLOOR_REWARD + RUN_ACT_REWARD - RUN_GAME_OVER_PENALTY
+    assert details["battle_reward"] == 0.0
+    assert details["run_reward"] == expected_run
+    assert reward == details["total"] == expected_run
 
 
 def test_dqn_greedy_breaks_ties_randomly_not_always_end_turn():

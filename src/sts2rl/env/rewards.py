@@ -16,10 +16,14 @@ from sts2rl.env.constants import (
     BATTLE_STATE_TYPES,
     BATTLE_UNUSED_ENERGY_PENALTY,
     BATTLE_WIN_REWARD,
+    RUN_ACT_REWARD,
+    RUN_FLOOR_REWARD,
+    RUN_GAME_OVER_PENALTY,
 )
 from sts2rl.env.state import (
     battle_has_alive_enemy,
     enemy_hp_map,
+    parse_int,
     player_gold,
     player_hp,
     player_max_hp,
@@ -48,12 +52,16 @@ class RewardModel(ABC):
             "type": "action_error",
             "error": str(error),
             "action_error": True,
+            "battle_reward": 0.0,
+            "run_reward": 0.0,
             "total": reward,
+            "battle_details": {"type": "battle", "active": False, "total": 0.0},
+            "run_details": {"type": "run", "total": 0.0},
         }
 
 
-class BattleProgressReward(RewardModel):
-    """Hand-tuned reward model for battle progress and run advancement."""
+class BattleOutcomeReward(RewardModel):
+    """Battle-scoped reward for winning fights while preserving resources."""
 
     def __init__(self) -> None:
         self.reset()
@@ -72,12 +80,21 @@ class BattleProgressReward(RewardModel):
         next_state: dict,
         action: dict | None = None,
     ) -> tuple[float, dict]:
-        """Compute reward for one raw-state transition."""
-        if self._is_battle_reward_state(prev_state):
-            reward, details = self._compute_battle_reward(prev_state, next_state, action)
-        else:
-            reward, details = self._compute_default_reward(prev_state, next_state)
+        """Compute a battle-only reward for one raw-state transition."""
+        if not self._is_battle_reward_state(prev_state):
+            reward = 0.0
+            details = {
+                "type": "battle",
+                "active": False,
+                "prev_state_type": prev_state.get("state_type"),
+                "next_state_type": next_state.get("state_type"),
+                "result": None,
+                "total": reward,
+            }
+            self._last_player_hp = player_hp(next_state, self._last_player_hp)
+            return reward, details
 
+        reward, details = self._compute_battle_reward(prev_state, next_state, action)
         self._last_player_hp = player_hp(next_state, self._last_player_hp)
         return reward, details
 
@@ -85,36 +102,13 @@ class BattleProgressReward(RewardModel):
         """Return whether a transition should use battle reward shaping."""
         return state.get("state_type") in BATTLE_STATE_TYPES or state.get("in_battle") is True
 
-    def _compute_default_reward(
-        self,
-        prev_state: dict,
-        next_state: dict,
-    ) -> tuple[float, dict]:
-        """Reward non-battle floor progress and penalize HP loss."""
-        prev_hp = player_hp(prev_state)
-        next_hp = player_hp(next_state)
-        prev_floor = prev_state.get("run", {}).get("floor", 0)
-        next_floor = next_state.get("run", {}).get("floor", 0)
-
-        reward = 0.0
-        reward += float(next_floor - prev_floor) * 10.0
-        reward += float(next_hp - prev_hp) * 0.2
-
-        if next_state.get("state_type") == "game_over":
-            reward -= 10.0
-
-        return reward, {
-            "type": "default",
-            "total": reward,
-        }
-
     def _compute_battle_reward(
         self,
         prev_state: dict,
         next_state: dict,
         action: dict | None = None,
     ) -> tuple[float, dict]:
-        """Reward enemy progress and battle outcomes while tracking battle starts."""
+        """Reward battle outcomes and small resource deltas."""
         prev_hp = player_hp(prev_state, self._last_player_hp)
         next_hp = player_hp(next_state, prev_hp)
         prev_gold = player_gold(prev_state)
@@ -136,6 +130,7 @@ class BattleProgressReward(RewardModel):
         if self._battle_reward_closed and not prev_has_alive_enemy:
             return 0.0, {
                 "type": "battle",
+                "active": True,
                 "prev_state_type": prev_state.get("state_type"),
                 "next_state_type": next_state.get("state_type"),
                 "result": None,
@@ -163,9 +158,6 @@ class BattleProgressReward(RewardModel):
 
         potion_used = bool(action and action.get("type") == "use_potion")
         potion_discarded = bool(action and action.get("type") == "discard_potion")
-        # Discarding a potion spends the consumable for no benefit, so it carries
-        # the same penalty as using one (the agent still prefers use, which also
-        # earns combat reward).
         potion_penalty = -BATTLE_POTION_USE_PENALTY if (potion_used or potion_discarded) else 0.0
         prev_state_type = prev_state.get("state_type")
         next_state_type = next_state.get("state_type")
@@ -175,6 +167,7 @@ class BattleProgressReward(RewardModel):
             next_state,
             count_missing_as_dead=battle_result != "lost",
         )
+
         enemy_damage_reward = float(enemy_hp_lost) * BATTLE_ENEMY_DAMAGE_REWARD
         enemy_kill_reward = float(enemies_killed) * BATTLE_ENEMY_KILL_REWARD
         end_turn_energy_penalty = self._end_turn_energy_penalty(prev_state, action)
@@ -208,6 +201,7 @@ class BattleProgressReward(RewardModel):
 
         return reward, {
             "type": "battle",
+            "active": True,
             "prev_state_type": prev_state_type,
             "next_state_type": next_state_type,
             "result": battle_result,
@@ -266,7 +260,7 @@ class BattleProgressReward(RewardModel):
         next_state: dict,
         count_missing_as_dead: bool,
     ) -> tuple[int, int]:
-        """Measure enemy HP damage and kill count between two battle states."""
+        """Measure diagnostic enemy HP damage and kill count between two battle states."""
         prev_enemies = enemy_hp_map(prev_state)
         next_enemies = enemy_hp_map(next_state)
         hp_lost = 0
@@ -284,16 +278,112 @@ class BattleProgressReward(RewardModel):
         return hp_lost, killed
 
     def _end_turn_energy_penalty(self, prev_state: dict, action: dict | None) -> float:
-        """Penalize ending turn with unused player energy."""
+        """Keep the old detail field while the configured penalty is zero."""
         if not action or action.get("type") != "end_turn":
             return 0.0
 
-        energy = self._parse_int(prev_state.get("player", {}).get("energy", 0))
+        energy = parse_int(prev_state.get("player", {}).get("energy", 0))
         return -BATTLE_UNUSED_ENERGY_PENALTY * float(max(0, energy))
 
-    def _parse_int(self, value: object, default: int = 0) -> int:
-        """Parse an integer-like value with a safe default."""
-        try:
-            return int(value)
-        except (TypeError, ValueError):
-            return default
+
+class RunProgressReward(RewardModel):
+    """Run-scoped reward for floors, acts, and death."""
+
+    def compute(
+        self,
+        prev_state: dict,
+        next_state: dict,
+        action: dict | None = None,
+    ) -> tuple[float, dict]:
+        """Compute run-progress reward for one transition."""
+        prev_run = prev_state.get("run", {})
+        next_run = next_state.get("run", {})
+        prev_floor = parse_int(prev_run.get("floor", 0))
+        next_floor = parse_int(next_run.get("floor", prev_floor))
+        prev_act = parse_int(prev_run.get("act", 0))
+        next_act = parse_int(next_run.get("act", prev_act))
+        floor_delta = next_floor - prev_floor
+        act_delta = next_act - prev_act
+
+        floor_reward = float(floor_delta) * RUN_FLOOR_REWARD
+        act_reward = float(act_delta) * RUN_ACT_REWARD
+        game_over_penalty = (
+            -RUN_GAME_OVER_PENALTY if next_state.get("state_type") == "game_over" else 0.0
+        )
+        reward = floor_reward + act_reward + game_over_penalty
+
+        return reward, {
+            "type": "run",
+            "prev_state_type": prev_state.get("state_type"),
+            "next_state_type": next_state.get("state_type"),
+            "prev_floor": prev_floor,
+            "next_floor": next_floor,
+            "floor_delta": floor_delta,
+            "floor_reward": floor_reward,
+            "prev_act": prev_act,
+            "next_act": next_act,
+            "act_delta": act_delta,
+            "act_reward": act_reward,
+            "game_over_penalty": game_over_penalty,
+            "total": reward,
+        }
+
+
+class ScopedRewardModel(RewardModel):
+    """Coordinate battle-training and run-progress reward scopes."""
+
+    def __init__(
+        self,
+        battle_reward_model: BattleOutcomeReward | None = None,
+        run_reward_model: RunProgressReward | None = None,
+    ) -> None:
+        self.battle_reward_model = battle_reward_model or BattleOutcomeReward()
+        self.run_reward_model = run_reward_model or RunProgressReward()
+
+    def reset(self, raw_state: dict | None = None) -> None:
+        """Reset all stateful reward scopes."""
+        self.battle_reward_model.reset(raw_state)
+        self.run_reward_model.reset(raw_state)
+
+    def compute(
+        self,
+        prev_state: dict,
+        next_state: dict,
+        action: dict | None = None,
+    ) -> tuple[float, dict]:
+        """Return total metric reward plus scoped rewards for training."""
+        battle_reward, battle_details = self.battle_reward_model.compute(
+            prev_state,
+            next_state,
+            action,
+        )
+        run_reward, run_details = self.run_reward_model.compute(prev_state, next_state, action)
+        total = battle_reward + run_reward
+        battle_active = bool(battle_details.get("active"))
+
+        details = {
+            "type": "battle" if battle_active else "run",
+            "prev_state_type": prev_state.get("state_type"),
+            "next_state_type": next_state.get("state_type"),
+            "battle_reward": battle_reward,
+            "run_reward": run_reward,
+            "total": total,
+            "battle_details": battle_details,
+            "run_details": run_details,
+        }
+        if battle_active:
+            details.update(battle_details)
+            details["battle_reward"] = battle_reward
+            details["run_reward"] = run_reward
+            details["total"] = total
+            details["battle_details"] = battle_details
+            details["run_details"] = run_details
+        return total, details
+
+    def action_error_reward(self, error: object) -> tuple[float, dict]:
+        """Return scoped zero reward details for a failed action dispatch."""
+        return super().action_error_reward(error)
+
+
+class BattleProgressReward(ScopedRewardModel):
+    """Backward-compatible name for the scoped reward model."""

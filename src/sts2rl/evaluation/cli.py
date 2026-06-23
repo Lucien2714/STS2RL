@@ -373,6 +373,7 @@ def write_evaluation_tensorboard_result(
         {
             "avg_reward": result.get("avg_reward"),
             "avg_battle_reward": result.get("avg_battle_reward"),
+            "avg_run_reward": result.get("avg_run_reward"),
             "avg_steps": result.get("avg_steps"),
             "avg_battle_steps": result.get("avg_battle_steps"),
             "avg_floor": result.get("avg_floor"),
@@ -516,6 +517,7 @@ def aggregate_client_results(
     weighted_keys = (
         "avg_reward",
         "avg_battle_reward",
+        "avg_run_reward",
         "avg_steps",
         "avg_battle_steps",
         "avg_floor",
@@ -563,6 +565,7 @@ def print_checkpoint_result(result: dict) -> None:
         f"seeds=[{result['seeds']}] "
         f"avg_reward={result['avg_reward']:.2f} "
         f"avg_battle_reward={result['avg_battle_reward']:.2f} "
+        f"avg_run_reward={result['avg_run_reward']:.2f} "
         f"avg_steps={result['avg_steps']:.1f} "
         f"ending_steps=[{result['ending_steps']}] "
         f"battle_win_rate={result['battle_win_rate']:.2%} "

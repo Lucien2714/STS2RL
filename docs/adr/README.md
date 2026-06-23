@@ -16,3 +16,4 @@ where they matter).
 | [0003](0003-candidate-encoder-abc.md) | Enforce the screen-encoder contract with an ABC | Accepted |
 | [0004](0004-learned-card-embedding.md) | Learned per-card embedding (`CardModelEncoder`) | Accepted |
 | [0005](0005-adopt-ruff.md) | Adopt ruff for formatting and linting | Accepted |
+| [0006](0006-split-battle-and-run-rewards.md) | Split battle and run reward scopes | Accepted |

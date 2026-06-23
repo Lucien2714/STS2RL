@@ -9,7 +9,7 @@ from typing import Callable
 from sts2rl.agents.orchestrator import Agent, is_battle_policy_state, normalize_battle_agent_type
 from sts2rl.env.game_env import Game
 from sts2rl.env.player import Player
-from sts2rl.env.rewards import BattleProgressReward
+from sts2rl.env.rewards import ScopedRewardModel
 from sts2rl.evaluation.dashboard import LiveEvaluationDashboard
 from sts2rl.flow.battle_flow import (
     advance_forced_end_turn_states,
@@ -74,7 +74,7 @@ def evaluate_episode(
     dashboard: LiveEvaluationDashboard | None = None,
 ) -> dict:
     """Run one evaluation episode and return aggregate episode metrics."""
-    reward_model = BattleProgressReward()
+    reward_model = ScopedRewardModel()
     player = Player(character=game.character)
     if dashboard is not None:
         dashboard.wait_if_paused()
@@ -87,6 +87,7 @@ def evaluate_episode(
 
     episode_reward = 0.0
     battle_reward = 0.0
+    run_reward = 0.0
     steps = 0
     battle_steps = 0
     battle_wins = 0
@@ -142,11 +143,12 @@ def evaluate_episode(
             auto_steps,
         )
         episode_reward += reward
+        run_reward += reward_details.get("run_reward", 0.0)
         folded_step_count = 1 + len(auto_steps)
         steps += folded_step_count
 
         if reward_details.get("type") == "battle":
-            battle_reward += reward_details.get("total", reward)
+            battle_reward += reward_details.get("battle_reward", reward)
             battle_steps += folded_step_count
             if reward_details.get("result") == "won":
                 battle_wins += 1
@@ -189,6 +191,7 @@ def evaluate_episode(
     return {
         "reward": episode_reward,
         "battle_reward": battle_reward,
+        "run_reward": run_reward,
         "steps": steps,
         "battle_steps": battle_steps,
         "battle_wins": battle_wins,
@@ -209,6 +212,7 @@ def summarize_episode_results(results: list[dict]) -> dict:
         "episodes": len(results),
         "avg_reward": sum(result["reward"] for result in results) / episode_count,
         "avg_battle_reward": sum(result["battle_reward"] for result in results) / episode_count,
+        "avg_run_reward": sum(result["run_reward"] for result in results) / episode_count,
         "avg_steps": sum(result["steps"] for result in results) / episode_count,
         "avg_battle_steps": sum(result["battle_steps"] for result in results) / episode_count,
         "battle_wins": wins,

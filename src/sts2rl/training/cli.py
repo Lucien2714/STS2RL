@@ -11,6 +11,7 @@ from sts2rl.agents.orchestrator import (
     Agent,
     create_battle_agent,
     create_screen_agents,
+    is_battle_policy_state,
     normalize_screen_agent_type,
 )
 from sts2rl.checkpoints.manager import (
@@ -24,7 +25,7 @@ from sts2rl.checkpoints.manager import (
 )
 from sts2rl.env.game_env import Game
 from sts2rl.env.player import Player
-from sts2rl.env.rewards import BattleProgressReward
+from sts2rl.env.rewards import ScopedRewardModel
 from sts2rl.flow.battle_flow import (
     advance_forced_end_turn_states,
     fold_reward_details,
@@ -276,6 +277,12 @@ def json_dumps_stable(value: object) -> str:
     return json.dumps(value, sort_keys=True, default=str)
 
 
+def training_reward_for_state(raw_state: dict, reward: float, reward_details: dict) -> float:
+    """Choose the scoped reward for the agent that controls a raw state."""
+    key = "battle_reward" if is_battle_policy_state(raw_state) else "run_reward"
+    return float(reward_details.get(key, reward))
+
+
 def is_connection_error_text(error: object) -> bool:
     """Return whether an error string looks like a transient client disconnect."""
     text = str(error)
@@ -453,7 +460,7 @@ def run_training_client(
     """Run the training loop for one STS2MCP client."""
     game = Game(character=0, base_url=base_url)
     player = Player(character=game.character)
-    reward_model = BattleProgressReward()
+    reward_model = ScopedRewardModel()
     # Per-client orchestrator with its own rollout collector over the shared model.
     agent = shared.new_client_agent()
     episode = 1
@@ -623,13 +630,14 @@ def run_training_client(
                     reward,
                     auto_steps,
                 )
+                training_reward = training_reward_for_state(prev_raw_state, reward, reward_details)
                 training_info = None
                 if not forced_end_turn:
                     with shared.agent_lock:
                         training_info = agent.train_from_step(
                             prev_raw_state,
                             action,
-                            reward,
+                            training_reward,
                             next_raw_state,
                             done,
                             reward_details,
@@ -648,7 +656,7 @@ def run_training_client(
 
                 loss = None
                 if reward_details.get("type") == "battle":
-                    step_battle_reward = reward_details.get("total", reward)
+                    step_battle_reward = reward_details.get("battle_reward", reward)
                     battle_reward += step_battle_reward
                     current_battle_reward += step_battle_reward
                     current_battle_steps += folded_step_count
@@ -710,7 +718,7 @@ def run_training_client(
                             f"clients/{client_id}/train",
                             {
                                 "loss": loss,
-                                "reward": reward,
+                                "reward": training_info["reward"],
                                 "epsilon": train_epsilon,
                                 "replay_size": train_replay_size,
                                 "learn_steps": train_learn_steps,

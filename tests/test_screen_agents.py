@@ -10,6 +10,8 @@ from sts2rl.agents.orchestrator import (
     screen_name_for_state,
 )
 from sts2rl.encoders.rest_encoder import RestEncoder
+from sts2rl.env.rewards import ScopedRewardModel
+from sts2rl.training.cli import training_reward_for_state
 
 
 def rest_state(enabled=True) -> dict:
@@ -198,3 +200,38 @@ def test_orchestrator_routes_and_trains_each_screen(screen):
 
     info = agent.train_from_step(state, action, reward=1.0, next_raw_state=state, done=False)
     assert info is not None and info["screen"] == screen
+
+
+def test_training_reward_for_state_uses_battle_scope_for_battle_agent():
+    """Battle-controlled transitions should train on battle reward only."""
+    reward_model = ScopedRewardModel()
+    prev_state = {
+        "state_type": "monster",
+        "battle": {"enemies": [{"entity_id": "ENEMY_0", "hp": 1, "max_hp": 10}]},
+        "player": {"hp": 50, "max_hp": 80, "gold": 20},
+        "run": {"floor": 1, "act": 1},
+    }
+    next_state = {
+        "state_type": "rewards",
+        "player": {"hp": 50, "max_hp": 80, "gold": 20},
+        "run": {"floor": 2, "act": 1},
+    }
+    total, details = reward_model.compute(prev_state, next_state, {"type": "play_card"})
+
+    assert details["battle_reward"] != details["run_reward"]
+    assert training_reward_for_state(prev_state, total, details) == details["battle_reward"]
+
+
+def test_training_reward_for_state_uses_run_scope_for_screen_agents():
+    """Non-battle screen transitions should train on run reward only."""
+    reward_model = ScopedRewardModel()
+    prev_state = SCREEN_STATES["map"]
+    next_state = {
+        **prev_state,
+        "run": {"floor": 4, "act": 1},
+    }
+    total, details = reward_model.compute(prev_state, next_state, {"type": "choose_map_node"})
+
+    assert details["battle_reward"] == 0.0
+    assert details["run_reward"] > 0.0
+    assert training_reward_for_state(prev_state, total, details) == details["run_reward"]

@@ -183,6 +183,12 @@ def fold_reward_details(
 
     folded = dict(reward_details or {})
     folded["total"] = float(total_reward)
+    folded["battle_reward"] = float(folded.get("battle_reward", 0.0)) + sum(
+        float(step.get("reward_details", {}).get("battle_reward", 0.0)) for step in auto_steps
+    )
+    folded["run_reward"] = float(folded.get("run_reward", 0.0)) + sum(
+        float(step.get("reward_details", {}).get("run_reward", 0.0)) for step in auto_steps
+    )
     folded["auto_steps"] = len(auto_steps)
     folded["auto_end_turns"] = sum(
         1 for step in auto_steps if step.get("action", {}).get("type") == "end_turn"
@@ -215,7 +221,7 @@ def fold_reward_details(
         step_details = step.get("reward_details", {})
         if step_details.get("type") != "battle":
             continue
-        latest_battle_details = step_details
+        latest_battle_details = step_details.get("battle_details", step_details)
         for key in reward_component_keys:
             folded[key] = float(folded.get(key, 0.0)) + float(step_details.get(key, 0.0))
 
@@ -240,5 +246,7 @@ def fold_reward_details(
         ):
             if key in latest_battle_details:
                 folded[key] = latest_battle_details[key]
+        if "battle_details" in folded:
+            folded["battle_details"] = latest_battle_details
 
     return folded
