@@ -4,8 +4,10 @@ import pytest
 
 from sts2rl.agents.candidate_ppo_agent import PPOCandidateAgent
 from sts2rl.agents.orchestrator import (
-    SCREEN_ENCODERS,
+    SCREEN_AGENTS,
+    SCREEN_NAMES,
     Agent,
+    create_screen_agent,
     create_screen_agents,
     screen_name_for_state,
 )
@@ -93,9 +95,20 @@ def test_orchestrator_falls_back_when_no_candidates():
 def test_create_screen_agents_registers_all_screens():
     """The screen-agent factory builds one PPO agent per registered screen."""
     agents = create_screen_agents("PPO")
-    assert set(agents) == set(SCREEN_ENCODERS)
+    assert set(agents) == set(SCREEN_NAMES)
     for screen, agent in agents.items():
         assert agent.ACTION_SCHEMA == f"{screen}_ppo_v1"
+        # Each agent is its dedicated per-screen class, not a bare candidate agent.
+        assert type(agent) is SCREEN_AGENTS[screen]["PPO"]
+
+
+@pytest.mark.parametrize("screen", sorted(SCREEN_NAMES))
+def test_create_screen_agent_picks_dedicated_class(screen):
+    """The single-screen factory returns the registered DQN/PPO class per screen."""
+    for agent_type in ("DQN", "PPO"):
+        agent = create_screen_agent(screen, agent_type)
+        assert type(agent) is SCREEN_AGENTS[screen][agent_type]
+        assert agent.ACTION_SCHEMA == f"{screen}_{agent_type.lower()}_v1"
 
 
 # A representative raw state per screen with at least one real candidate.
@@ -173,7 +186,7 @@ SCREEN_STATES = {
 }
 
 
-@pytest.mark.parametrize("screen", sorted(SCREEN_ENCODERS))
+@pytest.mark.parametrize("screen", sorted(SCREEN_NAMES))
 def test_screen_encoder_dims_are_consistent(screen):
     """Each screen's encoded widths match the agent's declared dims."""
     agent = create_screen_agents("PPO")[screen]
@@ -186,7 +199,7 @@ def test_screen_encoder_dims_are_consistent(screen):
         assert agent.action_key(candidate["action"], state) == candidate["action_key"]
 
 
-@pytest.mark.parametrize("screen", sorted(SCREEN_ENCODERS))
+@pytest.mark.parametrize("screen", sorted(SCREEN_NAMES))
 def test_orchestrator_routes_and_trains_each_screen(screen):
     """The orchestrator routes each screen to its agent and trains the transition."""
     agents = create_screen_agents("PPO")

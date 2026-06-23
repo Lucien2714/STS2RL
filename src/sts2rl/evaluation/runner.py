@@ -1,12 +1,20 @@
 """Checkpoint evaluation loop and result aggregation utilities."""
 
 import csv
+import logging
 import math
 import time
 from pathlib import Path
 from typing import Callable
 
-from sts2rl.agents.orchestrator import Agent, is_battle_policy_state, normalize_battle_agent_type
+from sts2rl.agents.orchestrator import (
+    Agent,
+    create_screen_agents,
+    is_battle_policy_state,
+    normalize_battle_agent_type,
+    normalize_screen_agent_type,
+)
+from sts2rl.checkpoints.manager import agent_latest_path
 from sts2rl.env.game_env import Game
 from sts2rl.env.player import Player
 from sts2rl.env.rewards import ScopedRewardModel
@@ -35,7 +43,46 @@ def choose_eval_action(agent: Agent, raw_state: dict) -> dict:
         "screen_type": state_type,
         "raw_state": raw_state,
     }
-    return agent.choose_action(policy_state)
+    return agent.choose_action(policy_state, training=False)
+
+
+def load_eval_screen_agents(screen_agent_type: str | None) -> dict:
+    """Build screen agents and load each one's latest checkpoint for evaluation.
+
+    Screens with no checkpoint (or an incompatible one) are dropped so the
+    orchestrator falls back to their rule-based policy. Returns ``{}`` when no
+    screen-agent type is requested.
+    """
+    if screen_agent_type is None:
+        return {}
+
+    screen_agent_type = normalize_screen_agent_type(screen_agent_type)
+    loaded = {}
+    for screen, agent in create_screen_agents(screen_agent_type).items():
+        path = agent_latest_path(screen, screen_agent_type)
+        if not path.exists():
+            logging.info(
+                "No %s %s screen checkpoint at %s; using rule-based fallback",
+                screen_agent_type,
+                screen,
+                path,
+            )
+            continue
+        try:
+            agent.load(str(path))
+            agent.model.eval()
+        except Exception as exc:
+            logging.warning(
+                "Could not load %s %s screen agent from %s; using rule-based fallback. error=%s",
+                screen_agent_type,
+                screen,
+                path,
+                exc,
+            )
+            continue
+        loaded[screen] = agent
+        logging.info("Loaded %s %s screen agent from %s", screen_agent_type, screen, path)
+    return loaded
 
 
 def current_q_values(agent: Agent, raw_state: dict, selected_action: dict | None = None) -> dict:
@@ -240,13 +287,15 @@ def evaluate_checkpoint(
     pause_between_episodes: bool = True,
     after_episode: Callable[[str, str, str, int], None] | None = None,
     battle_agent_type: str = "DQN",
+    screen_agent_type: str | None = None,
 ) -> dict:
     """Load a checkpoint, run evaluation episodes, and summarize results."""
     if dashboard is not None:
         dashboard.wait_if_paused()
 
     battle_agent_type = normalize_battle_agent_type(battle_agent_type)
-    agent = Agent(battle_agent_type=battle_agent_type)
+    screen_agents = load_eval_screen_agents(screen_agent_type)
+    agent = Agent(battle_agent_type=battle_agent_type, screen_agents=screen_agents)
     agent.battle_agent.load(str(checkpoint_path))
     agent.battle_agent.model.eval()
 

@@ -1,10 +1,28 @@
 """Tests for behavioral-cloning pretraining and the recordings reader."""
 
 import json
+from pathlib import Path
+
+import pytest
 
 from sts2rl.agents.battle.dqn_agent import BattleDQNAgent
+from sts2rl.agents.map.agent import MapDQNAgent
+from sts2rl.agents.orchestrator import (
+    SCREEN_NAMES,
+    is_battle_policy_state,
+    screen_name_for_state,
+)
 from sts2rl.data.recordings import iter_recordings, load_recordings
-from sts2rl.training.pretrain import build_examples, pretrain
+from sts2rl.training.pretrain import (
+    PretrainTarget,
+    bucket_samples,
+    build_examples,
+    main,
+    parse_args,
+    pretrain,
+    resolve_target_names,
+    screen_samples,
+)
 
 
 def battle_state(enemy_hp: int = 10) -> dict:
@@ -120,6 +138,49 @@ def test_build_examples_counts_unmatched_action():
     assert stats.no_match == 1
 
 
+def forced_end_turn_state() -> dict:
+    """Battle state where end_turn is the only legal action (no plays, no potions)."""
+    return {
+        "state_type": "monster",
+        "battle": {
+            "turn": "player",
+            "is_play_phase": True,
+            "enemies": [{"entity_id": "ENEMY_0", "hp": 10, "max_hp": 10}],
+        },
+        "player": {
+            "energy": 0,
+            "max_energy": 3,
+            "hand": [
+                {
+                    "index": 0,
+                    "id": "STRIKE_IRONCLAD",
+                    "type": "Attack",
+                    "cost": "1",
+                    "target_type": "Enemy",
+                    "can_play": False,
+                },
+            ],
+            "potions": [],
+            "status": [],
+            "relics": [],
+        },
+    }
+
+
+def test_build_examples_skips_single_candidate_states():
+    """Forced states (only end_turn legal) teach nothing, so they are skipped."""
+    agent = BattleDQNAgent(hidden_size=16)
+    state = forced_end_turn_state()
+    # Sanity check: the encoder really exposes only end_turn here.
+    assert [c["action_key"] for c in agent.valid_action_candidates(state)] == ["end_turn"]
+
+    examples, stats = build_examples(agent, [(state, {"type": "end_turn"})])
+    assert examples == []
+    assert stats.single_candidate == 1
+    assert stats.matched == 0
+    assert stats.no_match == 0
+
+
 def test_pretrain_runs_and_checkpoint_round_trips(tmp_path):
     """BC training runs end-to-end and saves a checkpoint a fresh agent can load."""
     agent = BattleDQNAgent(hidden_size=16)
@@ -134,3 +195,160 @@ def test_pretrain_runs_and_checkpoint_round_trips(tmp_path):
     loaded = BattleDQNAgent(hidden_size=16)
     loaded.load(str(path))
     assert loaded.epsilon == agent.epsilon_min
+
+
+def map_state() -> dict:
+    """Map state with two legal next-node choices."""
+    return {
+        "state_type": "map",
+        "map": {
+            "next_options": [
+                {"index": 0, "type": "Monster", "col": 2, "row": 3},
+                {"index": 1, "type": "Shop", "col": 3, "row": 3},
+            ]
+        },
+        "player": {"hp": 40, "max_hp": 80, "gold": 99},
+        "run": {"floor": 3, "act": 1},
+    }
+
+
+def map_recordings() -> list[tuple[dict, dict]]:
+    """Recorded map choices in the mod's API action schema."""
+    return [
+        (map_state(), {"type": "choose_map_node", "index": 0}),
+        (map_state(), {"type": "choose_map_node", "index": 1}),
+    ]
+
+
+def test_build_examples_matches_screen_recordings():
+    """A screen agent matches its recordings via the shared candidate interface."""
+    agent = MapDQNAgent(hidden_size=16)
+    examples, stats = build_examples(agent, map_recordings())
+
+    assert stats.total == 2
+    assert stats.matched == 2
+    assert examples[0].state_action.shape[1] == agent.model_input_size
+
+
+def test_screen_samples_filters_foreign_states(tmp_path):
+    """screen_samples keeps only states the screen controls (drops other screens)."""
+    reward_record = (
+        {
+            "state_type": "rewards",
+            "rewards": {"items": [{"index": 0, "type": "card"}], "can_proceed": True},
+            "player": {"hp": 40, "max_hp": 80, "gold": 99},
+            "run": {"floor": 3, "act": 1},
+        },
+        {"type": "proceed"},
+    )
+    path = tmp_path / "run.jsonl"
+    write_jsonl(path, [*map_recordings(), reward_record])
+
+    kept = list(screen_samples([path], "map"))
+    assert len(kept) == 2
+    assert all(action["type"] == "choose_map_node" for _, action in kept)
+
+
+def test_pretrain_screen_agent_round_trips(tmp_path):
+    """Screen-agent BC runs end-to-end and the checkpoint loads with its own schema."""
+    agent = MapDQNAgent(hidden_size=16)
+    examples, _ = build_examples(agent, map_recordings() * 8)
+
+    pretrain(agent, examples, epochs=2, batch_size=4, val_split=0.25)
+
+    path = tmp_path / "mapagent.pt"
+    agent.save(str(path))
+
+    loaded = MapDQNAgent(hidden_size=16)
+    loaded.load(str(path))
+    assert loaded.ACTION_SCHEMA == "map_dqn_v1"
+
+
+def reward_state() -> dict:
+    """Reward screen with two claimable items and a proceed option."""
+    return {
+        "state_type": "rewards",
+        "rewards": {
+            "items": [{"index": 0, "type": "card"}, {"index": 1, "type": "gold"}],
+            "can_proceed": True,
+        },
+        "player": {"hp": 40, "max_hp": 80, "gold": 99},
+        "run": {"floor": 3, "act": 1},
+    }
+
+
+def reward_recordings() -> list[tuple[dict, dict]]:
+    """Recorded reward claims in the mod's API action schema."""
+    return [
+        (reward_state(), {"type": "claim_reward", "index": 1}),
+        (reward_state(), {"type": "claim_reward", "index": 0}),
+    ]
+
+
+def names_for(*argv: str) -> list[str]:
+    """Resolve target names from a CLI selection (recordings arg is required)."""
+    return resolve_target_names(parse_args(["--recordings", "x", *argv]))
+
+
+def test_resolve_target_names_selection_cases():
+    """The CLI selection maps to the documented target set."""
+    assert names_for() == ["battle"]
+    assert names_for("--screen", "map") == ["map"]
+    assert names_for("--screen", "map", "--screen", "shop") == ["map", "shop"]
+    assert names_for("--screen", "all") == ["battle", *SCREEN_NAMES]
+    assert names_for("--screen", "all", "--screens-only") == list(SCREEN_NAMES)
+    with pytest.raises(SystemExit):
+        names_for("--screens-only")  # battle removed, nothing left
+
+
+def test_bucket_samples_routes_each_state_to_its_target(tmp_path):
+    """One pass over recordings routes each state to exactly one controlling target."""
+    targets = [
+        PretrainTarget("battle", None, Path("x"), is_battle_policy_state),
+        PretrainTarget("map", None, Path("x"), lambda s: screen_name_for_state(s) == "map"),
+        PretrainTarget("reward", None, Path("x"), lambda s: screen_name_for_state(s) == "reward"),
+    ]
+    battle_record = (battle_state(), {"type": "play_card", "card_index": 0, "target": "ENEMY_0"})
+    path = tmp_path / "mixed.jsonl"
+    write_jsonl(path, [battle_record, *map_recordings(), *reward_recordings()])
+
+    bucket_samples([path], targets, limit=None)
+
+    by_name = {target.name: target for target in targets}
+    assert len(by_name["battle"].samples) == 1
+    assert len(by_name["map"].samples) == 2
+    assert len(by_name["reward"].samples) == 2
+
+
+def test_main_trains_multiple_screen_agents(tmp_path, monkeypatch):
+    """`--screen map --screen reward` pretrains both, each to its own checkpoint."""
+    path = tmp_path / "mixed.jsonl"
+    write_jsonl(path, [*map_recordings() * 4, *reward_recordings() * 4])
+    monkeypatch.chdir(tmp_path)
+
+    main(["--recordings", str(path), "--screen", "map", "--screen", "reward", "--epochs", "1", "--seed", "0"])
+
+    assert (tmp_path / "checkpoints" / "mapAgent" / "PPO" / "mapagent_latest.pt").exists()
+    assert (tmp_path / "checkpoints" / "rewardAgent" / "PPO" / "rewardagent_latest.pt").exists()
+    assert not (tmp_path / "checkpoints" / "battleAgent").exists()
+
+
+def test_main_screen_all_includes_battle_and_skips_empty(tmp_path, monkeypatch):
+    """`--screen all` trains battle from battle recordings; empty screens are skipped."""
+    path = tmp_path / "battle_only.jsonl"
+    write_jsonl(path, sample_recordings() * 4)
+    monkeypatch.chdir(tmp_path)
+
+    main(["--recordings", str(path), "--screen", "all", "--battle-agent", "DQN", "--epochs", "1", "--seed", "0"])
+
+    assert (tmp_path / "checkpoints" / "battleAgent" / "DQN" / "battleagent_latest.pt").exists()
+    # Recordings held no screen states, so those targets produced no files.
+    assert not (tmp_path / "checkpoints" / "mapAgent").exists()
+
+
+def test_main_rejects_out_with_multiple_targets(tmp_path):
+    """--out is ambiguous when more than one agent is trained."""
+    path = tmp_path / "rec.jsonl"
+    write_jsonl(path, map_recordings())
+    with pytest.raises(SystemExit):
+        main(["--recordings", str(path), "--screen", "all", "--out", str(tmp_path / "x.pt")])

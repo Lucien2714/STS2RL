@@ -42,6 +42,16 @@ def parse_args() -> argparse.Namespace:
         help="Battle agent implementation to evaluate.",
     )
     parser.add_argument(
+        "--screen-agent",
+        choices=["DQN", "PPO", "none"],
+        default="none",
+        help=(
+            "Also load trained non-battle screen agents of this type from their "
+            "latest checkpoints. Screens without a checkpoint use the rule-based policy. "
+            "Defaults to 'none' (rule-based screens only)."
+        ),
+    )
+    parser.add_argument(
         "--checkpoint-dir",
         type=Path,
         default=None,
@@ -269,6 +279,7 @@ def main() -> None:
     )
 
     battle_agent_type = normalize_battle_agent_type(args.battle_agent)
+    screen_agent_type = None if args.screen_agent.lower() == "none" else args.screen_agent
     tensorboard = TensorBoardLogger(
         args.tensorboard_logdir,
         f"evaluation_{battle_agent_type}_{time.strftime('%Y%m%d-%H%M%S')}",
@@ -339,6 +350,7 @@ def main() -> None:
                     dashboard,
                     client_episode_seeds,
                     battle_agent_type,
+                    screen_agent_type,
                 )
             except Exception as exc:
                 logging.exception("Could not evaluate checkpoint %s: %s", checkpoint_path, exc)
@@ -399,6 +411,7 @@ def evaluate_checkpoint_clients(
     dashboard: LiveEvaluationDashboard | None,
     client_episode_seeds: list[list[str]],
     battle_agent_type: str,
+    screen_agent_type: str | None = None,
 ) -> dict:
     """Evaluate one checkpoint using one or more STS2MCP clients."""
     if len(client_urls) == 1:
@@ -417,6 +430,7 @@ def evaluate_checkpoint_clients(
             client_id="client-1",
             pause_between_episodes=args.auto_pause,
             battle_agent_type=battle_agent_type,
+            screen_agent_type=screen_agent_type,
         )
 
     results: list[dict] = []
@@ -458,6 +472,7 @@ def evaluate_checkpoint_clients(
                 pause_between_episodes=False,
                 after_episode=episode_gate.wait if episode_gate is not None else None,
                 battle_agent_type=battle_agent_type,
+                screen_agent_type=screen_agent_type,
             )
             with lock:
                 results.append(result)

@@ -36,6 +36,20 @@ the battle agent; pass `encoder=<ScreenEncoder>()` to drive a non-battle screen
 `sts2rl.agents.battle.dqn_agent` / `...ppo_agent` modules are thin re-export
 shims for backward compatibility.
 
+Each non-battle screen also has a dedicated, importable agent class per algorithm
+that binds its encoder — `MapDQNAgent` / `MapPPOAgent` in
+`sts2rl.agents.map.agent`, and likewise `Reward*`, `Shop*`, `Rest*`, `Event*` in
+each `sts2rl.agents.<screen>.agent`. These thin subclasses are the discoverable
+type and extension point for per-screen behavior; the encoder still owns all
+screen-specific encoding and candidate logic. The orchestrator registry
+`SCREEN_AGENTS` (`screen → {"DQN", "PPO"} → class`) maps them, and the factories
+`create_screen_agent(screen, type)` / `create_screen_agents(type)` build them.
+Each screen agent gets its own schema (`map_dqn_v1`, `reward_ppo_v1`, …), model,
+optimizer, and checkpoint file (`checkpoints/<screen>Agent/<TYPE>/...`), so screens
+train, save, load, pretrain, and evaluate independently of the battle agent and of
+each other. Screens with no registered/loaded agent fall back to their rule-based
+policy.
+
 The top-level `Agent` uses `DQNCandidateAgent` (battle encoder) by default, but
 accepts an explicit battle agent type or instance for experiments. Battle routing
 includes combat screens, `hand_select`, and `card_select` overlays while

@@ -10,6 +10,7 @@ Default behavior:
 - assigns each client its own episode seeds
 - reuses the same seed assignment for every checkpoint
 - battle actions use `training=False`
+- non-battle screens use their rule-based policies unless `--screen-agent` loads trained screen agents
 - no replay writes, model updates, or checkpoint saves occur
 - clients do not wait between episodes unless `--no-reset` or `--auto-pause`
 
@@ -24,6 +25,7 @@ uv run sts2rl-evaluate --episodes 3 --client-port 15526
 | Parameter | Type | Default | Description |
 |---|---|---:|---|
 | `--checkpoint-dir` | path | `checkpoints` | Directory scanned for `.pt` battle-agent checkpoints. Step checkpoints are evaluated before the latest checkpoint. |
+| `--screen-agent` | choice | `none` | Also load trained non-battle screen agents (`DQN`/`PPO`) from each screen's latest checkpoint (`checkpoints/<screen>Agent/<TYPE>/<screen>agent_latest.pt`). Screens without a checkpoint fall back to their rule-based policy; screen decisions use `training=False` (greedy). |
 | `--episodes` | integer | `3` | Number of episodes to run for each checkpoint on each client. |
 | `--character` | integer | `0` | Character index passed to the environment. Current mapping is `0=IRONCLAD`, `1=SILENT`, `2=REGENT`, `3=NECROBINDER`, `4=DEFECT`. |
 | `--client-host` | string | `localhost` | Host used when building STS2MCP API URLs from `--client-port`. |

@@ -5,16 +5,16 @@ import logging
 from sts2rl.agents.candidate_dqn_agent import DQNCandidateAgent
 from sts2rl.agents.candidate_ppo_agent import PPOCandidateAgent
 from sts2rl.agents.default.rule_based import DefaultPolicy
+from sts2rl.agents.event.agent import EventDQNAgent, EventPPOAgent
 from sts2rl.agents.event.rule_based import EventPolicy
+from sts2rl.agents.map.agent import MapDQNAgent, MapPPOAgent
 from sts2rl.agents.map.rule_based import MapPolicy
+from sts2rl.agents.rest.agent import RestDQNAgent, RestPPOAgent
 from sts2rl.agents.rest.rule_based import RestPolicy
+from sts2rl.agents.reward.agent import RewardDQNAgent, RewardPPOAgent
 from sts2rl.agents.reward.rule_based import RewardPolicy
+from sts2rl.agents.shop.agent import ShopDQNAgent, ShopPPOAgent
 from sts2rl.agents.shop.rule_based import ShopPolicy
-from sts2rl.encoders.event_encoder import EventEncoder
-from sts2rl.encoders.map_encoder import MapEncoder
-from sts2rl.encoders.rest_encoder import RestEncoder
-from sts2rl.encoders.reward_encoder import RewardEncoder
-from sts2rl.encoders.shop_encoder import ShopEncoder
 
 logger = logging.getLogger(__name__)
 
@@ -38,17 +38,19 @@ BATTLE_AGENT_TYPES = {
 }
 
 # --- non-battle screen agents -------------------------------------------------
-# Trainable candidate-action agents for the non-battle screens. Each screen maps
-# to an encoder; agents are created via create_screen_agents() and shared across
-# clients (one model/optimizer each), mirroring the battle agent.
-SCREEN_ENCODERS = {
-    "map": MapEncoder,
-    "reward": RewardEncoder,
-    "shop": ShopEncoder,
-    "rest": RestEncoder,
-    "event": EventEncoder,
+# Trainable candidate-action agents for the non-battle screens. Each screen has a
+# dedicated agent class per algorithm (binding its encoder); agents are created via
+# create_screen_agents() and shared across clients (one model/optimizer each),
+# mirroring the battle agent.
+SCREEN_AGENTS = {
+    "map": {"DQN": MapDQNAgent, "PPO": MapPPOAgent},
+    "reward": {"DQN": RewardDQNAgent, "PPO": RewardPPOAgent},
+    "shop": {"DQN": ShopDQNAgent, "PPO": ShopPPOAgent},
+    "rest": {"DQN": RestDQNAgent, "PPO": RestPPOAgent},
+    "event": {"DQN": EventDQNAgent, "PPO": EventPPOAgent},
 }
-SCREEN_AGENT_TYPES = {"DQN": DQNCandidateAgent, "PPO": PPOCandidateAgent}
+SCREEN_NAMES = tuple(SCREEN_AGENTS)
+SCREEN_AGENT_TYPES = {"DQN", "PPO"}
 
 # Map raw state_type -> screen name used for routing/training.
 SCREEN_BY_STATE_TYPE = {
@@ -85,12 +87,18 @@ def create_battle_agent(agent_type: str):
     return BATTLE_AGENT_TYPES[normalize_battle_agent_type(agent_type)]()
 
 
+def create_screen_agent(screen: str, agent_type: str = "PPO"):
+    """Create the trainable agent for one non-battle screen by name and type."""
+    agent_type = normalize_screen_agent_type(agent_type)
+    if screen not in SCREEN_AGENTS:
+        raise ValueError(f"Unknown screen agent: {screen!r}")
+    return SCREEN_AGENTS[screen][agent_type]()
+
+
 def create_screen_agents(agent_type: str = "PPO") -> dict:
     """Create one trainable agent per registered non-battle screen."""
-    agent_cls = SCREEN_AGENT_TYPES[normalize_screen_agent_type(agent_type)]
-    return {
-        screen: agent_cls(encoder=encoder_cls()) for screen, encoder_cls in SCREEN_ENCODERS.items()
-    }
+    agent_type = normalize_screen_agent_type(agent_type)
+    return {screen: classes[agent_type]() for screen, classes in SCREEN_AGENTS.items()}
 
 
 def is_battle_policy_state(raw_state: dict) -> bool:
@@ -136,15 +144,19 @@ class Agent:
         self.event_policy = EventPolicy()
         self.default_policy = DefaultPolicy()
 
-    def choose_action(self, state: dict) -> dict:
-        """Choose the next action for a normalized policy-state wrapper."""
+    def choose_action(self, state: dict, training: bool = True) -> dict:
+        """Choose the next action for a normalized policy-state wrapper.
+
+        ``training`` enables exploration (epsilon-greedy / sampling). Evaluation
+        passes ``training=False`` so screen agents act greedily.
+        """
         screen_type = state.get("screen_type")
         raw_state = state["raw_state"]
 
         logger.debug("Agent: choosing action screen_type=%s", screen_type)
 
         if is_battle_policy_state(raw_state):
-            action = self.rollout.choose_action(raw_state, training=True)
+            action = self.rollout.choose_action(raw_state, training=training)
             logger.debug(
                 "Agent: selected %s action=%s",
                 type(self.battle_agent).__name__,
@@ -157,7 +169,7 @@ class Agent:
         if screen in self.screen_agents and self.screen_agents[screen].valid_action_candidates(
             raw_state
         ):
-            action = self.screen_rollouts[screen].choose_action(raw_state, training=True)
+            action = self.screen_rollouts[screen].choose_action(raw_state, training=training)
             logger.debug("Agent: selected %s screen agent action=%s", screen, action)
             return action
 
