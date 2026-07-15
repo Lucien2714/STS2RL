@@ -14,6 +14,7 @@ import torch
 from torch import nn
 from torch.distributions import Categorical
 
+from sts2rl.action_spaces.battle import BattleActionSpace
 from sts2rl.agents.candidate_agent import CandidateActionAgent
 from sts2rl.encoders.battle_encoder import BattleStateEncoder
 
@@ -188,6 +189,7 @@ class PPOCandidateAgent(CandidateActionAgent):
     def __init__(
         self,
         encoder=None,
+        action_space=None,
         gamma=0.99,
         learning_rate=0.00025,
         hidden_size=256,
@@ -201,7 +203,11 @@ class PPOCandidateAgent(CandidateActionAgent):
         max_grad_norm=0.5,
         device=None,
     ):
-        super().__init__(encoder or BattleStateEncoder(), device=device)
+        super().__init__(
+            encoder or BattleStateEncoder(),
+            action_space or BattleActionSpace(),
+            device=device,
+        )
         self.ACTION_SCHEMA = self.encoder.PPO_SCHEMA
         self.gamma = gamma
         self.rollout_steps = rollout_steps

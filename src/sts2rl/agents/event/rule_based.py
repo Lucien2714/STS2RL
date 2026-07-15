@@ -4,7 +4,7 @@ import logging
 import re
 
 from sts2rl.agents.base import EventAgent
-from sts2rl.agents.selection import (
+from sts2rl.action_spaces.selection import (
     can_confirm_selection,
     can_select_more,
     exact_required_count,

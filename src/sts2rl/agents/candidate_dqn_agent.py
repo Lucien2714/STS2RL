@@ -19,6 +19,7 @@ from collections import deque
 import torch
 from torch import nn
 
+from sts2rl.action_spaces.battle import BattleActionSpace
 from sts2rl.agents.candidate_agent import CandidateActionAgent
 from sts2rl.encoders.battle_encoder import BattleStateEncoder
 
@@ -49,6 +50,7 @@ class DQNCandidateAgent(CandidateActionAgent):
     def __init__(
         self,
         encoder=None,
+        action_space=None,
         gamma=0.8,
         epsilon=1.0,
         learning_rate=0.00025,
@@ -61,7 +63,11 @@ class DQNCandidateAgent(CandidateActionAgent):
         hidden_size=256,
         device=None,
     ):
-        super().__init__(encoder or BattleStateEncoder(), device=device)
+        super().__init__(
+            encoder or BattleStateEncoder(),
+            action_space or BattleActionSpace(),
+            device=device,
+        )
         self.ACTION_SCHEMA = self.encoder.DQN_SCHEMA
         self.update_freq = update_freq
         self.update_freq_target = update_freq_target

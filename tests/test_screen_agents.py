@@ -2,6 +2,7 @@
 
 import pytest
 
+from sts2rl.action_spaces.rest import RestActionSpace
 from sts2rl.agents.candidate_ppo_agent import PPOCandidateAgent
 from sts2rl.agents.orchestrator import (
     SCREEN_AGENTS,
@@ -32,7 +33,12 @@ def rest_state(enabled=True) -> dict:
 
 
 def make_rest_agent() -> PPOCandidateAgent:
-    return PPOCandidateAgent(encoder=RestEncoder(), hidden_size=16, rollout_steps=2)
+    return PPOCandidateAgent(
+        encoder=RestEncoder(),
+        action_space=RestActionSpace(),
+        hidden_size=16,
+        rollout_steps=2,
+    )
 
 
 def test_rest_encoder_candidates_and_dims():

@@ -1,17 +1,19 @@
-"""Rest-site screen encoder: choose among enabled rest options."""
+"""Rest-site featurizer: encode rest-site state and option-choice actions."""
 
 from __future__ import annotations
 
+from sts2rl.action_spaces.rest import enabled_options, option_by_index
 from sts2rl.encoders.base import CandidateEncoder
 
 # Coarse vocabulary of rest-site option kinds (matched as substrings of id/name).
 REST_OPTION_VOCAB = ("rest", "heal", "smith", "upgrade", "dig", "lift", "recall", "toke")
 
+# Schema-critical: the tuple order defines the encode_action one-hot layout.
 REST_ACTION_TYPES = ("choose_rest_option", "proceed")
 
 
 class RestEncoder(CandidateEncoder):
-    """Encode rest-site state and enumerate the enabled rest options as candidates."""
+    """Encode rest-site state and the enabled rest-option actions."""
 
     ACTION_TYPES = REST_ACTION_TYPES
     SCHEMA = "rest"
@@ -34,23 +36,10 @@ class RestEncoder(CandidateEncoder):
         )
         self.model_input_size = self.state_size + self.action_feature_size
 
-    def valid_action_candidates(self, raw_state: dict) -> list[dict]:
-        options = self._enabled_options(raw_state)
-        candidates = []
-        for option in options:
-            index = self._parse_int(option.get("index", 0))
-            candidates.append(
-                self._candidate(
-                    {"type": "choose_rest_option", "index": index},
-                    f"choose_rest_option:{index}",
-                )
-            )
-        return candidates
-
     def encode_state(self, raw_state: dict, action_mask=None) -> list[float]:
         features = self._player_run_features(raw_state)
         presence = [0.0 for _ in REST_OPTION_VOCAB]
-        options = self._enabled_options(raw_state)
+        options = enabled_options(raw_state)
         for option in options:
             for index, value in enumerate(
                 self._onehot(self._option_kind(option), REST_OPTION_VOCAB)
@@ -65,31 +54,13 @@ class RestEncoder(CandidateEncoder):
         action_type = action.get("type")
         features = self._action_type_features(action_type)
         if action_type == "choose_rest_option":
-            option = self._option_by_index(raw_state, self._parse_int(action.get("index", -1)))
+            option = option_by_index(raw_state, self._parse_int(action.get("index", -1)))
             features.extend(self._onehot(self._option_kind(option), REST_OPTION_VOCAB))
             features.append(self._scale(action.get("index", 0), self.MAX_OPTIONS))
         else:
             features.extend([0.0] * self.option_vocab_size)
             features.append(0.0)
         return [float(value) for value in features]
-
-    def action_key(self, action: dict, raw_state: dict | None = None) -> str:
-        if action.get("action_key"):
-            return str(action["action_key"])
-        action_type = action.get("type")
-        if action_type == "choose_rest_option":
-            return f"choose_rest_option:{action.get('index')}"
-        return "proceed"
-
-    def _enabled_options(self, raw_state: dict) -> list[dict]:
-        options = raw_state.get("rest_site", {}).get("options", [])
-        return [option for option in options if option.get("is_enabled", True)]
-
-    def _option_by_index(self, raw_state: dict, index: int) -> dict | None:
-        for option in raw_state.get("rest_site", {}).get("options", []):
-            if self._parse_int(option.get("index", -1)) == index:
-                return option
-        return None
 
     def _option_kind(self, option: dict | None) -> str:
         if not option:
