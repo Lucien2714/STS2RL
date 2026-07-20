@@ -5,10 +5,10 @@ from pathlib import Path
 
 import pytest
 
-from sts2rl.agents.battle.dqn_agent import BattleDQNAgent
-from sts2rl.agents.map.agent import MapDQNAgent
+from sts2rl.agents.candidate_dqn_agent import DQNCandidateAgent
 from sts2rl.agents.orchestrator import (
     SCREEN_NAMES,
+    create_screen_agent,
     is_battle_policy_state,
     screen_name_for_state,
 )
@@ -108,7 +108,7 @@ def test_iter_recordings_reads_directory(tmp_path):
 
 def test_recorded_actions_match_exactly_one_candidate():
     """Each recorded action must map onto exactly one legal candidate (schema contract)."""
-    agent = BattleDQNAgent(hidden_size=16)
+    agent = DQNCandidateAgent(hidden_size=16)
     for raw_state, action in sample_recordings():
         target_key = agent.action_key(action, raw_state)
         candidate_keys = [c["action_key"] for c in agent.valid_action_candidates(raw_state)]
@@ -117,7 +117,7 @@ def test_recorded_actions_match_exactly_one_candidate():
 
 def test_build_examples_matches_all_recordings():
     """build_examples should match every well-formed recording and report the rate."""
-    agent = BattleDQNAgent(hidden_size=16)
+    agent = DQNCandidateAgent(hidden_size=16)
     examples, stats = build_examples(agent, sample_recordings())
 
     assert stats.total == 3
@@ -129,7 +129,7 @@ def test_build_examples_matches_all_recordings():
 
 def test_build_examples_counts_unmatched_action():
     """An action that is not among the candidates is counted as no_match, not crashed."""
-    agent = BattleDQNAgent(hidden_size=16)
+    agent = DQNCandidateAgent(hidden_size=16)
     # slot 5 has no potion, so use_potion:5 produces no matching candidate.
     bad = [(battle_state(), {"type": "use_potion", "slot": 5})]
     examples, stats = build_examples(agent, bad)
@@ -169,7 +169,7 @@ def forced_end_turn_state() -> dict:
 
 def test_build_examples_skips_single_candidate_states():
     """Forced states (only end_turn legal) teach nothing, so they are skipped."""
-    agent = BattleDQNAgent(hidden_size=16)
+    agent = DQNCandidateAgent(hidden_size=16)
     state = forced_end_turn_state()
     # Sanity check: the encoder really exposes only end_turn here.
     assert [c["action_key"] for c in agent.valid_action_candidates(state)] == ["end_turn"]
@@ -183,7 +183,7 @@ def test_build_examples_skips_single_candidate_states():
 
 def test_pretrain_runs_and_checkpoint_round_trips(tmp_path):
     """BC training runs end-to-end and saves a checkpoint a fresh agent can load."""
-    agent = BattleDQNAgent(hidden_size=16)
+    agent = DQNCandidateAgent(hidden_size=16)
     examples, _ = build_examples(agent, sample_recordings() * 8)
 
     pretrain(agent, examples, epochs=3, batch_size=4, val_split=0.25)
@@ -192,7 +192,7 @@ def test_pretrain_runs_and_checkpoint_round_trips(tmp_path):
     path = tmp_path / "pretrained.pt"
     agent.save(str(path))
 
-    loaded = BattleDQNAgent(hidden_size=16)
+    loaded = DQNCandidateAgent(hidden_size=16)
     loaded.load(str(path))
     assert loaded.epsilon == agent.epsilon_min
 
@@ -222,7 +222,7 @@ def map_recordings() -> list[tuple[dict, dict]]:
 
 def test_build_examples_matches_screen_recordings():
     """A screen agent matches its recordings via the shared candidate interface."""
-    agent = MapDQNAgent(hidden_size=16)
+    agent = create_screen_agent("map", "DQN", hidden_size=16)
     examples, stats = build_examples(agent, map_recordings())
 
     assert stats.total == 2
@@ -251,7 +251,7 @@ def test_screen_samples_filters_foreign_states(tmp_path):
 
 def test_pretrain_screen_agent_round_trips(tmp_path):
     """Screen-agent BC runs end-to-end and the checkpoint loads with its own schema."""
-    agent = MapDQNAgent(hidden_size=16)
+    agent = create_screen_agent("map", "DQN", hidden_size=16)
     examples, _ = build_examples(agent, map_recordings() * 8)
 
     pretrain(agent, examples, epochs=2, batch_size=4, val_split=0.25)
@@ -259,7 +259,7 @@ def test_pretrain_screen_agent_round_trips(tmp_path):
     path = tmp_path / "mapagent.pt"
     agent.save(str(path))
 
-    loaded = MapDQNAgent(hidden_size=16)
+    loaded = create_screen_agent("map", "DQN", hidden_size=16)
     loaded.load(str(path))
     assert loaded.ACTION_SCHEMA == "map_dqn_v1"
 

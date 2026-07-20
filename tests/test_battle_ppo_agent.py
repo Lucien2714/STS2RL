@@ -1,6 +1,6 @@
 """Tests for the PPO battle agent."""
 
-from sts2rl.agents.battle.ppo_agent import BattlePPOAgent, PPOBattleAgent
+from sts2rl.agents.candidate_ppo_agent import PPOCandidateAgent
 from sts2rl.agents.orchestrator import Agent
 
 
@@ -35,14 +35,9 @@ def playable_battle_state(enemy_hp: int = 10) -> dict:
     }
 
 
-def test_ppo_alias_exports_agent_class():
-    """The short PPO alias should match the exported agent."""
-    assert PPOBattleAgent is BattlePPOAgent
-
-
 def test_ppo_choose_action_returns_legal_candidate_with_probability():
     """PPO action selection should sample from legal candidate actions."""
-    agent = BattlePPOAgent(rollout_steps=2, hidden_size=32)
+    agent = PPOCandidateAgent(rollout_steps=2, hidden_size=32)
     raw_state = playable_battle_state()
 
     action = agent.choose_action(raw_state, training=True)
@@ -58,7 +53,7 @@ def test_ppo_choose_action_returns_legal_candidate_with_probability():
 
 def test_ppo_train_step_updates_after_rollout_and_clears_buffer():
     """A full rollout should run one clipped PPO update."""
-    agent = BattlePPOAgent(
+    agent = PPOCandidateAgent(
         rollout_steps=2,
         minibatch_size=1,
         update_epochs=1,
@@ -88,12 +83,12 @@ def test_ppo_train_step_updates_after_rollout_and_clears_buffer():
 def test_ppo_checkpoint_round_trip(tmp_path):
     """PPO checkpoints should load into a fresh PPO agent."""
     path = tmp_path / "battle_ppo.pt"
-    agent = BattlePPOAgent(rollout_steps=2, hidden_size=32)
+    agent = PPOCandidateAgent(rollout_steps=2, hidden_size=32)
     agent.trained_steps = 3
     agent.learn_steps = 1
 
     agent.save(str(path))
-    loaded = BattlePPOAgent(rollout_steps=2, hidden_size=32)
+    loaded = PPOCandidateAgent(rollout_steps=2, hidden_size=32)
     loaded.load(str(path))
 
     assert loaded.trained_steps == 3
@@ -102,7 +97,7 @@ def test_ppo_checkpoint_round_trip(tmp_path):
 
 def test_orchestrator_accepts_ppo_battle_agent():
     """The top-level policy router can be constructed with PPO."""
-    battle_agent = BattlePPOAgent(rollout_steps=2, hidden_size=32)
+    battle_agent = PPOCandidateAgent(rollout_steps=2, hidden_size=32)
     agent = Agent(battle_agent=battle_agent)
 
     action = agent.choose_action(
@@ -120,12 +115,12 @@ def test_orchestrator_creates_ppo_from_agent_type():
     """The top-level policy router can build PPO by type name."""
     agent = Agent(battle_agent_type="PPO")
 
-    assert isinstance(agent.battle_agent, BattlePPOAgent)
+    assert isinstance(agent.battle_agent, PPOCandidateAgent)
 
 
 def test_ppo_collectors_isolate_pending_transitions():
     """Interleaved collectors must not clobber each other's on-policy pending data."""
-    agent = BattlePPOAgent(rollout_steps=8, hidden_size=32)
+    agent = PPOCandidateAgent(rollout_steps=8, hidden_size=32)
     collector_a = agent.new_rollout()
     collector_b = agent.new_rollout()
     state_a = playable_battle_state()
@@ -162,7 +157,7 @@ def test_ppo_collectors_isolate_pending_transitions():
 
 def test_ppo_update_groups_trajectories_and_clears_buffers():
     """An update over two collectors runs one PPO step and clears every buffer."""
-    agent = BattlePPOAgent(
+    agent = PPOCandidateAgent(
         rollout_steps=4,
         minibatch_size=2,
         update_epochs=1,

@@ -41,10 +41,6 @@ class TrainableScreenAgent(ScreenAgent):
         raise NotImplementedError(f"{type(self).__name__} does not support load()")
 
 
-# Backward-compatible alias: this interface began life as the battle-agent base.
-BattleAgent = TrainableScreenAgent
-
-
 class MapAgent(ScreenAgent):
     """Interface for map-routing agents."""
 

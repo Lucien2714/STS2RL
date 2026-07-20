@@ -8,7 +8,7 @@ enumeration from :mod:`sts2rl.action_spaces`, feature encoding from
 
 A bare ``DQNCandidateAgent()`` defaults to the battle encoder/action space and
 *is* the battle agent; pass ``encoder=`` / ``action_space=`` for a non-battle
-screen. ``BattleDQNAgent`` is a backward-compatible alias (see bottom of module).
+screen (the orchestrator's ``create_screen_agent`` builds those bindings).
 """
 
 from __future__ import annotations
@@ -330,11 +330,3 @@ class SharedReplayCollector:
 
     def remember(self, *args, **kwargs) -> None:
         return self.agent.remember(*args, **kwargs)
-
-
-# --- backward-compatible aliases ---------------------------------------------
-# `DQNCandidateAgent` (default encoder = BattleStateEncoder) is the battle agent
-# under its old names; older `*Battle*` imports keep working.
-BattleDQNAgent = DQNCandidateAgent
-DQNBattleAgent = DQNCandidateAgent
-BattleQNetwork = CandidateQNetwork

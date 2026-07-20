@@ -3,24 +3,31 @@
 STS2RL separates the project into stable layers:
 
 - `env/`: STS2MCP client integration, reset flow, environment stepping, reward boundaries.
-- `agents/`: abstract agent interfaces and concrete agents. `TrainableScreenAgent`
-  (`agents/base.py`; `BattleAgent` is a back-compat alias) is the trainable-agent
-  interface. The candidate-action agents `DQNCandidateAgent` / `PPOCandidateAgent`
+- `agents/`: abstract agent interfaces and the *algorithm* agents.
+  `TrainableScreenAgent` (`agents/base.py`) is the trainable-agent interface. The
+  candidate-action agents `DQNCandidateAgent` / `PPOCandidateAgent`
   (`agents/candidate_dqn_agent.py` / `candidate_ppo_agent.py`) subclass
-  `CandidateActionAgent`, which *composes* a screen encoder; each agent owns only
-  its network and training logic. A bare instance defaults to the battle encoder
-  and is the battle agent; the `agents/battle/` modules are re-export shims keeping
-  the legacy `BattleDQNAgent` / `BattlePPOAgent` names. See
-  [ADR-0001](adr/0001-trainable-screen-agents.md) and
-  [ADR-0002](adr/0002-screen-neutral-agent-naming.md).
-- `encoders/`: **model-free** (no torch) state/action encoding and legal-action
-  enumeration. `BattleStateEncoder` for battle, plus one `CandidateEncoder`
-  subclass per non-battle screen (map, reward, shop, rest, event). The orchestrator
-  routes a screen to its trainable agent when it has legal candidates, else to a
-  rule-based policy.
-- `models/`: reusable **learned** `nn.Module` components (e.g. `CardModelEncoder`,
-  a learned per-card embedding — see [card-embedding.md](card-embedding.md)). Kept
-  separate from the model-free `encoders/`.
+  `CandidateActionAgent`, which *composes* an action space + encoder pair; each
+  agent owns only its update rule, optimizer, buffers, and checkpoint IO, and
+  accepts a swappable policy module. A bare instance defaults to the battle
+  components and is the battle agent; screen agents are built from the
+  orchestrator's `SCREEN_SPECS` registry. See
+  [ADR-0001](adr/0001-trainable-screen-agents.md),
+  [ADR-0002](adr/0002-screen-neutral-agent-naming.md), and
+  [ADR-0007](adr/0007-action-space-policy-algorithm-split.md).
+- `action_spaces/`: **torch-free game rules** — legal-action candidate
+  enumeration, stable action keys, and fallbacks, one `ActionSpace` per screen
+  (battle, map, reward, shop, rest, event). Imports only stdlib + `sts2rl.data`.
+- `encoders/`: **model-free** (no torch) state/action featurization.
+  `BattleStateEncoder` for battle, plus one `CandidateEncoder` subclass per
+  non-battle screen. The orchestrator routes a screen to its trainable agent when
+  it has legal candidates, else to a rule-based policy.
+- `models/`: reusable **learned** `nn.Module` components: the candidate-scoring
+  policy modules (`models/policies.py` — `CandidateQNetwork`,
+  `CandidatePPOPolicy`, shared `score()` contract) and building blocks such as
+  `CardModelEncoder` (a learned per-card embedding — see
+  [card-embedding.md](card-embedding.md)). Kept separate from the model-free
+  `encoders/`.
 - `training/`: training CLI, runner, telemetry, dashboard, and episode logs.
 - `evaluation/`: checkpoint evaluation, seeded custom runs, dashboard, and CSV output.
 - `checkpoints/`: checkpoint paths and discovery helpers.

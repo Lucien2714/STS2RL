@@ -2,7 +2,7 @@
 
 import torch
 
-from sts2rl.agents.battle.dqn_agent import BattleDQNAgent
+from sts2rl.agents.candidate_dqn_agent import DQNCandidateAgent
 from sts2rl.agents.event.rule_based import EventPolicy
 from sts2rl.agents.orchestrator import Agent
 from sts2rl.env.constants import (
@@ -22,7 +22,7 @@ from sts2rl.env.rewards import ScopedRewardModel
 
 def test_status_card_with_can_play_is_valid_self_action():
     """Playable status cards such as Slimed should be legal actions."""
-    agent = BattleDQNAgent()
+    agent = DQNCandidateAgent()
     raw_state = {
         "state_type": "monster",
         "battle": {
@@ -62,7 +62,7 @@ def test_status_card_with_can_play_is_valid_self_action():
 
 def test_status_card_without_can_play_stays_invalid():
     """Status cards without explicit backend playability remain filtered."""
-    agent = BattleDQNAgent()
+    agent = DQNCandidateAgent()
     raw_state = {
         "state_type": "monster",
         "battle": {
@@ -98,7 +98,7 @@ def test_status_card_without_can_play_stays_invalid():
 
 def test_play_card_candidates_merge_duplicates_but_split_identity_versions():
     """Same identity cards merge, while upgraded/enchanted versions split."""
-    agent = BattleDQNAgent()
+    agent = DQNCandidateAgent()
     raw_state = {
         "state_type": "monster",
         "battle": {
@@ -171,7 +171,7 @@ def test_play_card_candidates_merge_duplicates_but_split_identity_versions():
 
 def test_non_battle_state_has_no_dqn_action_candidates():
     """Non-battle screens should not create fake bootstrap actions."""
-    agent = BattleDQNAgent()
+    agent = DQNCandidateAgent()
     raw_state = {
         "state_type": "treasure",
         "player": {
@@ -190,7 +190,7 @@ def test_non_battle_state_has_no_dqn_action_candidates():
 
 def test_non_player_play_phase_has_no_dqn_q_values():
     """Enemy turns should not expose playable DQN candidates."""
-    agent = BattleDQNAgent()
+    agent = DQNCandidateAgent()
     raw_state = {
         "state_type": "monster",
         "battle": {
@@ -217,7 +217,7 @@ def test_non_player_play_phase_has_no_dqn_q_values():
 
 def test_enemy_target_type_variants_generate_targeted_actions():
     """Target strings from MCP payloads should be normalized before masking."""
-    agent = BattleDQNAgent()
+    agent = DQNCandidateAgent()
     raw_state = {
         "state_type": "monster",
         "battle": {
@@ -267,7 +267,7 @@ def test_enemy_target_type_variants_generate_targeted_actions():
 
 def test_in_battle_card_select_generates_per_card_candidates():
     """Battle-context card_select should expose each concrete card as a candidate."""
-    agent = BattleDQNAgent()
+    agent = DQNCandidateAgent()
     raw_state = {
         "state_type": "card_select",
         "in_battle": True,
@@ -502,7 +502,7 @@ def test_run_reward_tracks_floor_act_and_game_over_separately():
 def test_dqn_greedy_breaks_ties_randomly_not_always_end_turn():
     """With equal candidate Q-values, greedy selection must not always pick the
     first candidate (end_turn); ties are broken randomly."""
-    agent = BattleDQNAgent(hidden_size=16)
+    agent = DQNCandidateAgent(hidden_size=16)
     agent.epsilon = 0.0  # pure greedy
 
     # Force every candidate to score identically by zeroing the output layer.
@@ -555,7 +555,7 @@ def test_dqn_greedy_breaks_ties_randomly_not_always_end_turn():
 
 def test_potion_candidates_include_discard():
     """Every held potion is discardable; only combat-usable potions can be used."""
-    agent = BattleDQNAgent()
+    agent = DQNCandidateAgent()
     raw_state = {
         "state_type": "monster",
         "battle": {

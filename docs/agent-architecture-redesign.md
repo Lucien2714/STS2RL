@@ -1,12 +1,15 @@
 # Design note: separating representation, model, and algorithm in the agents
 
-- Status: **Proposed** (would be ratified as ADR-0007)
-- Date: 2026-07-15
+- Status: **Accepted** — ratified as
+  [ADR-0007](adr/0007-action-space-policy-algorithm-split.md); Phases 0–2 are
+  implemented, Phase 3 (learned featurizers) is a deferred follow-up
+- Date: 2026-07-15 (proposed) / 2026-07-19 (accepted)
 - Related: ADR-0001 (candidate-action framework), ADR-0003 (encoder ABC),
   ADR-0004 (learned card embedding), [card-embedding.md](card-embedding.md)
 
-This note proposes a restructuring of the trainable agents. It is a **proposal for
-review**, not an accepted decision — no code changes until it is ratified.
+This note motivated the restructuring of the trainable agents; ADR-0007 records
+the decision as implemented (the `action_spaces/` package name and the retired
+compat shims were settled during review).
 
 ## 1. The problem
 
@@ -187,13 +190,15 @@ Phase 3 changes what is learned.
 - **One mega-agent class with strategy flags.** Rejected: moves the coupling into
   conditionals; the whole point is to separate the axes into composable objects.
 
-## 8. Open questions
+## 8. Open questions (resolved at ratification)
 
-- Do we keep the flat `[state ⧺ action]` concat as the PolicyModule contract, or let
-  a PolicyModule consume structured (per-entity) state so attention models are
-  possible without a flat bottleneck? (Leaning: featurizer may emit structured
-  tensors; `FlatConcatPolicy` flattens, richer policies don't.)
-- Where does `ActionSpace` physically live — `actions/`, `env/`, or a new
-  `action_space/` package? (It imports game-data lookups, not torch.)
-- Retire the `battle/…` and `*Battle*` alias shims now, or keep them one more
-  release per ADR-0002?
+- Flat vs structured PolicyModule input: Phases 0–2 keep the flat
+  `[state ⧺ action]` tensor contract (`score(state_action)`), matching today's
+  numerics. Structured per-entity input remains open for Phase 3, where the
+  featurizer joins the policy module anyway.
+- `ActionSpace` home: a new `action_spaces/` package (torch-free; imports only
+  stdlib + `sts2rl.data`), which also absorbed `agents/selection.py` and fixed
+  the `encoders → agents` circular-import edge.
+- Compat shims: retired immediately (`agents/battle/`, `*Battle*` aliases,
+  `BattleAgent`, the ten per-screen subclasses, `SCREEN_AGENTS`); tests updated
+  to the canonical names.

@@ -8,7 +8,7 @@ enumeration from :mod:`sts2rl.action_spaces`, feature encoding from
 
 A bare ``PPOCandidateAgent()`` defaults to the battle encoder/action space and
 *is* the battle agent; pass ``encoder=`` / ``action_space=`` for a non-battle
-screen. ``BattlePPOAgent`` is a backward-compatible alias (see bottom of module).
+screen (the orchestrator's ``create_screen_agent`` builds those bindings).
 """
 
 from __future__ import annotations
@@ -23,7 +23,7 @@ from torch.distributions import Categorical
 from sts2rl.action_spaces.battle import BattleActionSpace
 from sts2rl.agents.candidate_agent import CandidateActionAgent
 from sts2rl.encoders.battle_encoder import BattleStateEncoder
-from sts2rl.models.policies import CandidatePPOPolicy, layer_init  # noqa: F401 (re-export)
+from sts2rl.models.policies import CandidatePPOPolicy
 
 logger = logging.getLogger(__name__)
 
@@ -471,11 +471,3 @@ class PPOCandidateAgent(CandidateActionAgent):
             self.learn_steps,
             self.ACTION_SCHEMA,
         )
-
-
-# --- backward-compatible aliases ---------------------------------------------
-# `PPOCandidateAgent` (default encoder = BattleStateEncoder) is the battle agent
-# under its old names; older `*Battle*` imports keep working.
-BattlePPOAgent = PPOCandidateAgent
-PPOBattleAgent = PPOCandidateAgent
-BattlePPOPolicy = CandidatePPOPolicy

@@ -1,6 +1,8 @@
 # ADR-0002: Screen-neutral agent naming with backward-compatible battle shims
 
-- Status: Accepted
+- Status: Accepted (amended by ADR-0007: the transitional `agents/battle/` shim
+  modules and `*Battle*` aliases have since been retired; the canonical
+  `DQNCandidateAgent` / `PPOCandidateAgent` names remain)
 - Date: 2026-06-22
 - Related: ADR-0001
 

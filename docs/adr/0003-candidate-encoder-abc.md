@@ -1,6 +1,9 @@
 # ADR-0003: Enforce the screen-encoder contract with an ABC
 
-- Status: Accepted
+- Status: Accepted (amended by ADR-0007: `valid_action_candidates` / `action_key`
+  moved off the encoder ABC into the per-screen `ActionSpace` classes in
+  `action_spaces/`; `CandidateEncoder` now enforces only the representation
+  primitives `encode_state` / `encode_action`)
 - Date: 2026-06-22
 - Related: ADR-0001
 

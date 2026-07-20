@@ -1,20 +1,26 @@
 """Top-level policy router that delegates each screen to a specialized agent."""
 
 import logging
+from dataclasses import dataclass
 
+from sts2rl.action_spaces.event import EventActionSpace
+from sts2rl.action_spaces.map import MapActionSpace
+from sts2rl.action_spaces.rest import RestActionSpace
+from sts2rl.action_spaces.reward import RewardActionSpace
+from sts2rl.action_spaces.shop import ShopActionSpace
 from sts2rl.agents.candidate_dqn_agent import DQNCandidateAgent
 from sts2rl.agents.candidate_ppo_agent import PPOCandidateAgent
 from sts2rl.agents.default.rule_based import DefaultPolicy
-from sts2rl.agents.event.agent import EventDQNAgent, EventPPOAgent
 from sts2rl.agents.event.rule_based import EventPolicy
-from sts2rl.agents.map.agent import MapDQNAgent, MapPPOAgent
 from sts2rl.agents.map.rule_based import MapPolicy
-from sts2rl.agents.rest.agent import RestDQNAgent, RestPPOAgent
 from sts2rl.agents.rest.rule_based import RestPolicy
-from sts2rl.agents.reward.agent import RewardDQNAgent, RewardPPOAgent
 from sts2rl.agents.reward.rule_based import RewardPolicy
-from sts2rl.agents.shop.agent import ShopDQNAgent, ShopPPOAgent
 from sts2rl.agents.shop.rule_based import ShopPolicy
+from sts2rl.encoders.event_encoder import EventEncoder
+from sts2rl.encoders.map_encoder import MapEncoder
+from sts2rl.encoders.rest_encoder import RestEncoder
+from sts2rl.encoders.reward_encoder import RewardEncoder
+from sts2rl.encoders.shop_encoder import ShopEncoder
 
 logger = logging.getLogger(__name__)
 
@@ -38,18 +44,29 @@ BATTLE_AGENT_TYPES = {
 }
 
 # --- non-battle screen agents -------------------------------------------------
-# Trainable candidate-action agents for the non-battle screens. Each screen has a
-# dedicated agent class per algorithm (binding its encoder); agents are created via
-# create_screen_agents() and shared across clients (one model/optimizer each),
-# mirroring the battle agent.
-SCREEN_AGENTS = {
-    "map": {"DQN": MapDQNAgent, "PPO": MapPPOAgent},
-    "reward": {"DQN": RewardDQNAgent, "PPO": RewardPPOAgent},
-    "shop": {"DQN": ShopDQNAgent, "PPO": ShopPPOAgent},
-    "rest": {"DQN": RestDQNAgent, "PPO": RestPPOAgent},
-    "event": {"DQN": EventDQNAgent, "PPO": EventPPOAgent},
+# Trainable candidate-action agents for the non-battle screens. A screen agent is
+# a *configuration* of the shared DQN/PPO algorithms — its action space (legal
+# moves) plus its encoder (features) — not a dedicated subclass. Agents are
+# created via create_screen_agent(s)() and shared across clients (one
+# model/optimizer each), mirroring the battle agent.
+
+
+@dataclass(frozen=True)
+class ScreenSpec:
+    """The per-screen components bound into a candidate-action agent."""
+
+    action_space: type
+    encoder: type
+
+
+SCREEN_SPECS = {
+    "map": ScreenSpec(MapActionSpace, MapEncoder),
+    "reward": ScreenSpec(RewardActionSpace, RewardEncoder),
+    "shop": ScreenSpec(ShopActionSpace, ShopEncoder),
+    "rest": ScreenSpec(RestActionSpace, RestEncoder),
+    "event": ScreenSpec(EventActionSpace, EventEncoder),
 }
-SCREEN_NAMES = tuple(SCREEN_AGENTS)
+SCREEN_NAMES = tuple(SCREEN_SPECS)
 SCREEN_AGENT_TYPES = {"DQN", "PPO"}
 
 # Map raw state_type -> screen name used for routing/training.
@@ -82,23 +99,27 @@ def normalize_screen_agent_type(agent_type: str) -> str:
     return agent_type
 
 
-def create_battle_agent(agent_type: str):
+def create_battle_agent(agent_type: str, **kwargs):
     """Create a battle agent implementation by type name."""
-    return BATTLE_AGENT_TYPES[normalize_battle_agent_type(agent_type)]()
+    return BATTLE_AGENT_TYPES[normalize_battle_agent_type(agent_type)](**kwargs)
 
 
-def create_screen_agent(screen: str, agent_type: str = "PPO"):
+def create_screen_agent(screen: str, agent_type: str = "PPO", **kwargs):
     """Create the trainable agent for one non-battle screen by name and type."""
     agent_type = normalize_screen_agent_type(agent_type)
-    if screen not in SCREEN_AGENTS:
+    if screen not in SCREEN_SPECS:
         raise ValueError(f"Unknown screen agent: {screen!r}")
-    return SCREEN_AGENTS[screen][agent_type]()
+    spec = SCREEN_SPECS[screen]
+    return BATTLE_AGENT_TYPES[agent_type](
+        encoder=spec.encoder(),
+        action_space=spec.action_space(),
+        **kwargs,
+    )
 
 
 def create_screen_agents(agent_type: str = "PPO") -> dict:
     """Create one trainable agent per registered non-battle screen."""
-    agent_type = normalize_screen_agent_type(agent_type)
-    return {screen: classes[agent_type]() for screen, classes in SCREEN_AGENTS.items()}
+    return {screen: create_screen_agent(screen, agent_type) for screen in SCREEN_SPECS}
 
 
 def is_battle_policy_state(raw_state: dict) -> bool:

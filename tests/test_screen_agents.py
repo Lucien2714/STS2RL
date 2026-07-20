@@ -5,8 +5,9 @@ import pytest
 from sts2rl.action_spaces.rest import RestActionSpace
 from sts2rl.agents.candidate_ppo_agent import PPOCandidateAgent
 from sts2rl.agents.orchestrator import (
-    SCREEN_AGENTS,
+    BATTLE_AGENT_TYPES,
     SCREEN_NAMES,
+    SCREEN_SPECS,
     Agent,
     create_screen_agent,
     create_screen_agents,
@@ -104,16 +105,20 @@ def test_create_screen_agents_registers_all_screens():
     assert set(agents) == set(SCREEN_NAMES)
     for screen, agent in agents.items():
         assert agent.ACTION_SCHEMA == f"{screen}_ppo_v1"
-        # Each agent is its dedicated per-screen class, not a bare candidate agent.
-        assert type(agent) is SCREEN_AGENTS[screen]["PPO"]
+        # Each agent is the shared PPO algorithm bound to its screen's components.
+        assert isinstance(agent, BATTLE_AGENT_TYPES["PPO"])
+        assert type(agent.action_space) is SCREEN_SPECS[screen].action_space
+        assert type(agent.encoder) is SCREEN_SPECS[screen].encoder
 
 
 @pytest.mark.parametrize("screen", sorted(SCREEN_NAMES))
-def test_create_screen_agent_picks_dedicated_class(screen):
-    """The single-screen factory returns the registered DQN/PPO class per screen."""
+def test_create_screen_agent_binds_registered_components(screen):
+    """The single-screen factory binds the registered space/encoder per screen."""
     for agent_type in ("DQN", "PPO"):
         agent = create_screen_agent(screen, agent_type)
-        assert type(agent) is SCREEN_AGENTS[screen][agent_type]
+        assert isinstance(agent, BATTLE_AGENT_TYPES[agent_type])
+        assert type(agent.action_space) is SCREEN_SPECS[screen].action_space
+        assert type(agent.encoder) is SCREEN_SPECS[screen].encoder
         assert agent.ACTION_SCHEMA == f"{screen}_{agent_type.lower()}_v1"
 
 

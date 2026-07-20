@@ -1,6 +1,6 @@
 """Tests for MCP card and hand selection counts."""
 
-from sts2rl.agents.battle.dqn_agent import BattleDQNAgent
+from sts2rl.agents.candidate_dqn_agent import DQNCandidateAgent
 from sts2rl.agents.event.rule_based import EventPolicy
 from sts2rl.agents.orchestrator import Agent, is_battle_policy_state
 from sts2rl.flow.battle_flow import advance_forced_hand_select_states
@@ -231,7 +231,7 @@ def test_hand_select_steps_are_trained_as_battle_actions():
 
 def test_hand_select_candidates_confirm_only_after_required_count():
     """Hand-select action candidates should select up to the exact count."""
-    battle_agent = BattleDQNAgent()
+    battle_agent = DQNCandidateAgent()
     raw_state = {
         "state_type": "hand_select",
         "hand_select": {
