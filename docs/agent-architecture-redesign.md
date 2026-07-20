@@ -144,9 +144,12 @@ Checkpoint compatibility is the sharp edge; loads are gated by the schema string
 - **Structural refactor (Phases 0–2) is checkpoint-preserving.** The hand-crafted
   featurizer + the *same* MLP produce an identical tensor graph. The only risk is
   `state_dict` **key prefixes** shifting when the MLP is nested under the
-  PolicyModule (e.g. `net.0.weight` → `net.net.0.weight`). Handle with a one-time
-  key-remap in `load()` keyed off the existing schema string — no retrain needed,
-  no schema bump.
+  PolicyModule (e.g. `net.0.weight` → `net.net.0.weight`).
+  *Ratified in implementation (ADR-0007): no key remap was needed at all* — the
+  policy modules moved to `models/policies.py` as-is (same class, same `net` /
+  `actor` / `critic` attributes) and remain the object saved under
+  `"model_state_dict"`, so keys are byte-identical. `tests/test_policies.py` pins
+  the key sets so future changes fail loudly.
 - **Learned featurizers (Phase 3) are a schema bump.** New schema string (e.g.
   `candidate_action_learned_v1`); old checkpoints are retrained. ADR-0004 already
   anticipated exactly this, so it is an accepted, isolated cost — and now opt-in

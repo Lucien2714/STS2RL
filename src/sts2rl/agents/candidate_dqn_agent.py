@@ -1,17 +1,19 @@
-"""Trainable candidate-action DQN agent.
+"""DQN algorithm for candidate-action agents.
 
-The state/action encoding and legal-action enumeration live in a screen-specific
-encoder (see :mod:`sts2rl.encoders`), composed via
-:class:`sts2rl.agents.candidate_agent.CandidateActionAgent`. This module keeps
-only the DQN network, replay buffer, and training/inference logic.
+This module keeps only the DQN update rule, replay buffer, optimizer, and
+checkpoint IO. The three composable pieces come from elsewhere: legal-action
+enumeration from :mod:`sts2rl.action_spaces`, feature encoding from
+:mod:`sts2rl.encoders`, and the scoring network (policy module) from
+:mod:`sts2rl.models.policies` — pass ``policy=`` to swap architectures.
 
-A bare ``DQNCandidateAgent()`` defaults to the battle encoder and *is* the battle
-agent; pass ``encoder=<ScreenEncoder>()`` to drive a non-battle screen.
-``BattleDQNAgent`` is a backward-compatible alias (see bottom of module).
+A bare ``DQNCandidateAgent()`` defaults to the battle encoder/action space and
+*is* the battle agent; pass ``encoder=`` / ``action_space=`` for a non-battle
+screen. ``BattleDQNAgent`` is a backward-compatible alias (see bottom of module).
 """
 
 from __future__ import annotations
 
+import copy
 import logging
 import random
 from collections import deque
@@ -22,26 +24,9 @@ from torch import nn
 from sts2rl.action_spaces.battle import BattleActionSpace
 from sts2rl.agents.candidate_agent import CandidateActionAgent
 from sts2rl.encoders.battle_encoder import BattleStateEncoder
+from sts2rl.models.policies import CandidateQNetwork
 
 logger = logging.getLogger(__name__)
-
-
-class CandidateQNetwork(nn.Module):
-    """Small fully connected Q-network for state/action candidate scoring."""
-
-    def __init__(self, input_size: int, hidden_size: int = 256):
-        super().__init__()
-        self.net = nn.Sequential(
-            nn.Linear(input_size, hidden_size),
-            nn.ReLU(),
-            nn.Linear(hidden_size, hidden_size),
-            nn.ReLU(),
-            nn.Linear(hidden_size, 1),
-        )
-
-    def forward(self, state_action):
-        """Return one Q-value for each encoded state/action pair."""
-        return self.net(state_action).squeeze(-1)
 
 
 class DQNCandidateAgent(CandidateActionAgent):
@@ -61,6 +46,7 @@ class DQNCandidateAgent(CandidateActionAgent):
         update_freq=4,
         update_freq_target=2000,
         hidden_size=256,
+        policy=None,
         device=None,
     ):
         super().__init__(
@@ -78,8 +64,12 @@ class DQNCandidateAgent(CandidateActionAgent):
         self.batch_size = batch_size
         self.replay_buffer = deque(maxlen=memory_size)
 
-        self.model = CandidateQNetwork(self.model_input_size, hidden_size).to(self.device)
-        self.target_model = CandidateQNetwork(self.model_input_size, hidden_size).to(self.device)
+        self.model = (policy or CandidateQNetwork(self.model_input_size, hidden_size)).to(
+            self.device
+        )
+        # The target network is an algorithm concern: a frozen copy of whatever
+        # policy module is in use (deepcopy generalizes to swapped architectures).
+        self.target_model = copy.deepcopy(self.model).to(self.device)
         self.target_model.load_state_dict(self.model.state_dict())
         self.target_model.eval()
         self.optimizer = torch.optim.Adam(self.model.parameters(), lr=learning_rate)
@@ -257,7 +247,7 @@ class DQNCandidateAgent(CandidateActionAgent):
         ]
         with torch.no_grad():
             input_tensor = torch.tensor(inputs, dtype=torch.float32, device=self.device)
-            q_tensor = model(input_tensor).detach().cpu()
+            q_tensor = model.score(input_tensor).detach().cpu()
         return [float(value) for value in q_tensor.tolist()]
 
     def bc_score(self, state_action: torch.Tensor) -> torch.Tensor:
@@ -268,7 +258,7 @@ class DQNCandidateAgent(CandidateActionAgent):
         a softmax over these scores. Any candidate-scoring agent reuses the identical
         BC loss by overriding only this method. The DQN score is the Q-value.
         """
-        return self.model(state_action)
+        return self.model.score(state_action)
 
     def save(self, path: str) -> None:
         """Save model, optimizer, and exploration state to a checkpoint."""

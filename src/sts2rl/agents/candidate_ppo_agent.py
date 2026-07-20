@@ -1,8 +1,14 @@
-"""Simple candidate-action PPO agent.
+"""PPO algorithm for candidate-action agents.
 
-A bare ``PPOCandidateAgent()`` defaults to the battle encoder and *is* the battle
-agent; pass ``encoder=<ScreenEncoder>()`` to drive a non-battle screen.
-``BattlePPOAgent`` is a backward-compatible alias (see bottom of module).
+This module keeps only the PPO update rule, rollout collectors, optimizer, and
+checkpoint IO. The three composable pieces come from elsewhere: legal-action
+enumeration from :mod:`sts2rl.action_spaces`, feature encoding from
+:mod:`sts2rl.encoders`, and the actor-critic network (policy module) from
+:mod:`sts2rl.models.policies` — pass ``policy=`` to swap architectures.
+
+A bare ``PPOCandidateAgent()`` defaults to the battle encoder/action space and
+*is* the battle agent; pass ``encoder=`` / ``action_space=`` for a non-battle
+screen. ``BattlePPOAgent`` is a backward-compatible alias (see bottom of module).
 """
 
 from __future__ import annotations
@@ -17,44 +23,9 @@ from torch.distributions import Categorical
 from sts2rl.action_spaces.battle import BattleActionSpace
 from sts2rl.agents.candidate_agent import CandidateActionAgent
 from sts2rl.encoders.battle_encoder import BattleStateEncoder
+from sts2rl.models.policies import CandidatePPOPolicy, layer_init  # noqa: F401 (re-export)
 
 logger = logging.getLogger(__name__)
-
-
-def layer_init(layer: nn.Linear, std: float = 1.0, bias_const: float = 0.0) -> nn.Linear:
-    """Initialize a linear layer following the small CleanRL PPO convention."""
-    nn.init.orthogonal_(layer.weight, std)
-    nn.init.constant_(layer.bias, bias_const)
-    return layer
-
-
-class CandidatePPOPolicy(nn.Module):
-    """Actor-critic network for variable candidate-action sets."""
-
-    def __init__(self, state_size: int, state_action_size: int, hidden_size: int = 256):
-        super().__init__()
-        self.actor = nn.Sequential(
-            layer_init(nn.Linear(state_action_size, hidden_size)),
-            nn.Tanh(),
-            layer_init(nn.Linear(hidden_size, hidden_size)),
-            nn.Tanh(),
-            layer_init(nn.Linear(hidden_size, 1), std=0.01),
-        )
-        self.critic = nn.Sequential(
-            layer_init(nn.Linear(state_size, hidden_size)),
-            nn.Tanh(),
-            layer_init(nn.Linear(hidden_size, hidden_size)),
-            nn.Tanh(),
-            layer_init(nn.Linear(hidden_size, 1), std=1.0),
-        )
-
-    def action_logits(self, state_actions):
-        """Return one logit per encoded state/action candidate."""
-        return self.actor(state_actions).squeeze(-1)
-
-    def value(self, states):
-        """Return state values."""
-        return self.critic(states).squeeze(-1)
 
 
 class PPORolloutCollector:
@@ -100,7 +71,7 @@ class PPORolloutCollector:
         with torch.no_grad():
             input_tensor = torch.tensor(inputs, dtype=torch.float32, device=agent.device)
             state_tensor = torch.tensor([state_vector], dtype=torch.float32, device=agent.device)
-            logits = agent.model.action_logits(input_tensor)
+            logits = agent.model.score(input_tensor)
             value = float(agent.model.value(state_tensor).item())
             distribution = Categorical(logits=logits)
             if training:
@@ -201,6 +172,7 @@ class PPOCandidateAgent(CandidateActionAgent):
         ent_coef=0.01,
         vf_coef=0.5,
         max_grad_norm=0.5,
+        policy=None,
         device=None,
     ):
         super().__init__(
@@ -219,10 +191,13 @@ class PPOCandidateAgent(CandidateActionAgent):
         self.vf_coef = vf_coef
         self.max_grad_norm = max_grad_norm
 
-        self.model = CandidatePPOPolicy(
-            self.state_size,
-            self.model_input_size,
-            hidden_size,
+        self.model = (
+            policy
+            or CandidatePPOPolicy(
+                self.state_size,
+                self.model_input_size,
+                hidden_size,
+            )
         ).to(self.device)
         self.optimizer = torch.optim.Adam(self.model.parameters(), lr=learning_rate, eps=1e-5)
 
@@ -372,7 +347,7 @@ class PPOCandidateAgent(CandidateActionAgent):
         ]
         with torch.no_grad():
             input_tensor = torch.tensor(inputs, dtype=torch.float32, device=self.device)
-            logits = self.model.action_logits(input_tensor)
+            logits = self.model.score(input_tensor)
             probs = torch.softmax(logits, dim=0)
             logits_list = logits.detach().cpu().tolist()
             probs_list = probs.detach().cpu().tolist()
@@ -404,7 +379,7 @@ class PPOCandidateAgent(CandidateActionAgent):
 
     def bc_score(self, state_action: torch.Tensor) -> torch.Tensor:
         """Return differentiable actor logits per encoded state/action row."""
-        return self.model.action_logits(state_action)
+        return self.model.score(state_action)
 
     def _transition_from_encoded_action(
         self, state: list[float], action_vector: list[float]
@@ -416,7 +391,7 @@ class PPOCandidateAgent(CandidateActionAgent):
                 dtype=torch.float32,
                 device=self.device,
             )
-            logits = self.model.action_logits(input_tensor)
+            logits = self.model.score(input_tensor)
             distribution = Categorical(logits=logits)
             action_index = torch.tensor(0, device=self.device)
             return {
@@ -449,7 +424,7 @@ class PPOCandidateAgent(CandidateActionAgent):
                 state + candidate_vector for candidate_vector in transition["candidate_vectors"]
             ]
             input_tensor = torch.tensor(inputs, dtype=torch.float32, device=self.device)
-            logits = self.model.action_logits(input_tensor)
+            logits = self.model.score(input_tensor)
             distribution = Categorical(logits=logits)
             action_index = torch.tensor(
                 transition["action_index"],
