@@ -68,3 +68,45 @@ def test_menu_select_action_routes_option_and_seed():
 def test_dispatcher_rejects_legacy_dictionary_directly():
     with pytest.raises(TypeError):
         ActionDispatcher(FakeClient()).dispatch({"type": "play_card"})
+
+
+@pytest.mark.parametrize(
+    ("action", "expected"),
+    [
+        (GameAction("discard_potion", slot=1), ("discard_potion", (1,))),
+        (GameAction("select_bundle", index=2), ("select_bundle", (2,))),
+        (
+            GameAction("confirm_bundle_selection"),
+            ("confirm_bundle_selection", ()),
+        ),
+        (GameAction("cancel_bundle_selection"), ("cancel_bundle_selection", ())),
+        (GameAction("select_relic", index=3), ("select_relic", (3,))),
+        (GameAction("skip_relic_selection"), ("skip_relic_selection", ())),
+        (
+            GameAction("crystal_sphere_set_tool", tool="small"),
+            ("crystal_sphere_set_tool", ("small",)),
+        ),
+        (
+            GameAction("crystal_sphere_click_cell", x=4, y=7),
+            ("crystal_sphere_click_cell", (4, 7)),
+        ),
+        (GameAction("crystal_sphere_proceed"), ("crystal_sphere_proceed", ())),
+    ],
+)
+def test_dispatcher_routes_remaining_full_run_actions(action, expected):
+    class RecordingClient:
+        def __init__(self):
+            self.calls = []
+
+        def __getattr__(self, name):
+            def record(*args):
+                self.calls.append((name, args))
+                return {"state_type": "map"}
+
+            return record
+
+    client = RecordingClient()
+
+    ActionDispatcher(client).dispatch(action)
+
+    assert client.calls == [expected]

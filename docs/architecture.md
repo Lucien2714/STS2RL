@@ -7,7 +7,9 @@ supported layers are:
 - `env/`: HTTP client integration, reset navigation, and raw environment steps.
 - `data/`: bundled static game data and lookup maps.
 - `encoder/`: the state-encoder interface retained for the next phase.
+- `agents/`: dynamic legal actions, the minimal agent contract, candidate PPO,
+  and the episode runner.
 
-The environment returns raw game state. Encoding, reward calculation, agents,
-training, and evaluation are separate layers and will be reintroduced only after
-the environment contract is stable.
+The environment returns raw game state. Encoding and reward calculation remain
+outside it. The first agent layer consumes that contract without introducing a
+fixed global action table.

@@ -13,7 +13,8 @@ The current reward behavior is preserved from the prototype:
 - gold and max HP loss penalties
 - end-turn unused energy penalty
 
-The long-term boundary is `RewardModel.compute(prev_state, next_state, action)`.
-`GameEnv` does not invoke reward code. A future RL wrapper will combine raw
-environment transitions with a `RewardModel` and `StateEncoder`.
+The boundary is `RewardModel.compute(prev_state, next_state, action)`.
+`GameEnv` does not invoke reward code. `EpisodeRunner` combines raw environment
+transitions with a `RewardModel` and passes the resulting reward to the agent;
+feature encoding remains an agent-side dependency.
 

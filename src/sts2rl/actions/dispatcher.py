@@ -28,9 +28,13 @@ class ActionDispatcher:
         if action_type == "proceed":
             return self.client.proceed()
         if action_type == "play_card":
-            return self.client.play_card(params["card_index"], target=params.get("target"))
+            return self.client.play_card(
+                params["card_index"], target=params.get("target")
+            )
         if action_type == "use_potion":
             return self.client.use_potion(params["slot"], target=params.get("target"))
+        if action_type == "discard_potion":
+            return self.client.discard_potion(params["slot"])
         if action_type == "combat_select_card":
             return self.client.combat_select_card(params["card_index"])
         if action_type == "combat_confirm_selection":
@@ -59,4 +63,20 @@ class ActionDispatcher:
             return self.client.cancel_selection()
         if action_type == "shop_purchase":
             return self.client.shop_purchase(params["index"])
+        if action_type == "select_bundle":
+            return self.client.select_bundle(params["index"])
+        if action_type == "confirm_bundle_selection":
+            return self.client.confirm_bundle_selection()
+        if action_type == "cancel_bundle_selection":
+            return self.client.cancel_bundle_selection()
+        if action_type == "select_relic":
+            return self.client.select_relic(params["index"])
+        if action_type == "skip_relic_selection":
+            return self.client.skip_relic_selection()
+        if action_type == "crystal_sphere_set_tool":
+            return self.client.crystal_sphere_set_tool(params["tool"])
+        if action_type == "crystal_sphere_click_cell":
+            return self.client.crystal_sphere_click_cell(params["x"], params["y"])
+        if action_type == "crystal_sphere_proceed":
+            return self.client.crystal_sphere_proceed()
         raise ValueError(f"Unknown action type: {action_type}")
