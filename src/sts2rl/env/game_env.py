@@ -1,8 +1,11 @@
 """Thin STS2 environment adapter for communicating with the local STS2MCP API."""
 
 import logging
+from collections.abc import Mapping
+from typing import Any
 
 from sts2rl.actions.dispatcher import ActionDispatcher
+from sts2rl.actions.game_action import GameAction
 from sts2rl.env.mcp_client import STS2Client, STS2ClientError, GameCharacter
 
 logger = logging.getLogger(__name__)
@@ -95,17 +98,28 @@ class GameEnv:
         )
         return raw_state
 
-    def step(self, action: dict) -> tuple[dict, bool, dict]:
-        """Dispatch an action and return next raw state, done flag, and API info."""
+    def step(
+        self,
+        action: GameAction | Mapping[str, Any],
+    ) -> tuple[dict, bool, dict]:
+        """Dispatch a typed action and return raw state, done flag, and API info.
+
+        Mapping input remains accepted while agents are migrated to GameAction.
+        The environment converts it once at this boundary; ActionDispatcher only
+        receives the typed representation.
+        """
+        action_payload: object = action
         try:
-            api_result = self.action_dispatcher.dispatch(action)
+            game_action = GameAction.coerce(action)
+            action_payload = game_action.to_dict()
+            api_result = self.action_dispatcher.dispatch(game_action)
         except Exception as exc:
             raw_state = self.client.get_state()
             done = raw_state.get("state_type") == "game_over"
             info = {
                 "error": str(exc),
                 "raw_state": raw_state,
-                "action": action,
+                "action": action_payload,
                 "action_error": True,
             }
             return raw_state, bool(done), info
@@ -115,7 +129,7 @@ class GameEnv:
         info = {
             "api_result": api_result,
             "raw_state": raw_state,
-            "action": action,
+            "action": action_payload,
             "action_error": False,
         }
         return raw_state, bool(done), info

@@ -1,5 +1,6 @@
 """Tests for environment reset menu navigation."""
 
+from sts2rl.actions.game_action import GameAction
 from sts2rl.env.game_env import GameEnv
 from sts2rl.env.player import Player
 from sts2rl.flow.player_detail import refresh_player_detail_for_map
@@ -104,13 +105,27 @@ def test_step_returns_raw_state_and_api_info_without_reward():
     env.client = FakeClient()
     env.action_dispatcher.client = env.client
 
-    next_state, done, info = env.step({"type": "end_turn"})
+    next_state, done, info = env.step(GameAction("end_turn"))
 
     assert next_state["run"]["floor"] == 1
     assert done is False
     assert info["raw_state"] == next_state
     assert info["action_error"] is False
     assert "reward_details" not in info
+
+
+def test_step_converts_legacy_action_dictionary_at_environment_boundary():
+    """Existing agents can migrate to GameAction without breaking in one change."""
+    env = GameEnv()
+    env.client = FakeClient()
+    env.action_dispatcher.client = env.client
+
+    next_state, done, info = env.step({"type": "end_turn"})
+
+    assert next_state["state_type"] == "map"
+    assert done is False
+    assert info["action"] == {"type": "end_turn"}
+    assert info["action_error"] is False
 
 
 def test_refresh_player_detail_for_map_updates_player_model():

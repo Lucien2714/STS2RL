@@ -1,0 +1,57 @@
+import pytest
+
+from sts2rl.actions.dispatcher import ActionDispatcher
+from sts2rl.actions.game_action import GameAction, SelectCardAction
+
+
+class FakeClient:
+    def __init__(self):
+        self.calls = []
+
+    def play_card(self, card_index, target=None):
+        self.calls.append(("play_card", card_index, target))
+        return {"state_type": "monster"}
+
+    def select_card(self, index):
+        self.calls.append(("select_card", index))
+        return {"state_type": "card_select"}
+
+
+def test_game_action_round_trips_legacy_dictionary():
+    action = GameAction.from_dict(
+        {"type": "play_card", "card_index": 2, "target": "ENEMY_0"}
+    )
+
+    assert action.action_type == "play_card"
+    assert action.get_params() == {"card_index": 2, "target": "ENEMY_0"}
+    assert action.to_dict() == {
+        "type": "play_card",
+        "card_index": 2,
+        "target": "ENEMY_0",
+    }
+
+
+def test_dispatcher_routes_typed_game_action():
+    client = FakeClient()
+    dispatcher = ActionDispatcher(client)
+
+    result = dispatcher.dispatch(
+        GameAction("play_card", card_index=2, target="ENEMY_0")
+    )
+
+    assert result == {"state_type": "monster"}
+    assert client.calls == [("play_card", 2, "ENEMY_0")]
+
+
+def test_select_card_action_uses_api_index_parameter():
+    client = FakeClient()
+    dispatcher = ActionDispatcher(client)
+
+    dispatcher.dispatch(SelectCardAction(3))
+
+    assert client.calls == [("select_card", 3)]
+
+
+def test_dispatcher_rejects_legacy_dictionary_directly():
+    with pytest.raises(TypeError):
+        ActionDispatcher(FakeClient()).dispatch({"type": "play_card"})
