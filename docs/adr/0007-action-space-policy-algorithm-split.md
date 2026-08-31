@@ -21,8 +21,9 @@ agents/__init__ → orchestrator → battle_encoder`).
 
 ## Decision
 
-Separate the agents into three composable roles (executed as Phases 0–2 of the
-design note; Phase 3 — learned featurizers — is deferred):
+Separate the agents into three composable roles (Phases 0–2 of the design note;
+Phase 3 — learned featurizers — has since landed as an opt-in `--policy learned`,
+see [card-embedding.md](../card-embedding.md)):
 
 - **`action_spaces/`** (new package, torch-free; imports only stdlib +
   `sts2rl.data`): one `ActionSpace` per screen owning `candidates()`,
@@ -63,8 +64,10 @@ fails loudly.
 ## Consequences
 
 - Learned representations finally have a seam: a policy module owns any learned
-  featurizer, and its parameters are automatically optimized (the deferred
-  Phase 3 wires `CardModelEncoder` in behind a new schema string).
+  featurizer, and its parameters are automatically optimized. Phase 3 has since
+  used it — `LearnedCandidateQNetwork` / `LearnedCandidatePPOPolicy` embed
+  `CardModelEncoder` behind the `candidate_action_learned_v1` schema, selected
+  with `--policy learned`, and it trains end-to-end under BC and RL.
 - The algorithm classes match their names; swapping architectures is a
   constructor argument, not a subclass.
 - The public agent surface (`valid_action_candidates`, `encode_*`, `bc_score`,

@@ -71,14 +71,32 @@ id or a card with no enchantment maps cleanly to a dedicated row.
   circular-import edge (`encoders/battle_encoder.py` imports
   `agents/selection.py`).
 
-## Status: standalone (not yet wired)
+## Status: wired in, opt-in (`--policy learned`)
 
-`CardModelEncoder` is built and tested in isolation. Using it in training is a
-follow-up that changes the data path: `BattleStateEncoder` would emit card
-*indices* (instead of the current scalar/count encodings), and the DQN/PPO
-networks would own the embedding and look them up. That is an action-schema bump
-that **invalidates existing battle checkpoints**, so it is kept separate.
+`CardModelEncoder` is integrated as ADR-0007 Phase 3, behind an opt-in flag rather
+than forced on every agent:
 
-When integrated, the embedding's parameters live inside the agent's network and
-ride along in the agent's checkpoint; `CardModelEncoder.save/load` is mainly for
-using or pretraining the module on its own.
+- `encoders/learned_battle_encoder.LearnedBattleStateEncoder` appends
+  `(card_index, enchantment_index, upgraded)` channels per hand slot to the state
+  vector, and one such triple to the action vector, *after* the handcrafted
+  features. The handcrafted prefix is byte-identical, so the added channels are
+  strictly extra information.
+- `models/learned_policies` slices those channels back out, looks them up in an
+  owned `CardModelEncoder`, mean-pools the hand embeddings over occupied slots,
+  and concatenates everything before scoring.
+- Because the embedding is a submodule of the policy, `Adam(policy.parameters())`
+  already covers it: it trains end-to-end under behavioral cloning *and* RL with
+  no special-casing in either update rule.
+
+The index convention (row 0 reserved for unknown/none) is defined once, torch-free,
+as `data.card.card_factor_indices` — the featurizer that writes the indices and the
+embedding tables that consume them cannot drift apart.
+
+Enable with `--policy learned` on `sts2rl-train` / `sts2rl-pretrain`. This is an
+action-schema bump (`candidate_action_learned_v1`), so learned and flat checkpoints
+are mutually unloadable — they live in separate directories
+(`checkpoints/battleAgent/PPO-learned/`) and existing flat checkpoints are
+untouched.
+
+The embedding's parameters ride along in the agent's checkpoint;
+`CardModelEncoder.save/load` remains for using or pretraining the module on its own.

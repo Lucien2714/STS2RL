@@ -212,7 +212,9 @@ def test_non_player_play_phase_has_no_dqn_q_values():
 
     assert agent.valid_action_candidates(raw_state) == []
     assert agent.current_q_values(raw_state)["available"] is False
-    assert agent.choose_action(raw_state) == {"type": "proceed"}
+    # Combat does not accept `proceed`; with nothing legal to play the fallback is
+    # a state re-read, not a rejected POST.
+    assert agent.choose_action(raw_state) == {"type": "refresh_state"}
 
 
 def test_enemy_target_type_variants_generate_targeted_actions():

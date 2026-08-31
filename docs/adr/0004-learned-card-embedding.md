@@ -34,8 +34,10 @@ enchantment, using *factored* embeddings:
 - Imports are restricted to `sts2rl.data.*` + `torch` (no `agents`/`encoders`) to
   avoid the known `encoders → agents` circular-import edge.
 
-This is delivered **standalone** — not yet wired into the battle encoder or the
-agent networks.
+This was delivered **standalone**. It has since been wired into training as
+ADR-0007 Phase 3, opt-in behind `--policy learned`: `LearnedBattleStateEncoder`
+emits the card indices and `models/learned_policies` owns the embedding, so its
+parameters join the agent's optimizer. See [card-embedding.md](../card-embedding.md).
 
 ## Alternatives considered
 

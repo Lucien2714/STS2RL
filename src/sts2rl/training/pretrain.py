@@ -28,11 +28,14 @@ import torch
 from torch.nn import functional as F
 
 from sts2rl.agents.orchestrator import (
+    DEFAULT_POLICY_VARIANT,
+    POLICY_VARIANTS,
     SCREEN_NAMES,
     create_battle_agent,
     create_screen_agent,
     is_battle_policy_state,
     normalize_battle_agent_type,
+    normalize_policy_variant,
     normalize_screen_agent_type,
     screen_name_for_state,
 )
@@ -283,8 +286,14 @@ def build_target(name: str, args: argparse.Namespace) -> PretrainTarget:
     """Create a pretrain target (agent + routing predicate + output path) by name."""
     if name == "battle":
         battle_type = normalize_battle_agent_type(args.battle_agent)
-        agent = create_battle_agent(battle_type)
-        return PretrainTarget("battle", agent, battle_latest_path(battle_type), is_battle_policy_state)
+        policy = normalize_policy_variant(args.policy)
+        agent = create_battle_agent(battle_type, policy=policy)
+        return PretrainTarget(
+            "battle",
+            agent,
+            battle_latest_path(battle_type, policy),
+            is_battle_policy_state,
+        )
 
     screen_type = normalize_screen_agent_type(args.screen_agent)
     agent = create_screen_agent(name, screen_type)
@@ -371,6 +380,16 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="With --screen all, exclude the battle agent and train the screen agents only.",
     )
     parser.add_argument("--battle-agent", default="DQN", help="Battle agent type (DQN or PPO).")
+    parser.add_argument(
+        "--policy",
+        choices=list(POLICY_VARIANTS),
+        default=DEFAULT_POLICY_VARIANT,
+        help=(
+            "Battle policy module. 'learned' clones into a policy that owns a "
+            "trainable per-card embedding — behavioral cloning trains the embedding "
+            "along with the network, and saves to the matching checkpoint directory."
+        ),
+    )
     parser.add_argument(
         "--screen-agent",
         default="PPO",

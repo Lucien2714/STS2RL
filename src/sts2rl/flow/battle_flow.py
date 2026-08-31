@@ -7,7 +7,6 @@ from sts2rl.env.rewards import RewardModel
 
 COMBAT_SCREEN_TYPES = {"monster", "elite", "boss"}
 MAX_FORCED_END_TURN_ADVANCES = 5
-MAX_FORCED_HAND_SELECT_ADVANCES = 20
 
 
 def should_skip_agent(raw_state: dict) -> bool:
@@ -51,77 +50,6 @@ def forced_end_turn_action_selection() -> dict:
         "reason": "Only end_turn is legal; state is auto-advanced",
         "q": None,
     }
-
-
-def is_forced_hand_select_state(agent: Any, raw_state: dict) -> bool:
-    """Return whether a hand-selection prompt can be auto-advanced."""
-    if raw_state.get("state_type") != "hand_select":
-        return False
-    action = agent._forced_transition_action(raw_state)
-    return action is not None and action.get("type") in {
-        "combat_select_card",
-        "combat_confirm_selection",
-    }
-
-
-def advance_forced_hand_select_states(
-    game: Any,
-    agent: Any,
-    reward_model: RewardModel,
-    raw_state: dict,
-) -> tuple[dict, float, bool, list[dict]]:
-    """Auto-advance hand-selection prompts that have deterministic count rules."""
-    auto_steps = []
-    total_reward = 0.0
-    done = raw_state.get("state_type") == "game_over"
-
-    while not done and is_forced_hand_select_state(agent, raw_state):
-        if len(auto_steps) >= MAX_FORCED_HAND_SELECT_ADVANCES:
-            logging.warning(
-                "Stopped auto-advancing hand_select states after %d steps",
-                len(auto_steps),
-            )
-            break
-
-        prev_raw_state = raw_state
-        action = agent._forced_transition_action(raw_state)
-        raw_state, done, info = game.step(action)
-        raw_state = info.get("raw_state", raw_state)
-        if info.get("action_error"):
-            reward, reward_details = reward_model.action_error_reward(
-                info.get("error", "action dispatch failed")
-            )
-            auto_steps.append(
-                {
-                    "prev_raw_state": prev_raw_state,
-                    "raw_state": raw_state,
-                    "action": action,
-                    "reward": float(reward),
-                    "done": bool(done),
-                    "reward_details": reward_details,
-                }
-            )
-            total_reward += float(reward)
-            break
-
-        reward, reward_details = reward_model.compute(
-            prev_raw_state,
-            raw_state,
-            action,
-        )
-        auto_steps.append(
-            {
-                "prev_raw_state": prev_raw_state,
-                "raw_state": raw_state,
-                "action": action,
-                "reward": float(reward),
-                "done": bool(done),
-                "reward_details": reward_details,
-            }
-        )
-        total_reward += float(reward)
-
-    return raw_state, total_reward, done, auto_steps
 
 
 def advance_forced_end_turn_states(
@@ -192,15 +120,6 @@ def fold_reward_details(
     folded["auto_steps"] = len(auto_steps)
     folded["auto_end_turns"] = sum(
         1 for step in auto_steps if step.get("action", {}).get("type") == "end_turn"
-    )
-    folded["auto_hand_selects"] = sum(
-        1
-        for step in auto_steps
-        if step.get("action", {}).get("type")
-        in {
-            "combat_select_card",
-            "combat_confirm_selection",
-        }
     )
     folded["auto_step_reward"] = sum(float(step.get("reward", 0.0)) for step in auto_steps)
     folded["auto_end_turn_reward"] = folded["auto_step_reward"]

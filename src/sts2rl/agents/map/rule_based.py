@@ -5,6 +5,7 @@ import logging
 import math
 from dataclasses import dataclass, field
 
+from sts2rl.action_spaces.defaults import default_action
 from sts2rl.agents.base import MapAgent
 
 logger = logging.getLogger(__name__)
@@ -67,9 +68,11 @@ class MapPolicy(MapAgent):
         logger.debug("MapPolicy: choosing action next_options=%d", len(next_options))
 
         if not next_options:
+            # The map screen only accepts choose_map_node, so there is nothing
+            # legal to send with no options; default_action resolves it.
             self._shortest_path = MapRoutePlan()
-            action = {"type": "proceed"}
-            logger.debug("MapPolicy: selected action=%s", action)
+            action = default_action(state)
+            logger.debug("MapPolicy: no options; selected action=%s", action)
             return action
 
         if self._should_initialize_route(map_state):

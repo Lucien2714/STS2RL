@@ -18,17 +18,16 @@ from pathlib import Path
 import torch
 from torch import nn
 
-from sts2rl.data.card import Card, CardIdentity
-from sts2rl.data.loader import (
-    get_card_index,
-    get_card_map_size,
-    get_data_index_or_default,
-    get_data_map_size,
+from sts2rl.data.card import (
+    EMBEDDING_RESERVED_ROWS as _RESERVED,
 )
-
-# Index 0 of each embedding table is reserved for the unknown/none row; real
-# DataIdMap indices are shifted up by one.
-_RESERVED = 1
+from sts2rl.data.card import (
+    Card,
+    CardIdentity,
+    card_factor_indices,
+    coerce_card_identity,
+)
+from sts2rl.data.loader import get_card_map_size, get_data_map_size
 
 
 class CardModelEncoder(nn.Module):
@@ -133,23 +132,12 @@ class CardModelEncoder(nn.Module):
     def card_to_indices(self, card: Card | CardIdentity | dict) -> tuple[int, int, int]:
         """Resolve a card object to ``(card_idx, ench_idx, upgraded)`` factor inputs.
 
-        ``card_idx`` / ``ench_idx`` are embedding-table rows (0 = unknown/none);
-        ``upgraded`` is 0 or 1. Unknown ids fall back to the reserved row 0.
+        Delegates to the torch-free :func:`sts2rl.data.card.card_factor_indices`
+        so the featurizer that writes these indices into state vectors and the
+        embedding tables that consume them cannot drift apart.
         """
-        identity = self._coerce_identity(card)
-        card_idx = get_card_index(identity.card_id, default=-1) + _RESERVED
-        ench_idx = (
-            get_data_index_or_default("enchantments", identity.enchantment_id, -1) + _RESERVED
-        )
-        upgraded = 1 if identity.upgrade_level > 0 else 0
-        return card_idx, ench_idx, upgraded
+        return card_factor_indices(card)
 
     @staticmethod
     def _coerce_identity(card: Card | CardIdentity | dict) -> CardIdentity:
-        if isinstance(card, CardIdentity):
-            return card
-        if isinstance(card, Card):
-            return card.identity
-        if isinstance(card, dict):
-            return CardIdentity.from_raw(card)
-        raise TypeError(f"Unsupported card type for encoding: {type(card).__name__}")
+        return coerce_card_identity(card)

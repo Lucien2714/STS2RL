@@ -24,10 +24,15 @@ STS2RL separates the project into stable layers:
   it has legal candidates, else to a rule-based policy.
 - `models/`: reusable **learned** `nn.Module` components: the candidate-scoring
   policy modules (`models/policies.py` — `CandidateQNetwork`,
-  `CandidatePPOPolicy`, shared `score()` contract) and building blocks such as
-  `CardModelEncoder` (a learned per-card embedding — see
-  [card-embedding.md](card-embedding.md)). Kept separate from the model-free
-  `encoders/`.
+  `CandidatePPOPolicy`, shared `score()` contract), the learned-featurizer
+  variants (`models/learned_policies.py`), and building blocks such as
+  `CardModelEncoder` (a learned per-card embedding, wired in behind
+  `--policy learned` — see [card-embedding.md](card-embedding.md)). Kept separate
+  from the model-free `encoders/`.
+- `flow/`: the one shared implementation of a game step (`flow/step_loop.py` —
+  `decide_action` / `apply_action`), used by both training and evaluation, plus
+  the predicates in `flow/battle_flow.py` that decide which transitions the agent
+  is asked about and trained on.
 - `training/`: training CLI, runner, telemetry, dashboard, and episode logs.
 - `evaluation/`: checkpoint evaluation, seeded custom runs, dashboard, and CSV output.
 - `checkpoints/`: checkpoint paths and discovery helpers.

@@ -5,9 +5,45 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Iterable
 
-from sts2rl.data.loader import DataIdMap
+from sts2rl.data.loader import (
+    DataIdMap,
+    get_card_index,
+    get_data_index_or_default,
+)
 
 UNKNOWN_CARD_ID = "UNKNOWN_CARD"
+
+# Row 0 of each learned embedding table is reserved for unknown/none, so real
+# DataIdMap indices shift up by one. Defined here (torch-free) because both the
+# learned embedding in models/ and the torch-free featurizer in encoders/ must
+# agree on it exactly — the embedding rows are keyed by these numbers.
+EMBEDDING_RESERVED_ROWS = 1
+
+
+def card_factor_indices(card: "Card | CardIdentity | dict") -> tuple[int, int, int]:
+    """Resolve a card to ``(card_index, enchantment_index, upgraded)`` table rows.
+
+    ``card_index`` / ``enchantment_index`` are embedding-table rows (0 =
+    unknown/none); ``upgraded`` is 0 or 1.
+    """
+    identity = coerce_card_identity(card)
+    card_index = get_card_index(identity.card_id, default=-1) + EMBEDDING_RESERVED_ROWS
+    enchantment_index = (
+        get_data_index_or_default("enchantments", identity.enchantment_id, -1)
+        + EMBEDDING_RESERVED_ROWS
+    )
+    return card_index, enchantment_index, 1 if identity.upgrade_level > 0 else 0
+
+
+def coerce_card_identity(card: "Card | CardIdentity | dict") -> "CardIdentity":
+    """Return the CardIdentity for a Card, CardIdentity, or raw card dict."""
+    if isinstance(card, CardIdentity):
+        return card
+    if isinstance(card, Card):
+        return card.identity
+    if isinstance(card, dict):
+        return CardIdentity.from_raw(card)
+    raise TypeError(f"Unsupported card type for encoding: {type(card).__name__}")
 
 
 @dataclass(frozen=True)

@@ -29,6 +29,9 @@ uv run sts2rl-train
 | `--base-url` | URL, repeatable | none | Full STS2MCP API base URL for one client. Use this when host/port construction is not enough. |
 | `--episode-log` | path | `logs/training_episodes.jsonl` | JSONL file that receives one summary record per completed episode. |
 | `--tensorboard-logdir` | path | none | Optional TensorBoard log directory for training metrics. |
+| `--policy` | `flat` or `learned` | `flat` | Battle policy module. `learned` trains a per-card embedding inside the policy; separate schema and checkpoint directory. See [card-embedding.md](card-embedding.md). |
+| `--step-delay` | float | `0.0` | Seconds to sleep between steps. Was an unconditional `0.1`, which spent minutes per episode asleep; raise it only to watch a run. |
+| `--no-step-print` | flag | off | Suppress the per-step console line. Episode summaries still print. |
 | `--live` | flag | off | Start the live training dashboard HTTP and WebSocket servers. |
 | `--live-html` | path | none | Write a static copy of the live dashboard HTML to this path. Also enables dashboard setup. |
 | `--live-http-host` | string | `127.0.0.1` | Interface for the live dashboard HTTP server. |
@@ -53,8 +56,25 @@ uv run sts2rl-train --base-url http://localhost:15526/api/v1
 uv run sts2rl-train --live --live-http-port 8774 --live-ws-port 8775
 uv run sts2rl-train --episode-log logs/experiment_a.jsonl
 uv run sts2rl-train --tensorboard-logdir runs/training
+uv run sts2rl-train --battle-agent PPO --policy learned --client-port 15526
+uv run sts2rl-train --client-port 15526 --no-step-print   # fastest console
 tensorboard --logdir runs/training
 ```
+
+## Throughput
+
+The loop is game-client bound, so the things that used to waste wall clock were
+all on our side and have been removed or made optional:
+
+- No unconditional `0.1 s` sleep per step (`--step-delay`, default `0`).
+- Q-values and action-selection metadata are computed only when the live
+  dashboard is attached — they cost a forward pass over every candidate.
+- The per-step console line no longer serializes the full reward-details dict,
+  and can be turned off entirely with `--no-step-print`.
+- One `agent_lock` acquisition per step for all agent-state reads, instead of one
+  per consumer.
+- DQN and PPO updates score a whole minibatch in one forward pass instead of one
+  pass per sample (`tests/test_batched_updates.py` pins the equivalence).
 
 ## Outputs
 

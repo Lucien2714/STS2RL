@@ -415,24 +415,36 @@ class PPOCandidateAgent(CandidateActionAgent):
             return self.model.value(state_tensor).squeeze(0)
 
     def _action_logprobs(self, rollout: list[dict], indices: list[int]):
-        logprobs = []
-        entropies = []
+        """Return (logprobs, entropies) for a minibatch in one forward pass.
+
+        Candidate sets vary in length per transition, so the rows are concatenated,
+        scored together, and split back apart. Scoring each transition separately
+        cost one forward pass per sample per epoch — the dominant cost of an update.
+        """
+        rows: list[list[float]] = []
+        counts: list[int] = []
+        action_indices: list[int] = []
         for index in indices:
             transition = rollout[index]
             state = transition["state"]
-            inputs = [
-                state + candidate_vector for candidate_vector in transition["candidate_vectors"]
-            ]
-            input_tensor = torch.tensor(inputs, dtype=torch.float32, device=self.device)
-            logits = self.model.score(input_tensor)
-            distribution = Categorical(logits=logits)
-            action_index = torch.tensor(
-                transition["action_index"],
-                dtype=torch.long,
-                device=self.device,
-            )
-            logprobs.append(distribution.log_prob(action_index))
+            candidate_vectors = transition["candidate_vectors"]
+            rows.extend(state + candidate_vector for candidate_vector in candidate_vectors)
+            counts.append(len(candidate_vectors))
+            action_indices.append(int(transition["action_index"]))
+
+        input_tensor = torch.tensor(rows, dtype=torch.float32, device=self.device)
+        all_logits = self.model.score(input_tensor)
+
+        logprobs = []
+        entropies = []
+        offset = 0
+        for count, action_index in zip(counts, action_indices):
+            distribution = Categorical(logits=all_logits[offset : offset + count])
+            action_tensor = torch.tensor(action_index, dtype=torch.long, device=self.device)
+            logprobs.append(distribution.log_prob(action_tensor))
             entropies.append(distribution.entropy())
+            offset += count
+
         return torch.stack(logprobs), torch.stack(entropies)
 
     def save(self, path: str) -> None:

@@ -163,21 +163,31 @@ class DQNCandidateAgent(CandidateActionAgent):
 
         current_q = self.model(current_inputs)
 
-        max_next_q_values = []
         with torch.no_grad():
-            for next_state, done, candidate_vectors in zip(next_states, dones, next_actions):
+            # Every sample's next-state candidates go through the target network in
+            # one batched pass. Scoring them per-sample meant `batch_size` separate
+            # forward passes (and as many host/device round trips) per update.
+            next_rows: list[list[float]] = []
+            row_owner: list[int] = []
+            for sample_index, (next_state, done, candidate_vectors) in enumerate(
+                zip(next_states, dones, next_actions)
+            ):
                 if done or not candidate_vectors:
-                    max_next_q_values.append(0.0)
                     continue
-                next_inputs = [
-                    list(next_state) + list(candidate_vector)
-                    for candidate_vector in candidate_vectors
-                ]
-                next_tensor = torch.tensor(next_inputs, dtype=torch.float32, device=self.device)
-                next_q = self.target_model(next_tensor)
-                max_next_q_values.append(float(next_q.max().item()))
+                for candidate_vector in candidate_vectors:
+                    next_rows.append(list(next_state) + list(candidate_vector))
+                    row_owner.append(sample_index)
 
-            max_next_q = torch.tensor(max_next_q_values, dtype=torch.float32, device=self.device)
+            max_next_q = torch.zeros(len(batch), dtype=torch.float32, device=self.device)
+            if next_rows:
+                next_tensor = torch.tensor(next_rows, dtype=torch.float32, device=self.device)
+                next_q = self.target_model(next_tensor)
+                owner_tensor = torch.tensor(row_owner, dtype=torch.long, device=self.device)
+                # scatter-reduce amax: per sample, the best of its candidate rows.
+                max_next_q = max_next_q.scatter_reduce(
+                    0, owner_tensor, next_q, reduce="amax", include_self=False
+                )
+
             target_q = rewards_tensor + self.gamma * max_next_q * (~dones_tensor).float()
 
         loss = self.loss_fn(current_q, target_q)

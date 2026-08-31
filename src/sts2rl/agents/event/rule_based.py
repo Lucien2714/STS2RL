@@ -3,7 +3,6 @@
 import logging
 import re
 
-from sts2rl.agents.base import EventAgent
 from sts2rl.action_spaces.selection import (
     can_confirm_selection,
     can_select_more,
@@ -12,6 +11,7 @@ from sts2rl.action_spaces.selection import (
     remaining_to_min,
     selection_selected_count,
 )
+from sts2rl.agents.base import EventAgent
 
 logger = logging.getLogger(__name__)
 

@@ -2,18 +2,25 @@
 
 import logging
 
+from sts2rl.action_spaces.defaults import default_action
+
 logger = logging.getLogger(__name__)
 
 
 class DefaultPolicy:
-    """Proceed through unhandled screens using the simplest legal action."""
+    """Advance unhandled screens using whatever action they actually accept."""
 
     def choose_action(self, state: dict) -> dict:
-        """Return the default transition action for the current raw state."""
+        """Return the default transition action for the current raw state.
+
+        This used to hardcode ``proceed``, which the API rejects on most screens
+        (combat, map, card_reward, event, the selection overlays). It now asks
+        ``action_spaces.defaults`` for a legal action instead.
+        """
+        action = default_action(state)
         logger.debug(
-            "DefaultPolicy: choosing action state_type=%s",
+            "DefaultPolicy: state_type=%s selected action=%s",
             state.get("state_type"),
+            action,
         )
-        action = {"type": "proceed"}
-        logger.debug("DefaultPolicy: selected action=%s", action)
         return action

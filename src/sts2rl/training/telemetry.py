@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import math
-
 from sts2rl.agents.orchestrator import BATTLE_ACTION_TYPES, is_battle_policy_state
 
 
@@ -21,14 +19,6 @@ def action_selection_details(
             "method": "skip_agent",
             "reason": "combat screen is not in player play phase",
             "q": None,
-        }
-
-    forced_action = agent._forced_transition_action(raw_state)
-    if forced_action == action:
-        return {
-            "method": "forced_transition",
-            "reason": "screen requires confirmation/transition",
-            "q": selected_action_q(q_values),
         }
 
     if is_battle_policy_state(raw_state) and action.get("type") in BATTLE_ACTION_TYPES:
@@ -66,11 +56,3 @@ def selected_action_q(q_values: dict) -> float | None:
         if action.get("selected"):
             return action.get("q")
     return None
-
-
-def safe_float(value: float) -> float | None:
-    """Convert non-finite floats to None for JSON-safe telemetry."""
-    value = float(value)
-    if not math.isfinite(value):
-        return None
-    return value

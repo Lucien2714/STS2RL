@@ -379,11 +379,3 @@ class ScopedRewardModel(RewardModel):
             details["battle_details"] = battle_details
             details["run_details"] = run_details
         return total, details
-
-    def action_error_reward(self, error: object) -> tuple[float, dict]:
-        """Return scoped zero reward details for a failed action dispatch."""
-        return super().action_error_reward(error)
-
-
-class BattleProgressReward(ScopedRewardModel):
-    """Backward-compatible name for the scoped reward model."""

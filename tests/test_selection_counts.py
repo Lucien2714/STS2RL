@@ -3,58 +3,6 @@
 from sts2rl.agents.candidate_dqn_agent import DQNCandidateAgent
 from sts2rl.agents.event.rule_based import EventPolicy
 from sts2rl.agents.orchestrator import Agent, is_battle_policy_state
-from sts2rl.flow.battle_flow import advance_forced_hand_select_states
-
-
-class ZeroReward:
-    """Small reward-model double for forced-transition tests."""
-
-    def compute(self, prev_state, next_state, action):
-        return 0.0, {"type": "test", "total": 0.0}
-
-    def action_error_reward(self, error):
-        return 0.0, {"type": "action_error", "error": str(error), "total": 0.0}
-
-
-class HandSelectGame:
-    """Fake game that advances a two-card hand-select prompt."""
-
-    def __init__(self):
-        self.actions = []
-
-    def step(self, action):
-        self.actions.append(action)
-        if len(self.actions) == 1:
-            state = hand_select_state(selected_indices=[0], can_confirm=True)
-        elif len(self.actions) == 2:
-            state = hand_select_state(selected_indices=[0, 1], can_confirm=True)
-        else:
-            state = {"state_type": "monster"}
-        return state, False, {"raw_state": state, "action_error": False}
-
-
-def hand_select_state(selected_indices=None, can_confirm=False):
-    """Build a hand-select state with a two-card exact requirement."""
-    selected_indices = selected_indices or []
-    cards = [
-        {"index": 0, "id": "STRIKE_IRONCLAD"},
-        {"index": 1, "id": "DEFEND_IRONCLAD"},
-    ]
-    selected_cards = [cards[index] for index in selected_indices]
-    selected_count = len(selected_cards)
-    return {
-        "state_type": "hand_select",
-        "hand_select": {
-            "cards": cards,
-            "selected_cards": selected_cards,
-            "selected_count": selected_count,
-            "min_select": 2,
-            "max_select": 2,
-            "required_select_count": 2,
-            "remaining_to_min": max(0, 2 - selected_count),
-            "can_confirm": can_confirm,
-        },
-    }
 
 
 def test_card_select_picks_until_required_count_before_confirming():
@@ -82,26 +30,6 @@ def test_card_select_picks_until_required_count_before_confirming():
     }
 
     assert policy.choose_action(state) == {"type": "select_card", "index": 1}
-
-
-def test_auto_advance_leaves_hand_select_for_battle_policy():
-    """Hand-select prompts should no longer be auto-advanced around the agent."""
-    agent = Agent()
-    game = HandSelectGame()
-    initial_state = hand_select_state()
-
-    raw_state, reward, done, auto_steps = advance_forced_hand_select_states(
-        game,
-        agent,
-        ZeroReward(),
-        initial_state,
-    )
-
-    assert raw_state == initial_state
-    assert reward == 0.0
-    assert done is False
-    assert game.actions == []
-    assert auto_steps == []
 
 
 def test_card_select_confirms_after_required_count_is_met():
@@ -154,7 +82,6 @@ def test_orchestrator_routes_hand_select_to_battle_agent():
         },
     }
 
-    assert agent._forced_transition_action(raw_state) is None
     assert is_battle_policy_state(raw_state) is True
     assert agent.choose_action(
         {

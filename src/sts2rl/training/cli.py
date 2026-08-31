@@ -8,10 +8,14 @@ import time
 from pathlib import Path
 
 from sts2rl.agents.orchestrator import (
+    DEFAULT_POLICY_VARIANT,
+    POLICY_VARIANTS,
+    SCREEN_NAMES,
     Agent,
     create_battle_agent,
-    create_screen_agents,
+    create_screen_agent,
     is_battle_policy_state,
+    normalize_policy_variant,
     normalize_screen_agent_type,
 )
 from sts2rl.checkpoints.manager import (
@@ -27,14 +31,11 @@ from sts2rl.env.game_env import Game
 from sts2rl.env.player import Player
 from sts2rl.env.rewards import ScopedRewardModel
 from sts2rl.flow.battle_flow import (
-    advance_forced_end_turn_states,
-    fold_reward_details,
     forced_end_turn_action_selection,
     forced_end_turn_q_values,
-    is_forced_end_turn_state,
-    should_skip_agent,
 )
 from sts2rl.flow.player_detail import refresh_player_detail_for_map
+from sts2rl.flow.step_loop import StepError, apply_action, decide_action
 from sts2rl.training.config import (
     DEFAULT_TRAINING_LIVE_HTTP_HOST,
     DEFAULT_TRAINING_LIVE_HTTP_PORT,
@@ -50,6 +51,10 @@ SAVE_INTERVAL = 10
 DEFAULT_EPISODE_LOG_PATH = Path("logs") / "training_episodes.jsonl"
 DEFAULT_CLIENT_PORT = 15526
 RECONNECT_POLL_SECONDS = 2.0
+# Pause between steps. This used to be an unconditional 0.1s, which at ~1300 steps
+# per episode spent over two minutes per episode asleep. The game client sets the
+# real pace; raise this only if you need to watch a run go by.
+DEFAULT_STEP_DELAY = 0.0
 
 
 def save_battle_checkpoint(agent, path: Path, reason: str) -> None:
@@ -98,6 +103,28 @@ def parse_args() -> argparse.Namespace:
         help=(
             "Trainable agent for non-battle screens (map/reward/shop/rest/event). "
             "Use 'none' to keep all non-battle screens rule-based."
+        ),
+    )
+    parser.add_argument(
+        "--policy",
+        choices=list(POLICY_VARIANTS),
+        default=DEFAULT_POLICY_VARIANT,
+        help=(
+            "Battle policy module. 'flat' is the handcrafted featurizer + MLP; "
+            "'learned' embeds a trainable per-card embedding in the policy. The two "
+            "use different schemas and separate checkpoint directories "
+            "(e.g. checkpoints/battleAgent/PPO-learned/)."
+        ),
+    )
+    parser.add_argument(
+        "--screen",
+        action="append",
+        choices=[*sorted(SCREEN_NAMES), "all"],
+        default=None,
+        help=(
+            "Restrict trainable screens to the named screen(s). Repeatable, e.g. "
+            "--screen reward --screen map. 'all' (the default when omitted) trains "
+            "every screen. Ignored when --screen-agent is 'none'."
         ),
     )
     parser.add_argument(
@@ -172,12 +199,39 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="Optional TensorBoard log directory for training metrics.",
     )
+    parser.add_argument(
+        "--step-delay",
+        type=float,
+        default=DEFAULT_STEP_DELAY,
+        help=(
+            "Seconds to sleep between steps. Defaults to 0 (run as fast as the game "
+            "client allows); set e.g. 0.1 to slow a run down for watching."
+        ),
+    )
+    parser.add_argument(
+        "--no-step-print",
+        dest="step_print",
+        action="store_false",
+        default=True,
+        help="Suppress the per-step console line. Episode summaries still print.",
+    )
     return parser.parse_args()
 
 
 def base_url_from_port(host: str, port: int) -> str:
     """Build an STS2MCP API base URL from host and port."""
     return f"http://{host}:{port}/api/v1"
+
+
+def selected_screen_names(args: argparse.Namespace) -> list[str]:
+    """Resolve --screen into an ordered, de-duplicated list of screen names.
+
+    No ``--screen`` (or ``all``) means every screen, preserving the historical
+    default of training all non-battle screens.
+    """
+    if not args.screen or "all" in args.screen:
+        return list(SCREEN_NAMES)
+    return list(dict.fromkeys(args.screen))  # de-dupe, preserve order
 
 
 def training_client_urls(args: argparse.Namespace) -> list[str]:
@@ -198,14 +252,18 @@ class SharedTrainingState:
         battle_agent_type: str,
         screen_agents: dict | None = None,
         screen_agent_type: str = "PPO",
+        policy: str = DEFAULT_POLICY_VARIANT,
     ) -> None:
         # One shared battle agent (model + optimizer); each client builds its own
         # orchestrator + rollout collector over it. The non-battle screen agents
         # are shared the same way.
         self.battle_agent = battle_agent
         self.battle_agent_type = normalize_battle_agent_type(battle_agent_type)
-        self.checkpoint_dir = battle_agent_checkpoint_dir(self.battle_agent_type)
-        self.latest_path = battle_latest_path(self.battle_agent_type)
+        # Screen agents always use the flat policy; only the battle agent has a
+        # learned-featurizer variant so far.
+        self.policy = normalize_policy_variant(policy)
+        self.checkpoint_dir = battle_agent_checkpoint_dir(self.battle_agent_type, self.policy)
+        self.latest_path = battle_latest_path(self.battle_agent_type, self.policy)
         self.agent_lock = threading.RLock()
         self.last_backup_index = battle_agent.trained_steps // TRAINING_BACKUP_INTERVAL
 
@@ -245,7 +303,7 @@ class SharedTrainingState:
             )
             save_battle_checkpoint(
                 self.battle_agent,
-                battle_backup_path(backup_step, self.battle_agent_type),
+                battle_backup_path(backup_step, self.battle_agent_type, self.policy),
                 f"training milestone backup {backup_step}",
             )
 
@@ -456,6 +514,8 @@ def run_training_client(
     episode_log: EpisodeLogWriter,
     tensorboard: TensorBoardLogger,
     stop_event: threading.Event,
+    step_delay: float = DEFAULT_STEP_DELAY,
+    step_print: bool = True,
 ) -> None:
     """Run the training loop for one STS2MCP client."""
     game = Game(character=0, base_url=base_url)
@@ -512,40 +572,31 @@ def run_training_client(
                 refresh_player_detail_for_map(game, player, raw_state)
 
                 with shared.agent_lock:
-                    forced_end_turn = is_forced_end_turn_state(agent, raw_state)
-                    skipped_agent = should_skip_agent(raw_state)
-                    if forced_end_turn:
-                        action = {"type": "end_turn"}
+                    decision = decide_action(agent, raw_state, training=True)
+                    action = decision.action
+                    forced_end_turn = decision.forced_end_turn
+                    # Q-values and selection metadata cost a full forward pass over
+                    # every candidate, and only the dashboard consumes them. Skip
+                    # the work entirely when nothing is watching.
+                    if dashboard is None:
+                        q_values = {}
+                        action_selection = {}
+                    elif forced_end_turn:
                         q_values = forced_end_turn_q_values(raw_state)
                         action_selection = forced_end_turn_action_selection()
-                    elif skipped_agent:
-                        action = {"type": "proceed"}
-                        q_values = current_q_values(agent, prev_raw_state, action)
-                        action_selection = action_selection_details(
-                            agent,
-                            prev_raw_state,
-                            action,
-                            skipped_agent,
-                            q_values,
-                        )
                     else:
-                        policy_state = {
-                            "screen_type": raw_state.get("state_type"),
-                            "raw_state": raw_state,
-                        }
-                        action = agent.choose_action(policy_state)
                         q_values = current_q_values(agent, prev_raw_state, action)
                         action_selection = action_selection_details(
                             agent,
                             prev_raw_state,
                             action,
-                            skipped_agent,
+                            decision.skipped_agent,
                             q_values,
                         )
 
                 try:
-                    next_raw_state, done, info = game.step(action)
-                except Exception as exc:
+                    outcome = apply_action(game, agent, reward_model, prev_raw_state, action)
+                except StepError as exc:
                     recovered_state, restart_episode = recover_client_state_after_disconnect(
                         game,
                         client_id,
@@ -553,7 +604,7 @@ def run_training_client(
                         dashboard,
                         stop_event,
                         episode,
-                        prev_raw_state,
+                        exc.state,
                         exc,
                     )
                     if recovered_state is None or restart_episode:
@@ -562,74 +613,28 @@ def run_training_client(
                     final_raw_state = recovered_state
                     continue
 
-                if info.get("action_error"):
-                    reward, reward_details = reward_model.action_error_reward(
-                        info.get("error", "client request failed")
-                    )
-                    if is_connection_action_error(info):
-                        recovered_state, restart_episode = recover_client_state_after_disconnect(
-                            game,
-                            client_id,
-                            base_url,
-                            dashboard,
-                            stop_event,
-                            episode,
-                            prev_raw_state,
-                            info.get("error", "client request failed"),
-                        )
-                        if recovered_state is None or restart_episode:
-                            break
-                        raw_state = recovered_state
-                        final_raw_state = recovered_state
-                        continue
-                else:
-                    reward, reward_details = reward_model.compute(
+                if outcome.action_error and is_connection_action_error(outcome.info):
+                    recovered_state, restart_episode = recover_client_state_after_disconnect(
+                        game,
+                        client_id,
+                        base_url,
+                        dashboard,
+                        stop_event,
+                        episode,
                         prev_raw_state,
-                        next_raw_state,
-                        action,
+                        outcome.error or "client request failed",
                     )
-                auto_steps = []
-                if next_raw_state is not None and not done:
-                    try:
-                        for advance_forced_states in (advance_forced_end_turn_states,):
-                            if done:
-                                break
-                            (
-                                next_raw_state,
-                                auto_reward,
-                                auto_done,
-                                new_auto_steps,
-                            ) = advance_forced_states(
-                                game,
-                                agent,
-                                reward_model,
-                                next_raw_state,
-                            )
-                            auto_steps.extend(new_auto_steps)
-                            reward += auto_reward
-                            done = done or auto_done
-                    except Exception as exc:
-                        recovered_state, restart_episode = recover_client_state_after_disconnect(
-                            game,
-                            client_id,
-                            base_url,
-                            dashboard,
-                            stop_event,
-                            episode,
-                            next_raw_state,
-                            exc,
-                        )
-                        if recovered_state is None or restart_episode:
-                            break
-                        raw_state = recovered_state
-                        final_raw_state = recovered_state
-                        continue
+                    if recovered_state is None or restart_episode:
+                        break
+                    raw_state = recovered_state
+                    final_raw_state = recovered_state
+                    continue
+
+                next_raw_state = outcome.next_raw_state
+                reward = outcome.reward
+                done = outcome.done
+                reward_details = outcome.reward_details
                 final_raw_state = next_raw_state
-                reward_details = fold_reward_details(
-                    reward_details,
-                    reward,
-                    auto_steps,
-                )
                 training_reward = training_reward_for_state(prev_raw_state, reward, reward_details)
                 training_info = None
                 if not forced_end_turn:
@@ -651,7 +656,7 @@ def run_training_client(
                                 exc,
                             )
                 episode_reward += reward
-                folded_step_count = 1 + len(auto_steps)
+                folded_step_count = outcome.step_count
                 episode_steps += folded_step_count
 
                 loss = None
@@ -726,31 +731,27 @@ def run_training_client(
                             train_step,
                         )
 
-                with shared.agent_lock:
-                    print_replay_size = agent.battle_agent.buffered_steps()
-                    print_epsilon = agent.battle_agent.epsilon
-                print(
-                    client_id,
-                    action,
-                    "reward=",
-                    reward,
-                    "reward_details=",
-                    reward_details,
-                    "done=",
-                    done,
-                    "loss=",
-                    loss,
-                    "replay=",
-                    print_replay_size,
-                    "epsilon=",
-                    round(print_epsilon, 4),
-                )
-                if dashboard is not None:
+                # One lock acquisition per step for all agent-state reads, instead of
+                # one per consumer. These are cheap reads but the lock is shared by
+                # every client thread.
+                epsilon = replay_size = trained_steps = learn_steps = 0
+                if step_print or dashboard is not None:
                     with shared.agent_lock:
                         epsilon = agent.battle_agent.epsilon
                         replay_size = agent.battle_agent.buffered_steps()
                         trained_steps = agent.battle_agent.trained_steps
                         learn_steps = agent.battle_agent.learn_steps
+
+                if step_print:
+                    # Deliberately compact: serializing reward_details per step cost
+                    # more than the step often did.
+                    print(
+                        f"{client_id} {prev_raw_state.get('state_type')} "
+                        f"{action.get('action_key') or action.get('type')} "
+                        f"reward={reward:.2f} done={done} loss={loss} "
+                        f"replay={replay_size} epsilon={round(epsilon, 4)}"
+                    )
+                if dashboard is not None:
                     dashboard.update_step(
                         client_id,
                         base_url,
@@ -783,7 +784,8 @@ def run_training_client(
                     break
 
                 raw_state = next_raw_state
-                time.sleep(0.1)
+                if step_delay > 0:
+                    time.sleep(step_delay)
 
             if stop_event.is_set():
                 break
@@ -969,18 +971,29 @@ def main():
     if tensorboard.enabled:
         logging.info("Writing TensorBoard training metrics to %s", tensorboard.log_dir)
 
-    battle_agent = create_battle_agent(battle_agent_type)
+    policy_variant = normalize_policy_variant(args.policy)
+    battle_agent = create_battle_agent(battle_agent_type, policy=policy_variant)
     load_agent_checkpoint(
         battle_agent,
-        battle_latest_path(battle_agent_type),
-        f"{battle_agent_type} battle agent",
+        battle_latest_path(battle_agent_type, policy_variant),
+        f"{battle_agent_type} battle agent ({policy_variant} policy)",
     )
+    if policy_variant != DEFAULT_POLICY_VARIANT:
+        logging.info(
+            "Battle policy: %s (schema=%s, checkpoints in %s)",
+            policy_variant,
+            battle_agent.ACTION_SCHEMA,
+            battle_agent_checkpoint_dir(battle_agent_type, policy_variant),
+        )
 
     screen_agents = {}
     screen_agent_type = None
     if args.screen_agent.lower() != "none":
         screen_agent_type = normalize_screen_agent_type(args.screen_agent)
-        screen_agents = create_screen_agents(screen_agent_type)
+        screen_agents = {
+            screen: create_screen_agent(screen, screen_agent_type)
+            for screen in selected_screen_names(args)
+        }
         for screen, agent in screen_agents.items():
             load_agent_checkpoint(
                 agent,
@@ -1000,6 +1013,7 @@ def main():
         battle_agent_type,
         screen_agents=screen_agents,
         screen_agent_type=screen_agent_type or "PPO",
+        policy=policy_variant,
     )
     stop_event = threading.Event()
     client_urls = training_client_urls(args)
@@ -1022,6 +1036,8 @@ def main():
                     episode_log,
                     tensorboard,
                     stop_event,
+                    args.step_delay,
+                    args.step_print,
                 ),
                 name=f"trainer-{client_id}",
             )

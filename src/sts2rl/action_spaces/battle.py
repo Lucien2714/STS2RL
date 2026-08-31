@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import re
 
-from sts2rl.action_spaces.base import ActionSpace, parse_int
+from sts2rl.action_spaces.base import REFRESH_STATE_ACTION, ActionSpace, parse_int
 from sts2rl.action_spaces.selection import (
     can_confirm_selection,
     can_select_more,
@@ -373,7 +373,9 @@ class BattleActionSpace(ActionSpace):
     def fallback(self, raw_state: dict) -> dict:
         if raw_state.get("state_type") in {"monster", "elite", "boss"}:
             if not self._is_player_play_phase(raw_state):
-                return {"type": "proceed"}
+                # Combat does not accept `proceed`, and `end_turn` is not ours to
+                # send outside the play phase: wait for the server to settle.
+                return dict(REFRESH_STATE_ACTION)
             return {"type": "end_turn"}
 
         if raw_state.get("state_type") == "hand_select":
@@ -417,6 +419,11 @@ class BattleActionSpace(ActionSpace):
 
             if card_select.get("can_cancel", False):
                 return {"type": "cancel_selection"}
+
+        # A selection prompt with nothing selectable and nothing confirmable has no
+        # legal action; `end_turn` is not accepted there, so re-read state instead.
+        if raw_state.get("state_type") in {"hand_select", "card_select"}:
+            return dict(REFRESH_STATE_ACTION)
 
         return {"type": "end_turn"}
 

@@ -3,6 +3,7 @@
 import logging
 from dataclasses import dataclass
 
+from sts2rl.action_spaces.battle import BattleActionSpace
 from sts2rl.action_spaces.event import EventActionSpace
 from sts2rl.action_spaces.map import MapActionSpace
 from sts2rl.action_spaces.rest import RestActionSpace
@@ -42,6 +43,12 @@ BATTLE_AGENT_TYPES = {
     "DQN": DQNCandidateAgent,
     "PPO": PPOCandidateAgent,
 }
+
+# Which policy module the battle agent scores candidates with. "flat" is the
+# handcrafted featurizer + MLP (what every existing checkpoint holds); "learned"
+# embeds CardModelEncoder in the policy so it trains with the network.
+POLICY_VARIANTS = ("flat", "learned")
+DEFAULT_POLICY_VARIANT = "flat"
 
 # --- non-battle screen agents -------------------------------------------------
 # Trainable candidate-action agents for the non-battle screens. A screen agent is
@@ -99,9 +106,51 @@ def normalize_screen_agent_type(agent_type: str) -> str:
     return agent_type
 
 
-def create_battle_agent(agent_type: str, **kwargs):
-    """Create a battle agent implementation by type name."""
-    return BATTLE_AGENT_TYPES[normalize_battle_agent_type(agent_type)](**kwargs)
+def normalize_policy_variant(policy: str) -> str:
+    """Return a canonical battle-policy variant name."""
+    policy = str(policy).strip().lower()
+    if policy not in POLICY_VARIANTS:
+        raise ValueError(f"Unsupported policy variant: {policy!r}")
+    return policy
+
+
+def create_battle_agent(agent_type: str, policy: str = DEFAULT_POLICY_VARIANT, **kwargs):
+    """Create a battle agent implementation by type name and policy variant.
+
+    ``policy="flat"`` is the handcrafted featurizer + MLP that every existing
+    checkpoint was trained with. ``policy="learned"`` swaps in a policy module
+    that owns a :class:`~sts2rl.models.card_encoder.CardModelEncoder`, so the
+    per-card embedding trains end-to-end with the rest of the network (ADR-0007
+    Phase 3). The two use different action schemas, so their checkpoints cannot
+    be loaded into one another.
+    """
+    agent_class = BATTLE_AGENT_TYPES[normalize_battle_agent_type(agent_type)]
+    if normalize_policy_variant(policy) == "flat":
+        return agent_class(**kwargs)
+
+    # Imported lazily: torch policy modules should not be pulled in for callers
+    # that only touch the flat path.
+    from sts2rl.encoders.learned_battle_encoder import LearnedBattleStateEncoder
+    from sts2rl.models.learned_policies import (
+        CardIndexLayout,
+        LearnedCandidatePPOPolicy,
+        LearnedCandidateQNetwork,
+    )
+
+    encoder = LearnedBattleStateEncoder()
+    layout = CardIndexLayout.from_encoder(encoder)
+    policy_class = (
+        LearnedCandidateQNetwork
+        if agent_class is DQNCandidateAgent
+        else LearnedCandidatePPOPolicy
+    )
+    hidden_size = kwargs.pop("hidden_size", 256)
+    return agent_class(
+        encoder=encoder,
+        action_space=BattleActionSpace(),
+        policy=policy_class(layout, hidden_size=hidden_size),
+        **kwargs,
+    )
 
 
 def create_screen_agent(screen: str, agent_type: str = "PPO", **kwargs):
@@ -209,10 +258,6 @@ class Agent:
         if screen_type in ["event", "card_select"]:
             return self.event_policy.choose_action(raw_state)
         return self.default_policy.choose_action(raw_state)
-
-    def _forced_transition_action(self, raw_state: dict) -> dict | None:
-        """Return required confirmation actions before normal policy selection."""
-        return None
 
     def train_from_step(
         self,

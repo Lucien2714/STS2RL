@@ -14,6 +14,10 @@ class ActionDispatcher:
     def dispatch(self, action: GameAction):
         """Execute an action dictionary against the wrapped game client."""
         action_type = action.get("type")
+        if action_type == "refresh_state":
+            # No-op: the state has no legal action right now (e.g. combat outside
+            # the play phase), so re-read it instead of posting a rejected move.
+            return self.client.get_state()
         if action_type == "end_turn":
             return self.client.end_turn()
         if action_type == "proceed":

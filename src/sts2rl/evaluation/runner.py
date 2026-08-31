@@ -2,7 +2,6 @@
 
 import csv
 import logging
-import math
 import time
 from pathlib import Path
 from typing import Callable
@@ -19,31 +18,9 @@ from sts2rl.env.game_env import Game
 from sts2rl.env.player import Player
 from sts2rl.env.rewards import ScopedRewardModel
 from sts2rl.evaluation.dashboard import LiveEvaluationDashboard
-from sts2rl.flow.battle_flow import (
-    advance_forced_end_turn_states,
-    fold_reward_details,
-    forced_end_turn_q_values,
-    is_forced_end_turn_state,
-    should_skip_agent,
-)
+from sts2rl.flow.battle_flow import forced_end_turn_q_values
 from sts2rl.flow.player_detail import refresh_player_detail_for_map
-
-
-def choose_eval_action(agent: Agent, raw_state: dict) -> dict:
-    """Choose an action for evaluation without battle exploration."""
-    forced_action = agent._forced_transition_action(raw_state)
-    if forced_action is not None:
-        return forced_action
-
-    state_type = raw_state.get("state_type")
-    if is_battle_policy_state(raw_state):
-        return agent.battle_agent.choose_action(raw_state, training=False)
-
-    policy_state = {
-        "screen_type": state_type,
-        "raw_state": raw_state,
-    }
-    return agent.choose_action(policy_state, training=False)
+from sts2rl.flow.step_loop import apply_action, decide_action
 
 
 def load_eval_screen_agents(screen_agent_type: str | None) -> dict:
@@ -99,14 +76,6 @@ def current_q_values(agent: Agent, raw_state: dict, selected_action: dict | None
     return agent.battle_agent.current_q_values(raw_state, selected_action)
 
 
-def safe_float(value: float) -> float | None:
-    """Convert non-finite floats to None for JSON/CSV-safe output."""
-    value = float(value)
-    if not math.isfinite(value):
-        return None
-    return value
-
-
 def evaluate_episode(
     game: Game,
     agent: Agent,
@@ -147,51 +116,22 @@ def evaluate_episode(
 
         refresh_player_detail_for_map(game, player, raw_state)
 
-        forced_end_turn = is_forced_end_turn_state(agent, raw_state)
-        if forced_end_turn:
-            action = {"type": "end_turn"}
+        decision = decide_action(agent, raw_state, training=False)
+        action = decision.action
+        if decision.forced_end_turn:
             q_values = forced_end_turn_q_values(raw_state)
-        elif should_skip_agent(raw_state):
-            action = {"type": "proceed"}
-            q_values = current_q_values(agent, raw_state, action)
         else:
-            action = choose_eval_action(agent, raw_state)
             q_values = current_q_values(agent, raw_state, action)
 
-        next_raw_state, done, info = game.step(action)
-        if info.get("action_error"):
-            reward, reward_details = reward_model.action_error_reward(
-                info.get("error", "action dispatch failed")
-            )
-        else:
-            reward, reward_details = reward_model.compute(raw_state, next_raw_state, action)
-        auto_steps = []
-        if next_raw_state is not None and not done:
-            for advance_forced_states in (advance_forced_end_turn_states,):
-                if done:
-                    break
-                (
-                    next_raw_state,
-                    auto_reward,
-                    auto_done,
-                    new_auto_steps,
-                ) = advance_forced_states(
-                    game,
-                    agent,
-                    reward_model,
-                    next_raw_state,
-                )
-                auto_steps.extend(new_auto_steps)
-                reward += auto_reward
-                done = done or auto_done
-        reward_details = fold_reward_details(
-            reward_details,
-            reward,
-            auto_steps,
-        )
+        outcome = apply_action(game, agent, reward_model, raw_state, action)
+        next_raw_state = outcome.next_raw_state
+        reward = outcome.reward
+        done = outcome.done
+        reward_details = outcome.reward_details
+
         episode_reward += reward
         run_reward += reward_details.get("run_reward", 0.0)
-        folded_step_count = 1 + len(auto_steps)
+        folded_step_count = outcome.step_count
         steps += folded_step_count
 
         if reward_details.get("type") == "battle":

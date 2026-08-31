@@ -33,8 +33,9 @@ class MapActionSpace(ActionSpace):
                     f"choose_map_node:{index}",
                 )
             )
-        if not candidates:
-            candidates.append(self._candidate({"type": "proceed"}, "proceed"))
+        # No synthetic `proceed` filler: the map screen only accepts
+        # choose_map_node, so an empty option list means there is no legal action
+        # and the caller should fall back (see action_spaces.defaults).
         return candidates
 
     def action_key(self, action: dict, raw_state: dict | None = None) -> str:
@@ -42,4 +43,4 @@ class MapActionSpace(ActionSpace):
             return str(action["action_key"])
         if action.get("type") == "choose_map_node":
             return f"choose_map_node:{action.get('index')}"
-        return "proceed"
+        return str(action.get("type", "unknown"))
