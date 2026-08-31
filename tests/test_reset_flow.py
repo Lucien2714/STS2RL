@@ -66,7 +66,7 @@ def test_custom_seed_reset_embarks_before_returning_raw_state():
     assert client.actions == [
         ("singleplayer", None),
         ("custom", "ABC"),
-        ("embark", None),
+        ("embark", "ABC"),
     ]
 
 

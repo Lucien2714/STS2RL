@@ -18,6 +18,11 @@ class ActionDispatcher:
 
         action_type = action.action_type
         params = action.params
+        if action_type == "menu_select":
+            return self.client.menu_select(
+                params["option"],
+                seed=params.get("seed"),
+            )
         if action_type == "end_turn":
             return self.client.end_turn()
         if action_type == "proceed":

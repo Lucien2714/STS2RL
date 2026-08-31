@@ -48,3 +48,13 @@ class SelectCardAction(GameAction):
 
     def __init__(self, card_index: int) -> None:
         super().__init__("select_card", index=card_index)
+
+
+class MenuSelectAction(GameAction):
+    """Select one option from an STS2MCP menu state."""
+
+    def __init__(self, option: str, seed: str | None = None) -> None:
+        params: dict[str, Any] = {"option": option}
+        if seed is not None:
+            params["seed"] = seed
+        super().__init__("menu_select", **params)

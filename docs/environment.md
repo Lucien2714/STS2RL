@@ -26,3 +26,8 @@ layers consume `RawState` after the raw transition boundary is stable.
 Invalid actions and dispatcher programming errors raise immediately. An
 `STS2ClientError` raised while executing a valid action is returned as
 `info["action_error"] = True` when the current state can still be fetched.
+
+Reset menu navigation lives in `ResetController`. Every menu transition is a
+`MenuSelectAction` sent through the same dispatcher as normal environment
+actions. Calling `reset()` while a run is already active raises by default;
+use `ResetSpec(allow_active_run=True)` only when reusing that run is intended.

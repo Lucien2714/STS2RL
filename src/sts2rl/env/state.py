@@ -2,6 +2,24 @@
 
 from __future__ import annotations
 
+from typing import Any
+
+from sts2rl.env.mcp_client import STS2ClientError
+from sts2rl.env.types import RawState
+
+
+def extract_raw_state(response: Any) -> RawState:
+    """Extract a raw state from any supported STS2MCP response shape."""
+    if isinstance(response, dict):
+        if isinstance(response.get("state"), dict):
+            return response["state"]
+        if isinstance(response.get("raw_state"), dict):
+            return response["raw_state"]
+        if response.get("state_type") is not None:
+            return response
+
+    raise STS2ClientError(f"Response did not include a game state: {response}")
+
 
 def parse_int(value: object, default: int = 0) -> int:
     """Parse an integer-like value, returning a default on invalid input."""

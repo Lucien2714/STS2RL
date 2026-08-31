@@ -1,7 +1,7 @@
 import pytest
 
 from sts2rl.actions.dispatcher import ActionDispatcher
-from sts2rl.actions.game_action import GameAction, SelectCardAction
+from sts2rl.actions.game_action import GameAction, MenuSelectAction, SelectCardAction
 
 
 class FakeClient:
@@ -15,6 +15,10 @@ class FakeClient:
     def select_card(self, index):
         self.calls.append(("select_card", index))
         return {"state_type": "card_select"}
+
+    def menu_select(self, option, seed=None):
+        self.calls.append(("menu_select", option, seed))
+        return {"state_type": "menu"}
 
 
 def test_game_action_round_trips_legacy_dictionary():
@@ -50,6 +54,15 @@ def test_select_card_action_uses_api_index_parameter():
     dispatcher.dispatch(SelectCardAction(3))
 
     assert client.calls == [("select_card", 3)]
+
+
+def test_menu_select_action_routes_option_and_seed():
+    client = FakeClient()
+    dispatcher = ActionDispatcher(client)
+
+    dispatcher.dispatch(MenuSelectAction("custom", seed="ABC"))
+
+    assert client.calls == [("menu_select", "custom", "ABC")]
 
 
 def test_dispatcher_rejects_legacy_dictionary_directly():
