@@ -8,6 +8,7 @@ https://github.com/Gennadiyev/STS2MCP/blob/main/docs/raw-full.md
 from __future__ import annotations
 
 from typing import Any, Literal, Optional
+
 import requests
 
 
@@ -43,11 +44,28 @@ class STS2Client:
         base_url: str = "http://localhost:15526/api/v1",
         mode: GameMode = "singleplayer",
         timeout: float = 10.0,
+        session: requests.Session | None = None,
     ) -> None:
         self.base_url = base_url.rstrip("/")
         self.mode = mode
         self.timeout = timeout
-        self.session = requests.Session()
+        self._owns_session = session is None
+        self.session = session if session is not None else requests.Session()
+
+    def close(self) -> None:
+        """Close the internally created HTTP session.
+
+        An injected session remains owned by its caller and is deliberately not
+        closed here.
+        """
+        if self._owns_session:
+            self.session.close()
+
+    def __enter__(self) -> "STS2Client":
+        return self
+
+    def __exit__(self, exc_type, exc_value, traceback) -> None:
+        self.close()
 
     # -------------------------
     # Internal request helpers
@@ -88,7 +106,10 @@ class STS2Client:
             ) from exc
 
         if response.status_code >= 400:
-            msg = data.get("error") or data.get("message") or str(data)
+            if isinstance(data, dict):
+                msg = data.get("error") or data.get("message") or str(data)
+            else:
+                msg = str(data)
             raise STS2ClientError(f"HTTP {response.status_code}: {msg}")
 
         if isinstance(data, dict) and data.get("status") == "error":

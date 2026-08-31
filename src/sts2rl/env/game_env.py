@@ -173,8 +173,8 @@ class GameEnv:
         return self.get_state().get("state_type", False) == "game_over"
 
     def close(self) -> None:
-        """Close environment resources when needed."""
-        pass
+        """Close resources owned by the underlying STS2MCP client."""
+        self.client.close()
 
 
 Game = GameEnv
