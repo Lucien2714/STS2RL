@@ -19,10 +19,6 @@ dev = [
 requires = ["hatchling"]
 build-backend = "hatchling.build"
 
-[project.scripts]
-sts2rl-train = "sts2rl.training.cli:main"
-sts2rl-evaluate = "sts2rl.evaluation.cli:main"
-
 [tool.uv]
 package = true
 

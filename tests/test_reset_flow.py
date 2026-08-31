@@ -1,13 +1,11 @@
-"""Tests for environment reset menu navigation."""
+"""Tests for environment reset menu navigation and step compatibility."""
 
 from sts2rl.actions.game_action import GameAction
 from sts2rl.env.game_env import GameEnv
-from sts2rl.env.player import Player
-from sts2rl.flow.player_detail import refresh_player_detail_for_map
 
 
 class FakeClient:
-    """Minimal STS2MCP client double for reset-flow tests."""
+    """Minimal STS2MCP client double for environment tests."""
 
     def __init__(self):
         self.actions = []
@@ -18,11 +16,9 @@ class FakeClient:
         }
 
     def get_state(self):
-        """Return the fake client's current state."""
         return self.state
 
     def menu_select(self, option, seed=None):
-        """Record menu selections and advance through a tiny fake menu."""
         self.actions.append((option, seed))
         if option == "singleplayer":
             self.state = {"state_type": "menu", "menu_screen": "singleplayer"}
@@ -39,7 +35,6 @@ class FakeClient:
         return self.state
 
     def end_turn(self):
-        """Advance to a fake next state for step-boundary tests."""
         self.actions.append(("end_turn", None))
         self.state = {
             "state_type": "map",
@@ -48,44 +43,8 @@ class FakeClient:
         }
         return {"state": self.state}
 
-    def get_player_detail(self):
-        """Return a fake player-detail response."""
-        return {
-            "state_type": "player_detail",
-            "status": "ok",
-            "game_mode": "singleplayer",
-            "run": {"act": 1, "floor": 1, "ascension": 0},
-            "player": {
-                "character": "The Ironclad",
-                "hp": 70,
-                "max_hp": 80,
-                "block": 0,
-                "gold": 42,
-                "status": [],
-                "relics": [
-                    {"id": "BURNING_BLOOD", "name": "Burning Blood"},
-                ],
-                "potions": [
-                    {"id": "FIRE_POTION", "name": "Fire Potion", "slot": 0},
-                ],
-                "max_potion_slots": 3,
-                "deck_count": 1,
-                "deck": [
-                    {
-                        "index": 0,
-                        "id": "BASH",
-                        "name": "Bash",
-                        "cost": "2",
-                        "star_cost": None,
-                        "is_upgraded": True,
-                    },
-                ],
-            },
-        }
-
 
 def test_custom_seed_reset_embarks_before_returning_state():
-    """Custom seeded resets should select embark before returning map state."""
     env = GameEnv(game_mode="custom", start_run_option="embark")
     env.client = FakeClient()
 
@@ -100,7 +59,6 @@ def test_custom_seed_reset_embarks_before_returning_state():
 
 
 def test_step_returns_raw_state_and_api_info_without_reward():
-    """Steps should only communicate with STS2MCP and not compute reward."""
     env = GameEnv()
     env.client = FakeClient()
     env.action_dispatcher.client = env.client
@@ -115,7 +73,6 @@ def test_step_returns_raw_state_and_api_info_without_reward():
 
 
 def test_step_converts_legacy_action_dictionary_at_environment_boundary():
-    """Existing agents can migrate to GameAction without breaking in one change."""
     env = GameEnv()
     env.client = FakeClient()
     env.action_dispatcher.client = env.client
@@ -126,66 +83,3 @@ def test_step_converts_legacy_action_dictionary_at_environment_boundary():
     assert done is False
     assert info["action"] == {"type": "end_turn"}
     assert info["action_error"] is False
-
-
-def test_refresh_player_detail_for_map_updates_player_model():
-    """Map states should be enriched with player-detail before routing."""
-    env = GameEnv()
-    env.client = FakeClient()
-    player = Player(character=0)
-    raw_state = {
-        "state_type": "map",
-        "run": {"act": 1, "floor": 1, "ascension": 0},
-        "map": {"next_options": []},
-    }
-
-    detail = refresh_player_detail_for_map(env, player, raw_state)
-
-    assert detail is raw_state["player_detail"]
-    assert player.current_hp == 70
-    assert player.gold == 42
-    assert player.deck_count == 1
-    assert player.current_deck[0].card_id == "BASH"
-    assert player.current_deck[0].upgraded is True
-    assert len(player.relic_details) == 1
-    assert len(player.potion_details) == 1
-
-
-def test_player_detail_update_ignores_non_scalar_int_values():
-    """Player detail parsing should tolerate non-scalar numeric fields."""
-    player = Player(character=0)
-    player.update_from_detail(
-        {
-            "state_type": "player_detail",
-            "status": "ok",
-            "player": {
-                "character": "The Ironclad",
-                "hp": {"unexpected": "object"},
-                "max_hp": object(),
-                "block": [],
-                "gold": "44",
-                "max_potion_slots": None,
-                "status": [],
-                "relics": [],
-                "potions": [],
-                "deck_count": {"bad": "count"},
-                "deck": [
-                    {
-                        "id": "WHIRLWIND",
-                        "name": "Whirlwind",
-                        "cost": "X",
-                        "star_cost": None,
-                        "is_upgraded": False,
-                    },
-                ],
-            },
-        }
-    )
-
-    assert player.current_hp == 80
-    assert player.max_hp == 80
-    assert player.block == 0
-    assert player.gold == 44
-    assert player.deck_count == 1
-    assert player.current_deck[0].regular_cost == -1
-    assert player.current_deck[0].star_cost == 0

@@ -1,17 +1,13 @@
 # Architecture
 
-STS2RL separates the project into stable layers:
+STS2RL is being rebuilt from the environment boundary outward. The current
+supported layers are:
 
-- `env/`: STS2MCP client integration, reset flow, environment stepping, reward boundaries.
-- `agents/`: abstract agent interfaces and concrete screen agents.
-- `algorithms/`: reusable algorithm internals such as DQN components.
-- `training/`: training CLI, runner, telemetry, dashboard, and episode logs.
-- `evaluation/`: checkpoint evaluation, seeded custom runs, dashboard, and CSV output.
-- `checkpoints/`: checkpoint paths and discovery helpers.
-- `metrics/`: typed result and transition objects.
-- `data/`: static game data and lookup maps.
+- `actions/`: typed actions and their dispatch to STS2MCP client methods.
+- `env/`: HTTP client integration, reset navigation, and raw environment steps.
+- `data/`: bundled static game data and lookup maps.
+- `encoder/`: the state-encoder interface retained for the next phase.
 
-The current migration preserves the original runtime behavior while moving code
-under the `sts2rl` package and adding explicit extension points for future
-algorithms and reward models.
-
+The environment returns raw game state. Encoding, reward calculation, agents,
+training, and evaluation are separate layers and will be reintroduced only after
+the environment contract is stable.

@@ -8,3 +8,8 @@ logs/
 checkpoints/
 
 *.egg-info/
+.claude/
+.agents/
+.uv-cache/
+.ruff_cache/
+.env/
