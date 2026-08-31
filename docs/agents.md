@@ -20,18 +20,19 @@ change after every step.
 
 ```python
 from sts2rl.agents import CandidatePPOAgent, EpisodeRunner
+from sts2rl.encoder import FeatureEncoder
 from sts2rl.env import GameEnv, ResetSpec
 
 env = GameEnv()
-agent = CandidatePPOAgent()
+encoder: FeatureEncoder = build_project_encoder()
+agent = CandidatePPOAgent(feature_encoder=encoder)
 runner = EpisodeRunner(env, agent)
 result = runner.run(ResetSpec(character=0))
 ```
 
-The initial `HashingFeatureEncoder` makes the loop runnable without changing the
-retained `sts2rl.encoder.StateEncoder`. It is a baseline boundary: a future
-domain encoder can replace it by providing `state_dim`, `action_dim`,
-`encode_state()`, and `encode_action()`.
+The project deliberately provides no fallback feature encoder. A caller must
+inject an encoder that provides `state_dim`, `action_dim`, `encode_state()`, and
+`encode_action()`. This prevents accidental training on a placeholder encoding.
 
 The legal-action provider covers combat, in-combat selection, rewards, map,
 events, rest sites, shops, treasure, card/bundle/relic overlays, and the Crystal

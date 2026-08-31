@@ -5,10 +5,44 @@ import torch
 from sts2rl.agents import CandidatePPOAgent, PPOConfig, Transition
 
 
+class StubFeatureEncoder:
+    """Small deterministic encoder used only to exercise PPO mechanics."""
+
+    state_dim = 4
+    action_dim = 4
+
+    def encode_state(self, state):
+        state_types = {"map": 0.0, "game_over": 1.0}
+        options = state.get("map", {}).get("next_options", [])
+        return torch.tensor(
+            [
+                state_types.get(state.get("state_type"), -1.0),
+                float(len(options)),
+                float(state.get("run", {}).get("floor", 0)),
+                1.0,
+            ],
+            dtype=torch.float32,
+        )
+
+    def encode_action(self, state, action):
+        del state
+        params = action.get_params()
+        return torch.tensor(
+            [
+                1.0 if action.get_type() == "choose_map_node" else 0.0,
+                float(params.get("index", 0)),
+                1.0 if action.get_type() == "end_turn" else 0.0,
+                1.0,
+            ],
+            dtype=torch.float32,
+        )
+
+
 def test_ppo_samples_only_from_current_candidates_and_updates_on_terminal_step():
     torch.manual_seed(7)
     agent = CandidatePPOAgent(
-        config=PPOConfig(hidden_dim=16, rollout_size=8, update_epochs=1)
+        StubFeatureEncoder(),
+        config=PPOConfig(hidden_dim=16, rollout_size=8, update_epochs=1),
     )
     state = {
         "state_type": "map",
@@ -37,7 +71,10 @@ def test_ppo_samples_only_from_current_candidates_and_updates_on_terminal_step()
 
 
 def test_ppo_evaluation_is_deterministic_and_does_not_require_observe():
-    agent = CandidatePPOAgent(config=PPOConfig(hidden_dim=8))
+    agent = CandidatePPOAgent(
+        StubFeatureEncoder(),
+        config=PPOConfig(hidden_dim=8),
+    )
     agent.train(False)
     state = {
         "state_type": "map",

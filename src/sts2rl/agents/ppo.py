@@ -13,7 +13,7 @@ from torch.nn import functional as F
 from sts2rl.actions import GameAction
 from sts2rl.agents.action_space import LegalActionProvider
 from sts2rl.agents.base import Agent, Transition
-from sts2rl.agents.features import FeatureEncoder, HashingFeatureEncoder
+from sts2rl.encoder import FeatureEncoder
 from sts2rl.env.types import RawState
 
 
@@ -110,12 +110,12 @@ class CandidatePPOAgent(Agent):
 
     def __init__(
         self,
-        feature_encoder: FeatureEncoder | None = None,
+        feature_encoder: FeatureEncoder,
         action_provider: LegalActionProvider | None = None,
         config: PPOConfig | None = None,
         device: str | torch.device | None = None,
     ) -> None:
-        self.feature_encoder = feature_encoder or HashingFeatureEncoder()
+        self.feature_encoder = feature_encoder
         self.action_provider = action_provider or LegalActionProvider()
         self.config = config or PPOConfig()
         self.device = torch.device(device or "cpu")
