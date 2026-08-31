@@ -1,16 +1,28 @@
 # Environment
 
-`sts2rl.env.game_env.GameEnv` is the main environment wrapper. It owns an
-`STS2Client`, exposes `reset()` and `step()`, and uses an `ActionDispatcher` to
-turn agent action dictionaries into STS2MCP API calls.
+`sts2rl.env.GameEnv` is the raw STS2MCP environment boundary. It owns or accepts
+an `STS2Client`, navigates reset menus, dispatches typed `GameAction` objects,
+and validates the state returned by the backend.
 
-Reset behavior is menu-driven. Standard training starts a normal singleplayer
-run. Evaluation can request custom seeded runs and uses the seeded menu flow:
+```python
+from sts2rl.actions import GameAction
+from sts2rl.env import GameEnv, ResetSpec
 
-```text
-main -> singleplayer -> custom(seed) -> custom_run -> embark
+with GameEnv(base_url="http://localhost:15526/api/v1") as env:
+    state = env.reset(ResetSpec(game_mode="custom", run_seed="ABC"))
+    result = env.step(GameAction("end_turn"))
+    next_state = result.raw_state
 ```
 
-`GameEnv.reset()` must never return a menu state as the initial run state. If it
-cannot leave the menu flow, it raises an `STS2ClientError`.
+The environment deliberately does not encode state or calculate reward. Those
+layers consume `RawState` after the raw transition boundary is stable.
 
+`GameEnv.step()` accepts only `GameAction` and returns an immutable `EnvStep`:
+
+- `raw_state`: the next validated STS2MCP state.
+- `done`: whether the backend reached `game_over`.
+- `info`: API response metadata or a structured client action error.
+
+Invalid actions and dispatcher programming errors raise immediately. An
+`STS2ClientError` raised while executing a valid action is returned as
+`info["action_error"] = True` when the current state can still be fetched.

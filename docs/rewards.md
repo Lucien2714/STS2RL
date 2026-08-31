@@ -14,5 +14,6 @@ The current reward behavior is preserved from the prototype:
 - end-turn unused energy penalty
 
 The long-term boundary is `RewardModel.compute(prev_state, next_state, action)`.
-During this migration, the stateful battle bookkeeping remains in `GameEnv`.
+`GameEnv` does not invoke reward code. A future RL wrapper will combine raw
+environment transitions with a `RewardModel` and `StateEncoder`.
 

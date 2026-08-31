@@ -27,15 +27,6 @@ class GameAction:
         del params["type"]
         return cls(action_type, **params)
 
-    @classmethod
-    def coerce(cls, action: GameAction | Mapping[str, Any]) -> GameAction:
-        """Return a GameAction, converting the legacy dictionary form if needed."""
-        if isinstance(action, cls):
-            return action
-        if isinstance(action, Mapping):
-            return cls.from_dict(action)
-        raise TypeError(f"action must be GameAction or a mapping, got {type(action).__name__}")
-
     def get_type(self) -> str:
         """Return the action type."""
         return self.action_type

@@ -1,12 +1,15 @@
-"""Tests for environment reset menu navigation and step compatibility."""
+"""Contract tests for raw environment reset and step behavior."""
+
+import pytest
 
 from sts2rl.actions.game_action import GameAction
 from sts2rl.env.game_env import GameEnv
+from sts2rl.env.mcp_client import STS2ClientError
+from sts2rl.env.reset import ResetSpec
+from sts2rl.env.types import EnvStep
 
 
 class FakeClient:
-    """Minimal STS2MCP client double for environment tests."""
-
     def __init__(self):
         self.actions = []
         self.state = {
@@ -28,7 +31,6 @@ class FakeClient:
             self.state = {
                 "state_type": "map",
                 "run": {"act": 1, "floor": 0, "ascension": 0},
-                "player": {"hp": 80, "gold": 0, "max_hp": 80},
             }
         else:
             raise AssertionError(f"unexpected menu option {option}")
@@ -39,47 +41,84 @@ class FakeClient:
         self.state = {
             "state_type": "map",
             "run": {"act": 1, "floor": 1, "ascension": 0},
-            "player": {"hp": 80, "gold": 0, "max_hp": 80},
         }
         return {"state": self.state}
 
 
-def test_custom_seed_reset_embarks_before_returning_state():
-    env = GameEnv(game_mode="custom", start_run_option="embark")
-    env.client = FakeClient()
+class FailingActionClient(FakeClient):
+    def end_turn(self):
+        raise STS2ClientError("backend rejected action")
 
-    state = env.reset(run_seed="ABC")
+
+def test_custom_seed_reset_embarks_before_returning_raw_state():
+    client = FakeClient()
+    env = GameEnv(client=client)
+    spec = ResetSpec(
+        character=0,
+        game_mode="custom",
+        run_seed="ABC",
+        start_run_option="embark",
+    )
+
+    state = env.reset(spec)
 
     assert state["state_type"] == "map"
-    assert env.client.actions == [
+    assert client.actions == [
         ("singleplayer", None),
         ("custom", "ABC"),
         ("embark", None),
     ]
 
 
-def test_step_returns_raw_state_and_api_info_without_reward():
-    env = GameEnv()
-    env.client = FakeClient()
-    env.action_dispatcher.client = env.client
+def test_step_returns_env_step_without_computing_reward():
+    client = FakeClient()
+    env = GameEnv(client=client)
 
-    next_state, done, info = env.step(GameAction("end_turn"))
+    result = env.step(GameAction("end_turn"))
 
-    assert next_state["run"]["floor"] == 1
-    assert done is False
-    assert info["raw_state"] == next_state
-    assert info["action_error"] is False
-    assert "reward_details" not in info
+    assert isinstance(result, EnvStep)
+    assert result.raw_state["run"]["floor"] == 1
+    assert result.done is False
+    assert result.info["action"] == {"type": "end_turn"}
+    assert result.info["action_error"] is False
+    assert "reward" not in result.info
 
 
-def test_step_converts_legacy_action_dictionary_at_environment_boundary():
-    env = GameEnv()
-    env.client = FakeClient()
-    env.action_dispatcher.client = env.client
+def test_step_rejects_legacy_action_dictionary():
+    env = GameEnv(client=FakeClient())
 
-    next_state, done, info = env.step({"type": "end_turn"})
+    with pytest.raises(TypeError, match="action must be GameAction"):
+        env.step({"type": "end_turn"})
 
-    assert next_state["state_type"] == "map"
-    assert done is False
-    assert info["action"] == {"type": "end_turn"}
-    assert info["action_error"] is False
+
+def test_step_returns_action_error_only_for_client_failures():
+    env = GameEnv(client=FailingActionClient())
+
+    result = env.step(GameAction("end_turn"))
+
+    assert result.raw_state["state_type"] == "menu"
+    assert result.done is False
+    assert result.info == {
+        "error": "backend rejected action",
+        "action": {"type": "end_turn"},
+        "action_error": True,
+    }
+
+
+def test_dispatcher_programming_errors_are_not_hidden_as_action_errors():
+    env = GameEnv(client=FakeClient())
+
+    with pytest.raises(ValueError, match="Unknown action type"):
+        env.step(GameAction("not_a_real_action"))
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"game_mode": "invalid"},
+        {"start_run_option": "invalid"},
+    ],
+)
+def test_reset_spec_rejects_invalid_configuration(kwargs):
+    with pytest.raises(ValueError):
+        ResetSpec(**kwargs)
