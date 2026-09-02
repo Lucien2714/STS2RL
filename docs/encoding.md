@@ -3,9 +3,9 @@
 This document describes the data contract between raw STS2MCP observations,
 the deterministic tokenizer, trainable game encoder, and PPO agent.
 
-The value types and validation described here are implemented. `GameTokenizer`
-and `GameEncoder` are planned for later refactor stages and are explicitly
-marked as such below.
+The value types and non-map state tokenizer described here are implemented.
+Candidate-action tokenization, map tokenization, and `GameEncoder` belong to
+later refactor stages and are explicitly marked as such below.
 
 ## Data flow
 
@@ -15,7 +15,7 @@ GameEnv raw state + player-detail
                  v
          GameObservation
                  |
-                 | GameTokenizer (not implemented yet)
+                 | GameTokenizer
                  v
   TokenizedState / TokenizedDecision
                  |
@@ -31,7 +31,7 @@ The boundary is deliberately split into deterministic and trainable work:
 
 - `GameVocabulary` assigns stable categorical indices.
 - `numeric.py` parses and normalizes scalar values.
-- `GameTokenizer` will organize those values without trainable parameters.
+- `GameTokenizer` organizes non-map state values without trainable parameters.
 - The token classes store and validate the resulting structured snapshot.
 - `GameEncoder` will learn embeddings from that snapshot.
 
@@ -77,7 +77,10 @@ Every table reserves:
 ```
 
 Lookups apply `strip().casefold()`. Real IDs are sorted by normalized value, so
-indices do not depend on JSON record order.
+indices do not depend on JSON record order. An unambiguous bundled display name
+is an alias of its canonical ID; for example, `"Uppercut"` and `"UPPERCUT"`
+resolve to the same card index. Ambiguous names shared by multiple IDs and
+runtime names absent from bundled data remain `UNKNOWN`.
 
 Vocabulary tables describe independent factors. The encoder will not allocate
 one entry for every card, upgrade, enchantment, zone, and cost combination. A
@@ -106,6 +109,80 @@ linear, while gold benefits from logarithmic compression.
 
 Invalid strings, booleans, NaN, infinity, and invalid ratio denominators are
 represented as missing rather than silently converted into a valid zero.
+
+## GameTokenizer state schema
+
+`GameTokenizer.tokenize_state(observation)` creates a CPU `TokenizedState`.
+Its output widths and column order are public constants:
+
+```python
+GLOBAL_CATEGORICAL_FIELDS
+GLOBAL_NUMERIC_FIELDS
+ENTITY_CATEGORICAL_FIELDS[kind]
+ENTITY_NUMERIC_FIELDS[kind]
+```
+
+Consumers must use these names instead of duplicating numeric column offsets.
+The categorical field names describe semantics; each column is looked up in
+the corresponding vocabulary table.
+
+Global categorical columns are `state_type` and `character`. Global numeric
+columns are:
+
+```text
+act, floor, ascension,
+hp, max_hp, hp_ratio, block, gold,
+energy, max_energy, energy_ratio, stars,
+max_potion_slots, deck_count,
+draw_pile_count, discard_pile_count, exhaust_pile_count,
+orb_slots, orb_empty_slots
+```
+
+Small bounded values such as act, ascension, energy, stars, and slot counts use
+linear values. Counts whose useful range can grow, such as HP, block, gold,
+floor, deck size, and pile size, use signed `log1p`. HP and energy also include
+ratio columns with independently validated denominators.
+
+The raw state is authoritative for live player and combat values. Player detail
+fills fields absent from the raw player and is the sole source for the full
+permanent deck. The raw run fields similarly override player-detail run fields.
+
+Every supported entity kind is present in `TokenizedState.entities`, even when
+it has zero rows. Empty tensors retain the kind's correct feature width. The
+implemented kinds and primary content are:
+
+| Kind | Categorical identity/context | Numeric state |
+|---|---|---|
+| `player` | character, owner type | resources and pile counts |
+| `card` | card/type/rarity/zones/target/enchantment/selection type | costs, upgrades, count, semantic position, flags |
+| `relic` | relic, rarity, zone | counter |
+| `potion` | potion, target, zone | combat usability |
+| `orb` | orb, zone | passive/evoke values and position |
+| `pet` | monster ID, owner type, zone | HP, block, position |
+| `enemy` | monster ID, owner type, zone | HP, block, position |
+| `power` | power/type/owner type/zone | amount |
+| `intent` | intent, zone | numeric label when parseable, position |
+| `reward` | reward type and typed item IDs | gold amount |
+| `shop_item` | category and typed item/card attributes | price and availability flags |
+| `event_option` | event and canonical `(event_id, title)` option | option flags |
+| `rest_option` | option ID and zone | enabled flag |
+| `bundle` | selection type and zone | card count |
+| `crystal_cell` | revealed item type and zone | coordinates, ratios, cell/item flags |
+| `crystal_tool` | tool and zone | usability and selection flags |
+
+`power.owners` points to the owning player, pet, or enemy row. `intent.owners`
+points to its enemy row. A bundle's `children` points to the card rows contained
+inside that bundle.
+
+Only positions with game meaning are numeric features: hand order, orb order,
+combatant formation, intent order, and Crystal Sphere coordinates. Raw action
+handles such as card indices, potion slots, reward indices, and option indices
+are deliberately excluded. Later action tokenization resolves those handles to
+`EntityReference` values.
+
+Descriptions, prompts, labels that are not plain numeric values, keyword prose,
+and other free text are ignored. The state tokenizer also deliberately returns
+`game_map=None`; complete map DAG parsing is a separate stage.
 
 ## EntityReference
 
@@ -184,7 +261,7 @@ rows.
 
 ### Card multiplicity
 
-Unordered zones will group observationally identical card copies and include a
+Unordered zones group observationally identical card copies and include a
 numeric `copy_count`. For example:
 
 ```text
@@ -234,10 +311,9 @@ TokenizedState(
 )
 ```
 
-Global categorical values will include state type and character. Global numeric
-values will include run and player scalars such as act, floor, HP, gold, energy,
-and pile counts. Exact feature order and width will be fixed by
-`GameTokenizer` in the tokenizer stage.
+Global categorical values include state type and character. Global numeric
+values include the run and player scalars listed in the tokenizer schema above.
+Their feature order is fixed by the public tokenizer constants.
 
 `entities` is copied into an immutable mapping. Each mapping key must equal its
 batch's `kind`. Owner and child references are validated when the state is
@@ -340,7 +416,7 @@ combinations.
 GameObservation   raw state plus complete player detail
 GameVocabulary    stable string-to-index identity
 numeric.py        finite values, scaling, and missing masks
-GameTokenizer     deterministic RawState parsing (planned)
+GameTokenizer     deterministic non-map state parsing; actions/map planned
 TokenizedState    validated model-visible state snapshot
 TokenizedMap      validated full map DAG
 TokenizedAction   one semantic structured candidate

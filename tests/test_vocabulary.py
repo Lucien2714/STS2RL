@@ -89,3 +89,18 @@ def test_fixed_categories_are_case_insensitive_and_have_unknown_fallback():
     assert vocabulary.lookup("rarities", "uncommon") >= 2
     assert vocabulary.lookup("map_node_types", "RestSite") >= 2
     assert vocabulary.lookup("state_types", "future_state") == UNKNOWN_INDEX
+
+
+def test_bundled_display_names_resolve_to_their_canonical_ids():
+    vocabulary = GameVocabulary.from_bundled_data()
+
+    assert vocabulary.lookup("cards", "Uppercut") == vocabulary.lookup(
+        "cards", "UPPERCUT"
+    )
+    assert vocabulary.lookup("monsters", "The Architect") == vocabulary.lookup(
+        "monsters", "ARCHITECT"
+    )
+    assert vocabulary.lookup("orbs", "Lightning") == vocabulary.lookup(
+        "orbs", "LIGHTNING_ORB"
+    )
+    assert vocabulary.lookup("cards", "Strike") == UNKNOWN_INDEX

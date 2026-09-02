@@ -1,6 +1,13 @@
 """State and policy-feature encoding interfaces."""
 
 from sts2rl.encoder.feature_encoder import FeatureEncoder
+from sts2rl.encoder.game_tokenizer import (
+    ENTITY_CATEGORICAL_FIELDS,
+    ENTITY_NUMERIC_FIELDS,
+    GLOBAL_CATEGORICAL_FIELDS,
+    GLOBAL_NUMERIC_FIELDS,
+    GameTokenizer,
+)
 from sts2rl.encoder.numeric import (
     NumericFeature,
     linear_feature,
@@ -31,7 +38,12 @@ __all__ = [
     "EntityReference",
     "EventOptionVocabulary",
     "FeatureEncoder",
+    "GameTokenizer",
     "GameVocabulary",
+    "GLOBAL_CATEGORICAL_FIELDS",
+    "GLOBAL_NUMERIC_FIELDS",
+    "ENTITY_CATEGORICAL_FIELDS",
+    "ENTITY_NUMERIC_FIELDS",
     "NumericFeature",
     "PAD_INDEX",
     "StateEncoder",

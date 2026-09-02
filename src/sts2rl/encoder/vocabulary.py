@@ -226,12 +226,15 @@ class GameVocabulary:
             ),
             "entity_types": (
                 "state",
+                "player",
                 "card",
                 "relic",
                 "potion",
                 "orb",
                 "pet",
                 "enemy",
+                "power",
+                "intent",
                 "reward",
                 "shop_item",
                 "event_option",
@@ -252,6 +255,23 @@ class GameVocabulary:
                 "bundle",
                 "shop",
             ),
+            "entity_zones": (
+                "battle",
+                "bundle",
+                "crystal",
+                "deck",
+                "discard",
+                "draw",
+                "event",
+                "exhaust",
+                "hand",
+                "inventory",
+                "rest",
+                "reward",
+                "selection",
+                "shop",
+                "treasure",
+            ),
             "power_types": ("buff", "debuff"),
             "owner_types": ("player", "enemy", "pet"),
             "reward_types": (
@@ -271,12 +291,26 @@ class GameVocabulary:
                 "choose",
                 "bundle",
             ),
+            "rest_options": (
+                "dig",
+                "lift",
+                "recall",
+                "rest",
+                "smith",
+                "toke",
+            ),
+            "crystal_item_types": ("CrystalSphereGold",),
             "crystal_tools": ("none", "big", "small"),
         }
     )
 
     tables: Mapping[str, TokenVocabulary]
     event_options: EventOptionVocabulary
+    aliases: Mapping[str, Mapping[str, int]] = field(
+        default_factory=dict,
+        repr=False,
+        compare=False,
+    )
 
     @classmethod
     def from_bundled_data(
@@ -308,7 +342,31 @@ class GameVocabulary:
         event_options = EventOptionVocabulary.from_pairs(
             cls._event_option_pairs(raw_tables.get("events", []))
         )
-        return cls(MappingProxyType(tables), event_options)
+        aliases: dict[str, Mapping[str, int]] = {}
+        for name, records in raw_tables.items():
+            table = tables[name]
+            alias_candidates: dict[str, set[int]] = {}
+            for record in records:
+                item_id = record.get("id")
+                if item_id is None:
+                    continue
+                index = table.lookup(str(item_id))
+                for alias in (item_id, record.get("name")):
+                    if alias is not None:
+                        alias_candidates.setdefault(
+                            normalize_token(str(alias)), set()
+                        ).add(index)
+            table_aliases = {
+                alias: next(iter(indices))
+                for alias, indices in alias_candidates.items()
+                if len(indices) == 1
+            }
+            aliases[name] = MappingProxyType(table_aliases)
+        return cls(
+            MappingProxyType(tables),
+            event_options,
+            MappingProxyType(aliases),
+        )
 
     def table(self, name: str) -> TokenVocabulary:
         """Return a data or fixed-category table, accepting data aliases."""
@@ -319,8 +377,15 @@ class GameVocabulary:
             raise KeyError(f"Unknown vocabulary table: {normalized_name}") from exc
 
     def lookup(self, table_name: str, token: str | None) -> int:
-        """Look up a token in a named vocabulary table."""
-        return self.table(table_name).lookup(token)
+        """Look up an ID or bundled display-name alias in a named table."""
+        normalized_name = normalize_data_type(table_name)
+        result = self.table(normalized_name).lookup(token)
+        if result != UNKNOWN_INDEX or token is None:
+            return result
+        return self.aliases.get(normalized_name, {}).get(
+            normalize_token(str(token)),
+            UNKNOWN_INDEX,
+        )
 
     def size(self, table_name: str) -> int:
         """Return the embedding table size including PAD and UNKNOWN."""
