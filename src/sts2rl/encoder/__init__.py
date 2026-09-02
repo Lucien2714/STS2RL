@@ -1,6 +1,5 @@
-"""State and policy-feature encoding interfaces."""
+"""Structured game tokenization and trainable encoding interfaces."""
 
-from sts2rl.encoder.feature_encoder import FeatureEncoder
 from sts2rl.encoder.entity_encoder import (
     ENTITY_CATEGORICAL_VOCABS,
     GLOBAL_CATEGORICAL_VOCABS,
@@ -32,7 +31,6 @@ from sts2rl.encoder.numeric import (
     signed_log_feature,
 )
 from sts2rl.encoder.map_encoder import EncodedMap, MapDAGEncoder
-from sts2rl.encoder.state_encoder import DefaultStateEncoder, StateEncoder
 from sts2rl.encoder.tokens import (
     EntityReference,
     TokenizedAction,
@@ -51,7 +49,6 @@ from sts2rl.encoder.vocabulary import (
 )
 
 __all__ = [
-    "DefaultStateEncoder",
     "ACTION_NUMERIC_FIELDS",
     "EntityReference",
     "EncodedEntities",
@@ -61,7 +58,6 @@ __all__ = [
     "EntityTransformer",
     "ENTITY_CATEGORICAL_VOCABS",
     "EventOptionVocabulary",
-    "FeatureEncoder",
     "GameTokenizer",
     "GameEncoder",
     "GameVocabulary",
@@ -76,7 +72,6 @@ __all__ = [
     "NumericFeature",
     "PAD_INDEX",
     "PolicyValueOutput",
-    "StateEncoder",
     "TokenizedAction",
     "TokenizedDecision",
     "TokenizedEntityBatch",

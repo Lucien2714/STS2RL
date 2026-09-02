@@ -1,7 +1,8 @@
-"""Deterministic conversion from game observations to structured state tokens.
+"""Deterministic conversion from complete observations to structured tokens.
 
-This stage intentionally handles state only.  Candidate-action references and
-the full map DAG are added by later tokenizer stages.
+``GameTokenizer`` handles non-map entities, the complete map DAG, and semantic
+references from dynamic action candidates.  It owns no trainable parameters;
+all learned representation work belongs to :class:`GameEncoder`.
 """
 
 from __future__ import annotations

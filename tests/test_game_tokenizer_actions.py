@@ -340,3 +340,200 @@ def test_candidate_order_is_preserved(tokenizer: GameTokenizer):
         for action in candidates
     ]
     assert [action.action_type.item() for action in decision.actions] == expected
+
+
+def _complete_map_state() -> dict[str, object]:
+    return {
+        "state_type": "map",
+        "player": _player(),
+        "map": {
+            "current_position": {"col": 0, "row": 0},
+            "visited": [{"col": 0, "row": 0}],
+            "next_options": [{"index": 4, "col": 1, "row": 1}],
+            "nodes": [
+                {
+                    "col": 0,
+                    "row": 0,
+                    "type": "Start",
+                    "children": [[1, 1]],
+                },
+                {
+                    "col": 1,
+                    "row": 1,
+                    "type": "Monster",
+                    "children": [[0, 2]],
+                },
+            ],
+            "bosses": [{"col": 0, "row": 2}],
+        },
+    }
+
+
+def _legal_state_cases() -> dict[str, dict[str, object]]:
+    """Representative complete payload for every learnable screen family."""
+    combat = {
+        "player": _player(hand=[_card(0)]),
+        "battle": {
+            "turn": "player",
+            "is_play_phase": True,
+            "enemies": [
+                {
+                    "entity_id": "ARCHITECT_0",
+                    "id": "THE_ARCHITECT",
+                    "hp": 20,
+                    "max_hp": 20,
+                    "status": [],
+                    "intents": [],
+                }
+            ],
+        },
+    }
+    return {
+        state_type: {"state_type": state_type, **combat}
+        for state_type in ("monster", "elite", "boss")
+    } | {
+        "hand_select": {
+            "state_type": "hand_select",
+            "player": _player(),
+            "hand_select": {"cards": [_card(2)], "can_confirm": True},
+        },
+        "rewards": {
+            "state_type": "rewards",
+            "player": _player(),
+            "rewards": {
+                "items": [{"index": 1, "type": "gold", "amount": 25}],
+                "can_proceed": True,
+            },
+        },
+        "card_reward": {
+            "state_type": "card_reward",
+            "player": _player(),
+            "card_reward": {"cards": [_card(3)], "can_skip": True},
+        },
+        "map": _complete_map_state(),
+        "event": {
+            "state_type": "event",
+            "player": _player(),
+            "event": {
+                "event_id": "ABYSSAL_BATHS",
+                "options": [
+                    {"index": 4, "title": "Immerse", "is_locked": False}
+                ],
+            },
+        },
+        "event_dialogue": {
+            "state_type": "event",
+            "player": _player(),
+            "event": {"in_dialogue": True, "options": []},
+        },
+        "rest_site": {
+            "state_type": "rest_site",
+            "player": _player(),
+            "rest_site": {
+                "options": [{"index": 5, "id": "rest", "is_enabled": True}],
+                "can_proceed": True,
+            },
+        },
+        "shop": {
+            "state_type": "shop",
+            "player": _player(),
+            "shop": {
+                "items": [
+                    {
+                        "index": 6,
+                        "category": "card",
+                        "id": "UPPERCUT",
+                        "can_afford": True,
+                        "is_stocked": True,
+                    }
+                ],
+                "can_proceed": True,
+            },
+        },
+        "fake_merchant": {
+            "state_type": "fake_merchant",
+            "player": _player(),
+            "fake_merchant": {
+                "shop": {
+                    "items": [
+                        {
+                            "index": 7,
+                            "category": "relic",
+                            "id": "BLACK_STAR",
+                            "can_afford": True,
+                            "is_stocked": True,
+                        }
+                    ]
+                }
+            },
+        },
+        "treasure": {
+            "state_type": "treasure",
+            "player": _player(),
+            "treasure": {
+                "relics": [{"index": 8, "id": "VAJRA"}],
+                "can_proceed": True,
+            },
+        },
+        "card_select": {
+            "state_type": "card_select",
+            "player": _player(),
+            "card_select": {
+                "cards": [_card(9)],
+                "can_confirm": True,
+                "can_cancel": True,
+            },
+        },
+        "bundle_select": {
+            "state_type": "bundle_select",
+            "player": _player(),
+            "bundle_select": {
+                "bundles": [{"index": 10, "cards": [_card(0)]}],
+                "can_confirm": True,
+                "can_cancel": True,
+            },
+        },
+        "relic_select": {
+            "state_type": "relic_select",
+            "player": _player(),
+            "relic_select": {
+                "relics": [{"index": 11, "id": "BLACK_STAR"}],
+                "can_skip": True,
+            },
+        },
+        "crystal_sphere": {
+            "state_type": "crystal_sphere",
+            "player": _player(),
+            "crystal_sphere": {
+                "grid_width": 9,
+                "grid_height": 11,
+                "cells": [{"x": 4, "y": 7, "is_clickable": True}],
+                "clickable_cells": [{"x": 4, "y": 7}],
+                "tool": "big",
+                "can_use_big_tool": True,
+                "can_use_small_tool": True,
+                "can_proceed": True,
+            },
+        },
+    }
+
+
+@pytest.mark.parametrize(
+    ("case_name", "state"),
+    _legal_state_cases().items(),
+)
+def test_every_legal_screen_fixture_tokenizes_its_complete_candidate_set(
+    tokenizer: GameTokenizer,
+    case_name: str,
+    state: dict[str, object],
+):
+    del case_name
+    candidates = LegalActionProvider().require_candidates(state)
+    observation = GameObservation(
+        state,
+        {"state_type": "player_detail", "player": {"deck": []}},
+    )
+
+    decision = tokenizer.tokenize_decision(observation, candidates)
+
+    assert len(decision.actions) == len(candidates)

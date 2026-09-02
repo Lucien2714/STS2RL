@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import math
 from dataclasses import dataclass
 
 import torch
@@ -40,44 +39,6 @@ class PPOConfig:
             raise ValueError("gamma and gae_lambda must be between 0 and 1")
         if self.clip_ratio < 0:
             raise ValueError("clip_ratio must not be negative")
-
-
-class CandidateActorCritic(nn.Module):
-    """Score each candidate conditioned on state and estimate state value."""
-
-    def __init__(self, state_dim: int, action_dim: int, hidden_dim: int) -> None:
-        super().__init__()
-        self.state_tower = nn.Sequential(
-            nn.Linear(state_dim, hidden_dim),
-            nn.Tanh(),
-            nn.Linear(hidden_dim, hidden_dim),
-            nn.Tanh(),
-        )
-        self.action_tower = nn.Sequential(
-            nn.Linear(action_dim, hidden_dim),
-            nn.Tanh(),
-            nn.Linear(hidden_dim, hidden_dim),
-            nn.Tanh(),
-        )
-        self.value_head = nn.Linear(hidden_dim, 1)
-        self.policy_bias = nn.Linear(hidden_dim, 1)
-
-    def forward(
-        self,
-        state_features: Tensor,
-        candidate_features: Tensor,
-    ) -> tuple[Tensor, Tensor]:
-        state_embedding = self.state_tower(state_features)
-        action_embeddings = self.action_tower(candidate_features)
-        logits = action_embeddings @ state_embedding / math.sqrt(
-            state_embedding.shape[-1]
-        ) + self.policy_bias(action_embeddings).squeeze(-1)
-        value = self.value_head(state_embedding).squeeze(-1)
-        return logits, value
-
-    def value(self, state_features: Tensor) -> Tensor:
-        """Estimate state value without requiring action candidates."""
-        return self.value_head(self.state_tower(state_features)).squeeze(-1)
 
 
 @dataclass

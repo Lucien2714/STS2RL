@@ -3,10 +3,10 @@
 STS2RL is an environment-first reinforcement-learning project for Slay the
 Spire 2 using the STS2MCP HTTP API.
 
-The project is rebuilding its training and evaluation layers. The supported
-foundation now includes the STS2MCP client, typed game actions, environment
-reset/step behavior, dynamic legal-action candidates, candidate-action PPO,
-bundled game data, and the retained state-encoder scaffold.
+The supported foundation includes the STS2MCP client, typed game actions,
+environment reset/step behavior, complete observations, deterministic
+structured tokenization, full-map DAG encoding, and end-to-end candidate-action
+PPO over dynamic legal actions.
 
 ## Development
 
