@@ -9,10 +9,19 @@ from typing import Mapping
 import torch
 from torch import Tensor, nn
 
-from sts2rl.encoder.entity_encoder import EncoderConfig, EntityTransformer
+from sts2rl.encoder.entity_encoder import (
+    EncodedEntities,
+    EncoderConfig,
+    EntityTransformer,
+)
 from sts2rl.encoder.game_tokenizer import ACTION_NUMERIC_FIELDS
 from sts2rl.encoder.map_encoder import EncodedMap, MapDAGEncoder
-from sts2rl.encoder.tokens import EntityReference, TokenizedAction, TokenizedDecision
+from sts2rl.encoder.tokens import (
+    EntityReference,
+    TokenizedAction,
+    TokenizedDecision,
+    TokenizedState,
+)
 from sts2rl.encoder.vocabulary import GameVocabulary
 
 
@@ -99,21 +108,7 @@ class GameEncoder(nn.Module):
         if not isinstance(decision, TokenizedDecision):
             raise TypeError("decision must be a TokenizedDecision")
 
-        entities = self.entity_encoder(decision.state)
-        encoded_map = self.map_encoder(
-            decision.state.game_map,
-            entities.state_embedding,
-        )
-        map_context = (
-            encoded_map.global_embedding
-            if encoded_map is not None
-            else self.no_map_embedding
-        )
-        state_embedding = self.state_norm(
-            self.state_fusion(
-                torch.cat([entities.state_embedding, map_context])
-            )
-        )
+        state_embedding, entities, encoded_map = self._encode_state(decision.state)
         candidates = torch.stack(
             [
                 self._encode_action(action, entities.entity_embeddings, encoded_map)
@@ -131,6 +126,26 @@ class GameEncoder(nn.Module):
         ) + self.candidate_bias(encoded.candidate_embeddings).squeeze(-1)
         value = self.value_head(encoded.state_embedding).squeeze(-1)
         return PolicyValueOutput(logits, value, encoded)
+
+    def value(self, state: TokenizedState) -> Tensor:
+        """Estimate one state value without requiring candidate actions."""
+        state_embedding, _, _ = self._encode_state(state)
+        return self.value_head(state_embedding).squeeze(-1)
+
+    def _encode_state(
+        self, state: TokenizedState
+    ) -> tuple[Tensor, EncodedEntities, EncodedMap | None]:
+        entities = self.entity_encoder(state)
+        encoded_map = self.map_encoder(state.game_map, entities.state_embedding)
+        map_context = (
+            encoded_map.global_embedding
+            if encoded_map is not None
+            else self.no_map_embedding
+        )
+        state_embedding = self.state_norm(
+            self.state_fusion(torch.cat([entities.state_embedding, map_context]))
+        )
+        return state_embedding, entities, encoded_map
 
     def _encode_action(
         self,

@@ -3,9 +3,8 @@
 This document describes the data contract between raw STS2MCP observations,
 the deterministic tokenizer, trainable game encoder, and PPO agent.
 
-The value types, complete tokenizer, and composed trainable `GameEncoder`
-described here are implemented. Runner and PPO rollout integration belong to
-later refactor stages and are explicitly marked as such below.
+The value types, complete tokenizer, composed trainable `GameEncoder`, runner,
+and PPO rollout integration described here are implemented.
 
 ## Data flow
 
@@ -19,7 +18,7 @@ GameEnv raw state + player-detail
                  v
   TokenizedState / TokenizedDecision
                  |
-                 | GameEncoder (not implemented yet)
+                 | GameEncoder
                  v
  state embedding + candidate embeddings
                  |
@@ -31,9 +30,10 @@ The boundary is deliberately split into deterministic and trainable work:
 
 - `GameVocabulary` assigns stable categorical indices.
 - `numeric.py` parses and normalizes scalar values.
-- `GameTokenizer` organizes non-map state values without trainable parameters.
+- `GameTokenizer` organizes state, map, and action values without trainable
+  parameters.
 - The token classes store and validate the resulting structured snapshot.
-- `GameEncoder` will learn embeddings from that snapshot.
+- `GameEncoder` learns embeddings from that snapshot during PPO updates.
 
 ## GameObservation
 
@@ -599,6 +599,18 @@ gpu_decision = cpu_decision.to("cuda")
 
 The returned dataclasses contain moved tensors; the original CPU tensors remain
 in the rollout. `EntityReference` values contain no tensors and are reused.
+
+For every sampled action, PPO retains the complete `TokenizedDecision`, the
+tokenized next state, and the original ordered `GameAction` tuple. It also
+stores the selected index, old log probability, old value, reward, and terminal
+flag. Update epochs rerun `GameEncoder` on the saved token snapshots instead of
+reusing detached embeddings. Consequently, loss gradients train the complete
+structured encoder as well as the actor and critic heads.
+
+Terminal transitions use a zero bootstrap value. Non-terminal rollout
+boundaries, including a runner step-limit truncation, evaluate the saved next
+state with `GameEncoder.value()`. The default `gamma=0.999` and
+`gae_lambda=0.98` reflect the long horizon of a complete run.
 
 Entity batches substantially reduce rollout overhead. A kind with 30 entities
 uses a few matrices instead of 30 dataclasses containing three or more tiny

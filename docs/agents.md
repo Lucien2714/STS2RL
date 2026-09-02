@@ -1,8 +1,8 @@
 # Agents
 
-The structured token data contract being introduced for the trainable encoder
-is documented in [Structured Game Encoding](encoding.md). The current PPO still
-uses the temporary `FeatureEncoder` interface until the later integration stage.
+The structured token data contract used by the trainable encoder is documented
+in [Structured Game Encoding](encoding.md). PPO trains that encoder end to end;
+there is no intermediate flat feature-vector interface.
 
 The first rebuilt agent uses PPO over a dynamic set of complete structured
 actions. There is no global discrete action ID. For every observation's raw
@@ -17,27 +17,31 @@ state,
 ]
 ```
 
-`CandidatePPOAgent` scores only those candidates and samples from the resulting
-categorical distribution. Its rollout stores the candidate features used at
-sampling time, selected index, old log probability, value, reward, and terminal
-flag. This preserves the PPO probability ratio even though the action set can
-change after every step.
+`CandidatePPOAgent` tokenizes and scores only those candidates, then samples
+from the resulting categorical distribution. Its rollout stores the complete
+CPU `TokenizedDecision`, tokenized next state, original ordered `GameAction`
+candidates, selected index, old log probability, old value, reward, and terminal
+flag. PPO updates rerun `GameEncoder` from those snapshots, so gradients reach
+the categorical embeddings, entity transformer, map DAG encoder, action
+encoder, and policy/value heads while the candidate identity remains stable.
 
 ```python
 from sts2rl.agents import CandidatePPOAgent, EpisodeRunner
-from sts2rl.encoder import FeatureEncoder
+from sts2rl.encoder import EncoderConfig, GameEncoder, GameTokenizer, GameVocabulary
 from sts2rl.env import GameEnv, ResetSpec
 
 env = GameEnv()
-encoder: FeatureEncoder = build_project_encoder()
-agent = CandidatePPOAgent(feature_encoder=encoder)
+vocabulary = GameVocabulary.from_bundled_data()
+tokenizer = GameTokenizer(vocabulary)
+encoder = GameEncoder(vocabulary, EncoderConfig())
+agent = CandidatePPOAgent(tokenizer=tokenizer, game_encoder=encoder)
 runner = EpisodeRunner(env, agent)
 result = runner.run(ResetSpec(character=0))
 ```
 
-The project deliberately provides no fallback feature encoder. A caller must
-inject an encoder that provides `state_dim`, `action_dim`, `encode_state()`, and
-`encode_action()`. This prevents accidental training on a placeholder encoding.
+The tokenizer and encoder are explicit constructor dependencies. This keeps the
+vocabulary, token schema, model dimensions, device placement, and optimizer
+parameters visible to the training entry point.
 
 The Agent lifecycle now receives `GameObservation` rather than a bare raw
 dictionary:
@@ -49,9 +53,11 @@ observe(Transition[GameObservation])
 finish_episode(final_observation, truncated)
 ```
 
-As a short-lived compatibility layer, the current PPO passes
-`observation.raw_state` to `FeatureEncoder`. The structured tokenizer/encoder
-becomes the PPO model in the next stage.
+The default long-horizon return settings are `gamma=0.999` and
+`gae_lambda=0.98`. A terminal step bootstraps with zero; a non-terminal rollout
+boundary or truncated episode bootstraps from the stored tokenized next state.
+Training samples stochastically, while `agent.eval()` selects the highest-logit
+candidate deterministically and does not collect rollout entries.
 
 The legal-action provider covers combat, in-combat selection, rewards, map,
 events, rest sites, shops, treasure, card/bundle/relic overlays, and the Crystal

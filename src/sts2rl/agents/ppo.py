@@ -13,18 +13,17 @@ from torch.nn import functional as F
 from sts2rl.actions import GameAction
 from sts2rl.agents.action_space import LegalActionProvider
 from sts2rl.agents.base import Agent, Transition
-from sts2rl.encoder import FeatureEncoder
-from sts2rl.env.types import GameObservation, RawState
+from sts2rl.encoder import GameEncoder, GameTokenizer, TokenizedDecision, TokenizedState
+from sts2rl.env.types import GameObservation
 
 
 @dataclass(frozen=True)
 class PPOConfig:
     """Hyperparameters for candidate-action PPO."""
 
-    hidden_dim: int = 256
     learning_rate: float = 3e-4
-    gamma: float = 0.99
-    gae_lambda: float = 0.95
+    gamma: float = 0.999
+    gae_lambda: float = 0.98
     clip_ratio: float = 0.2
     value_coefficient: float = 0.5
     entropy_coefficient: float = 0.01
@@ -33,10 +32,8 @@ class PPOConfig:
     update_epochs: int = 4
 
     def __post_init__(self) -> None:
-        if self.hidden_dim < 1 or self.rollout_size < 1 or self.update_epochs < 1:
-            raise ValueError(
-                "hidden_dim, rollout_size, and update_epochs must be positive"
-            )
+        if self.rollout_size < 1 or self.update_epochs < 1:
+            raise ValueError("rollout_size and update_epochs must be positive")
         if self.learning_rate <= 0 or self.max_grad_norm <= 0:
             raise ValueError("learning_rate and max_grad_norm must be positive")
         if not 0 <= self.gamma <= 1 or not 0 <= self.gae_lambda <= 1:
@@ -85,8 +82,7 @@ class CandidateActorCritic(nn.Module):
 
 @dataclass
 class _PendingDecision:
-    state_features: Tensor
-    candidate_features: Tensor
+    decision: TokenizedDecision
     candidates: tuple[GameAction, ...]
     action_index: int
     log_probability: Tensor
@@ -95,9 +91,9 @@ class _PendingDecision:
 
 @dataclass
 class _RolloutStep:
-    state_features: Tensor
-    candidate_features: Tensor
-    next_state_features: Tensor
+    decision: TokenizedDecision
+    next_state: TokenizedState
+    candidates: tuple[GameAction, ...]
     action_index: int
     old_log_probability: Tensor
     old_value: Tensor
@@ -106,26 +102,24 @@ class _RolloutStep:
 
 
 class CandidatePPOAgent(Agent):
-    """PPO agent whose categorical support is rebuilt from each raw state."""
+    """PPO agent trained end-to-end over structured dynamic candidates."""
 
     def __init__(
         self,
-        feature_encoder: FeatureEncoder,
+        tokenizer: GameTokenizer,
+        game_encoder: GameEncoder,
         action_provider: LegalActionProvider | None = None,
         config: PPOConfig | None = None,
         device: str | torch.device | None = None,
     ) -> None:
-        self.feature_encoder = feature_encoder
+        self.tokenizer = tokenizer
+        self.game_encoder = game_encoder
         self.action_provider = action_provider or LegalActionProvider()
         self.config = config or PPOConfig()
         self.device = torch.device(device or "cpu")
-        self.model = CandidateActorCritic(
-            self.feature_encoder.state_dim,
-            self.feature_encoder.action_dim,
-            self.config.hidden_dim,
-        ).to(self.device)
+        self.game_encoder.to(self.device)
         self.optimizer = torch.optim.Adam(
-            self.model.parameters(), lr=self.config.learning_rate
+            self.game_encoder.parameters(), lr=self.config.learning_rate
         )
         self.training_enabled = True
         self._pending: _PendingDecision | None = None
@@ -144,26 +138,24 @@ class CandidatePPOAgent(Agent):
 
         raw_state = state.raw_state
         candidates = self.action_provider.require_candidates(raw_state)
-        state_features = self._state_features(state)
-        candidate_features = self._candidate_features(raw_state, candidates)
+        decision = self.tokenizer.tokenize_decision(state, candidates)
         with torch.no_grad():
-            logits, value = self.model(state_features, candidate_features)
-            distribution = Categorical(logits=logits)
+            output = self.game_encoder.policy_value(decision.to(self.device))
+            distribution = Categorical(logits=output.logits)
             if self.training_enabled:
                 action_index_tensor = distribution.sample()
             else:
-                action_index_tensor = torch.argmax(logits)
+                action_index_tensor = torch.argmax(output.logits)
             log_probability = distribution.log_prob(action_index_tensor)
 
         action_index = int(action_index_tensor.item())
         if self.training_enabled:
             self._pending = _PendingDecision(
-                state_features=state_features.detach(),
-                candidate_features=candidate_features.detach(),
+                decision=decision,
                 candidates=candidates,
                 action_index=action_index,
-                log_probability=log_probability.detach(),
-                value=value.detach(),
+                log_probability=log_probability.detach().cpu(),
+                value=output.value.detach().cpu(),
             )
         return candidates[action_index]
 
@@ -179,11 +171,9 @@ class CandidatePPOAgent(Agent):
 
         self._rollout.append(
             _RolloutStep(
-                state_features=self._pending.state_features,
-                candidate_features=self._pending.candidate_features,
-                next_state_features=self._state_features(
-                    transition.next_state
-                ).detach(),
+                decision=self._pending.decision,
+                next_state=self.tokenizer.tokenize_state(transition.next_state),
+                candidates=self._pending.candidates,
                 action_index=self._pending.action_index,
                 old_log_probability=self._pending.log_probability,
                 old_value=self._pending.value,
@@ -209,7 +199,7 @@ class CandidatePPOAgent(Agent):
         if not enabled and self._pending is not None:
             raise RuntimeError("cannot change mode with an unobserved action")
         self.training_enabled = enabled
-        self.model.train(enabled)
+        self.game_encoder.train(enabled)
 
     def eval(self) -> None:
         """Use deterministic candidate selection without collecting rollouts."""
@@ -232,11 +222,10 @@ class CandidatePPOAgent(Agent):
             value_losses: list[Tensor] = []
             entropies: list[Tensor] = []
             for index, step in enumerate(self._rollout):
-                logits, value = self.model(
-                    step.state_features.to(self.device),
-                    step.candidate_features.to(self.device),
+                output = self.game_encoder.policy_value(
+                    step.decision.to(self.device)
                 )
-                distribution = Categorical(logits=logits)
+                distribution = Categorical(logits=output.logits)
                 action_index = torch.tensor(step.action_index, device=self.device)
                 new_log_probability = distribution.log_prob(action_index)
                 ratio = torch.exp(
@@ -253,7 +242,7 @@ class CandidatePPOAgent(Agent):
                     * advantage
                 )
                 policy_losses.append(-torch.minimum(unclipped, clipped))
-                value_losses.append(F.mse_loss(value, returns[index]))
+                value_losses.append(F.mse_loss(output.value, returns[index]))
                 entropies.append(distribution.entropy())
 
             policy_loss = torch.stack(policy_losses).mean()
@@ -267,7 +256,7 @@ class CandidatePPOAgent(Agent):
             self.optimizer.zero_grad()
             loss.backward()
             gradient_norm = nn.utils.clip_grad_norm_(
-                self.model.parameters(), self.config.max_grad_norm
+                self.game_encoder.parameters(), self.config.max_grad_norm
             )
             self.optimizer.step()
             metrics = {
@@ -291,7 +280,7 @@ class CandidatePPOAgent(Agent):
             next_value = (
                 torch.zeros((), device=self.device)
                 if last_step.done
-                else self.model.value(last_step.next_state_features.to(self.device))
+                else self.game_encoder.value(last_step.next_state.to(self.device))
             )
             gae = torch.zeros((), device=self.device)
             for index in range(len(self._rollout) - 1, -1, -1):
@@ -309,28 +298,3 @@ class CandidatePPOAgent(Agent):
                 advantages[index] = gae
                 next_value = values[index]
         return advantages, advantages + values
-
-    def _state_features(self, state: GameObservation) -> Tensor:
-        features = self.feature_encoder.encode_state(state.raw_state).to(self.device)
-        if features.ndim != 1 or features.shape[0] != self.feature_encoder.state_dim:
-            raise ValueError(
-                "encode_state() must return a flat tensor matching state_dim"
-            )
-        return features
-
-    def _candidate_features(
-        self,
-        state: RawState,
-        candidates: tuple[GameAction, ...],
-    ) -> Tensor:
-        features = torch.stack(
-            [
-                self.feature_encoder.encode_action(state, action).to(self.device)
-                for action in candidates
-            ]
-        )
-        if features.ndim != 2 or features.shape[1] != self.feature_encoder.action_dim:
-            raise ValueError(
-                "encode_action() must return a flat tensor matching action_dim"
-            )
-        return features
