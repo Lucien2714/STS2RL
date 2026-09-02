@@ -7,6 +7,7 @@ the full map DAG are added by later tokenizer stages.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import heapq
 from types import MappingProxyType
 from typing import Callable, Hashable, Mapping, Sequence
 
@@ -25,6 +26,7 @@ from sts2rl.encoder.tokens import (
     TokenizedAction,
     TokenizedDecision,
     TokenizedEntityBatch,
+    TokenizedMap,
     TokenizedState,
 )
 from sts2rl.encoder.vocabulary import GameVocabulary, UNKNOWN_INDEX
@@ -33,6 +35,18 @@ from sts2rl.env.types import GameObservation
 
 GLOBAL_CATEGORICAL_FIELDS = ("state_type", "character")
 ACTION_NUMERIC_FIELDS = ("x", "y")
+MAP_CATEGORICAL_FIELDS = ("node_type",)
+MAP_NUMERIC_FIELDS = (
+    "col",
+    "row",
+    "is_current",
+    "is_visited",
+    "is_candidate",
+    "is_boss",
+    "is_reachable",
+    "min_distance_to_boss",
+    "max_distance_to_boss",
+)
 GLOBAL_NUMERIC_FIELDS = (
     "act",
     "floor",
@@ -274,13 +288,14 @@ class GameTokenizer:
         self._add_inventory(rows, player, registry)
         self._add_combat_entities(rows, state, player, player_ref, registry)
         self._add_screen_entities(rows, state, registry)
+        game_map = self._tokenize_map(state, registry)
 
         tokenized = TokenizedState(
             global_categorical=global_categorical,
             global_numeric=global_numeric,
             global_numeric_mask=global_numeric_mask,
             entities=self._build_batches(rows),
-            game_map=None,
+            game_map=game_map,
         )
         return tokenized, registry
 
@@ -296,12 +311,6 @@ class GameTokenizer:
         action_index = self.vocabulary.lookup("action_types", action_type)
         if action_index == UNKNOWN_INDEX:
             raise self._action_error(state, action, "unknown action type")
-        if action_type == "choose_map_node":
-            raise self._action_error(
-                state,
-                action,
-                "map-node references are implemented in the map tokenizer stage",
-            )
         if action_type == "menu_select":
             raise self._action_error(
                 state,
@@ -349,6 +358,16 @@ class GameTokenizer:
                 domain="enemy",
                 parameter="target",
                 normalize=_text,
+            )
+
+        if action_type == "choose_map_node":
+            target = self._resolve_action_reference(
+                state,
+                action,
+                registry,
+                domain="map_candidate",
+                parameter="index",
+                normalize=_integer,
             )
 
         if action_type == "crystal_sphere_click_cell":
@@ -985,6 +1004,323 @@ class GameTokenizer:
                 tool,
                 EntityReference("crystal_tool", index),
             )
+
+    def _tokenize_map(
+        self,
+        state: Mapping[str, object],
+        registry: _ReferenceRegistry,
+    ) -> TokenizedMap | None:
+        raw_map = _mapping(state.get("map"))
+        if state.get("state_type") != "map" and not raw_map:
+            return None
+
+        nodes_by_coord: dict[tuple[int, int], dict[str, object]] = {}
+        for raw_node in _records(raw_map.get("nodes")):
+            coord = self._require_coord(state, raw_node, "map node")
+            if coord in nodes_by_coord:
+                raise self._map_error(state, f"duplicate map node coordinate {coord}")
+            nodes_by_coord[coord] = dict(raw_node)
+
+        boss_coords: set[tuple[int, int]] = set()
+        boss_records = _records(raw_map.get("bosses"))
+        singular_boss = _mapping(raw_map.get("boss"))
+        if singular_boss:
+            boss_records.append(singular_boss)
+        for boss in boss_records:
+            coord = self._require_coord(state, boss, "boss node")
+            boss_coords.add(coord)
+            merged = dict(nodes_by_coord.get(coord, {}))
+            merged.update(boss)
+            merged["type"] = "boss"
+            nodes_by_coord[coord] = merged
+
+        ordered_coords = sorted(nodes_by_coord, key=lambda coord: (coord[1], coord[0]))
+        index_by_coord = {
+            coord: index for index, coord in enumerate(ordered_coords)
+        }
+        node_count = len(ordered_coords)
+        adjacency: list[set[int]] = [set() for _ in range(node_count)]
+        edges: set[tuple[int, int]] = set()
+        for coord in ordered_coords:
+            parent = index_by_coord[coord]
+            node = nodes_by_coord[coord]
+            children = node.get("children")
+            if children is None:
+                continue
+            if not isinstance(children, list):
+                raise self._map_error(
+                    state, f"children for map node {coord} must be a list"
+                )
+            for raw_child in children:
+                child_coord = self._require_coord(state, raw_child, "child node")
+                child = index_by_coord.get(child_coord)
+                if child is None:
+                    raise self._map_error(
+                        state,
+                        f"child coordinate {child_coord} from {coord} is unresolved",
+                    )
+                edges.add((parent, child))
+                adjacency[parent].add(child)
+
+        topological = self._topological_order(state, adjacency, edges)
+        current_index = self._resolve_optional_map_record(
+            state,
+            raw_map.get("current_position"),
+            index_by_coord,
+            "current position",
+        )
+        visited = self._resolve_map_records(
+            state,
+            raw_map.get("visited"),
+            index_by_coord,
+            "visited node",
+        )
+
+        candidate_indices: list[int] = []
+        candidate_coords: set[tuple[int, int]] = set()
+        for option in _records(raw_map.get("next_options")):
+            coord = self._require_coord(state, option, "candidate node")
+            if coord in candidate_coords:
+                raise self._map_error(
+                    state, f"duplicate candidate coordinate {coord}"
+                )
+            candidate_coords.add(coord)
+            node_index = index_by_coord.get(coord)
+            if node_index is None:
+                raise self._map_error(
+                    state, f"candidate coordinate {coord} is unresolved"
+                )
+            candidate_indices.append(node_index)
+            registry.add(
+                "map_candidate",
+                _integer(option.get("index")),
+                EntityReference("map_node", node_index),
+            )
+
+        boss_indices = {index_by_coord[coord] for coord in boss_coords}
+        reachable = self._reachable_after_current(
+            adjacency,
+            candidate_indices,
+            current_index,
+            visited,
+        )
+        min_distance, max_distance = self._boss_distances(
+            topological,
+            adjacency,
+            boss_indices,
+        )
+
+        node_categorical_rows: list[list[int]] = []
+        node_numeric_rows: list[list[float]] = []
+        node_numeric_masks: list[list[bool]] = []
+        for index, coord in enumerate(ordered_coords):
+            node = nodes_by_coord[coord]
+            node_type = "boss" if index in boss_indices else _text(node.get("type"))
+            node_categorical_rows.append(
+                [self.vocabulary.lookup("map_node_types", node_type)]
+            )
+            numeric, mask = pack_numeric(
+                [
+                    linear_feature(coord[0]),
+                    linear_feature(coord[1]),
+                    _bool_feature(index == current_index),
+                    _bool_feature(index in visited),
+                    _bool_feature(index in candidate_indices),
+                    _bool_feature(index in boss_indices),
+                    _bool_feature(index in reachable),
+                    linear_feature(min_distance[index]),
+                    linear_feature(max_distance[index]),
+                ]
+            )
+            node_numeric_rows.append(numeric.tolist())
+            node_numeric_masks.append(mask.tolist())
+
+        type_count_width = self.vocabulary.size("map_node_types")
+        candidate_counts = torch.zeros(
+            (len(candidate_indices), type_count_width), dtype=torch.float32
+        )
+        for candidate_row, candidate in enumerate(candidate_indices):
+            for descendant in self._descendants(adjacency, [candidate]):
+                type_index = node_categorical_rows[descendant][0]
+                candidate_counts[candidate_row, type_index] += 1.0
+
+        sorted_edges = sorted(edges)
+        edge_index = (
+            torch.tensor(sorted_edges, dtype=torch.long).transpose(0, 1).contiguous()
+            if sorted_edges
+            else torch.empty((2, 0), dtype=torch.long)
+        )
+        return TokenizedMap(
+            node_categorical=_matrix(
+                node_categorical_rows,
+                len(MAP_CATEGORICAL_FIELDS),
+                torch.long,
+            ),
+            node_numeric=_matrix(
+                node_numeric_rows,
+                len(MAP_NUMERIC_FIELDS),
+                torch.float32,
+            ),
+            node_numeric_mask=_matrix(
+                node_numeric_masks,
+                len(MAP_NUMERIC_FIELDS),
+                torch.bool,
+            ),
+            edge_index=edge_index,
+            topological_order=torch.tensor(topological, dtype=torch.long),
+            reachable_mask=torch.tensor(
+                [index in reachable for index in range(node_count)],
+                dtype=torch.bool,
+            ),
+            candidate_indices=torch.tensor(candidate_indices, dtype=torch.long),
+            boss_indices=torch.tensor(sorted(boss_indices), dtype=torch.long),
+            candidate_type_counts=candidate_counts,
+            current_index=current_index,
+        )
+
+    def _require_coord(
+        self,
+        state: Mapping[str, object],
+        value: object,
+        label: str,
+    ) -> tuple[int, int]:
+        if isinstance(value, Mapping):
+            col = _integer(value.get("col"))
+            row = _integer(value.get("row"))
+        elif isinstance(value, list | tuple) and len(value) == 2:
+            col = _integer(value[0])
+            row = _integer(value[1])
+        else:
+            col = row = None
+        if col is None or row is None:
+            raise self._map_error(state, f"{label} has invalid (col, row): {value!r}")
+        return col, row
+
+    def _resolve_optional_map_record(
+        self,
+        state: Mapping[str, object],
+        value: object,
+        index_by_coord: Mapping[tuple[int, int], int],
+        label: str,
+    ) -> int | None:
+        if value is None:
+            return None
+        coord = self._require_coord(state, value, label)
+        index = index_by_coord.get(coord)
+        if index is None:
+            raise self._map_error(state, f"{label} coordinate {coord} is unresolved")
+        return index
+
+    def _resolve_map_records(
+        self,
+        state: Mapping[str, object],
+        values: object,
+        index_by_coord: Mapping[tuple[int, int], int],
+        label: str,
+    ) -> set[int]:
+        result = set()
+        for value in _records(values):
+            index = self._resolve_optional_map_record(
+                state, value, index_by_coord, label
+            )
+            assert index is not None
+            result.add(index)
+        return result
+
+    def _topological_order(
+        self,
+        state: Mapping[str, object],
+        adjacency: Sequence[set[int]],
+        edges: set[tuple[int, int]],
+    ) -> list[int]:
+        indegree = [0] * len(adjacency)
+        for _, child in edges:
+            indegree[child] += 1
+        ready = [index for index, degree in enumerate(indegree) if degree == 0]
+        heapq.heapify(ready)
+        result = []
+        while ready:
+            parent = heapq.heappop(ready)
+            result.append(parent)
+            for child in sorted(adjacency[parent]):
+                indegree[child] -= 1
+                if indegree[child] == 0:
+                    heapq.heappush(ready, child)
+        if len(result) != len(adjacency):
+            raise self._map_error(state, "map graph contains a cycle")
+        return result
+
+    @staticmethod
+    def _descendants(
+        adjacency: Sequence[set[int]], roots: Sequence[int]
+    ) -> set[int]:
+        visited: set[int] = set()
+        stack = list(roots)
+        while stack:
+            node = stack.pop()
+            if node in visited:
+                continue
+            visited.add(node)
+            stack.extend(adjacency[node])
+        return visited
+
+    def _reachable_after_current(
+        self,
+        adjacency: Sequence[set[int]],
+        candidates: Sequence[int],
+        current: int | None,
+        visited: set[int],
+    ) -> set[int]:
+        if candidates:
+            roots = list(candidates)
+        elif current is not None:
+            roots = list(adjacency[current])
+        else:
+            indegree = [0] * len(adjacency)
+            for children in adjacency:
+                for child in children:
+                    indegree[child] += 1
+            roots = [index for index, degree in enumerate(indegree) if degree == 0]
+        reachable = self._descendants(adjacency, roots)
+        reachable.difference_update(visited)
+        if current is not None:
+            reachable.discard(current)
+        return reachable
+
+    @staticmethod
+    def _boss_distances(
+        topological: Sequence[int],
+        adjacency: Sequence[set[int]],
+        bosses: set[int],
+    ) -> tuple[list[int | None], list[int | None]]:
+        minimum: list[int | None] = [None] * len(adjacency)
+        maximum: list[int | None] = [None] * len(adjacency)
+        for node in reversed(topological):
+            if node in bosses:
+                minimum[node] = maximum[node] = 0
+                continue
+            child_minimums = [
+                minimum[child]
+                for child in adjacency[node]
+                if minimum[child] is not None
+            ]
+            child_maximums = [
+                maximum[child]
+                for child in adjacency[node]
+                if maximum[child] is not None
+            ]
+            if child_minimums:
+                minimum[node] = 1 + min(child_minimums)
+                maximum[node] = 1 + max(child_maximums)
+        return minimum, maximum
+
+    @staticmethod
+    def _map_error(
+        state: Mapping[str, object], reason: str
+    ) -> TokenizationError:
+        return TokenizationError(
+            f"Cannot tokenize map for state_type={state.get('state_type')!r}: {reason}"
+        )
 
     def _build_batches(
         self, rows: Mapping[str, _EntityRows]

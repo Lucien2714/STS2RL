@@ -3,9 +3,9 @@
 This document describes the data contract between raw STS2MCP observations,
 the deterministic tokenizer, trainable game encoder, and PPO agent.
 
-The value types, non-map state tokenizer, and non-map action tokenizer described
-here are implemented. Map tokenization and `GameEncoder` belong to later
-refactor stages and are explicitly marked as such below.
+The value types and complete state/action tokenizer described here are
+implemented. `GameEncoder` belongs to later refactor stages and is explicitly
+marked as such below.
 
 ## Data flow
 
@@ -181,8 +181,8 @@ are deliberately excluded. Later action tokenization resolves those handles to
 `EntityReference` values.
 
 Descriptions, prompts, labels that are not plain numeric values, keyword prose,
-and other free text are ignored. The state tokenizer also deliberately returns
-`game_map=None`; complete map DAG parsing is a separate stage.
+and other free text are ignored. Non-map states return `game_map=None`; map
+states contain the validated full DAG described below.
 
 ## GameTokenizer action schema
 
@@ -218,10 +218,10 @@ not become model features. Duplicate or missing handles are not resolved by
 list position. They raise `TokenizationError`, whose message includes both the
 state type and complete action payload.
 
-`choose_map_node` is recognized but deliberately raises `TokenizationError`
-until its index can be linked to a validated full-map node in the map tokenizer
-stage. `menu_select` is similarly outside the learning action space because
-reset navigation currently owns menus and no menu-option entity exists.
+`choose_map_node` first resolves its temporary `next_options.index`, then stores
+the corresponding coordinate node as its target. `menu_select` remains outside
+the learning action space because reset navigation owns menus and no menu-option
+entity exists.
 
 ## EntityReference
 
@@ -382,14 +382,36 @@ unordered entity collection:
 `current_index` contains the current node row or `None` when no concrete current
 position exists.
 
+Node identity is the exact `(col, row)` pair. Ordinary nodes and the singular
+or plural boss records are merged by that identity, and node rows are ordered
+deterministically by `(row, col)`. Duplicate ordinary node coordinates,
+duplicate candidate coordinates, invalid coordinates, unresolved children,
+and unresolved candidates raise `TokenizationError`.
+
 Every `edge_index` column is `[parent, child]`, moving from the current floor
 toward a boss. The map encoder will traverse `topological_order` in reverse so
 each parent can aggregate child representations that already contain their own
 future descendants.
 
-`TokenizedMap` validates shapes, index ranges, topological permutation, and
-parent-before-child ordering. Building the graph, resolving `(col, row)`, and
-computing reachability remain responsibilities of the future tokenizer.
+`GameTokenizer` builds and validates the graph with these rules:
+
+- Each edge is read from a node's full `children` list, not the one-level
+  `next_options.leads_to` preview.
+- A deterministic Kahn topological sort detects cycles.
+- Reachability begins at the current candidates (or after the current node when
+  no candidates exist) and excludes the current and visited nodes.
+- Reverse-topological dynamic programming computes shortest and longest edge
+  distance from every node to any boss. Nodes without a boss path use a false
+  numeric mask for both distances.
+- Each candidate's type-count row visits its complete descendant subgraph and
+  counts shared DAG nodes once for that candidate.
+
+The exact map columns are public as `MAP_CATEGORICAL_FIELDS` and
+`MAP_NUMERIC_FIELDS`. Numeric fields contain coordinates, current/visited/
+candidate/boss/reachable flags, and shortest/longest Boss distances.
+
+`TokenizedMap` then independently validates shapes, index ranges, the
+topological permutation, and parent-before-child ordering.
 
 ## TokenizedAction
 
@@ -455,7 +477,7 @@ combinations.
 GameObservation   raw state plus complete player detail
 GameVocabulary    stable string-to-index identity
 numeric.py        finite values, scaling, and missing masks
-GameTokenizer     deterministic state/action parsing; full map planned
+GameTokenizer     deterministic state, action, and full-map parsing
 TokenizedState    validated model-visible state snapshot
 TokenizedMap      validated full map DAG
 TokenizedAction   one semantic structured candidate

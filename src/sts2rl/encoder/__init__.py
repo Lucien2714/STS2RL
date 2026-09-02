@@ -7,6 +7,8 @@ from sts2rl.encoder.game_tokenizer import (
     ENTITY_NUMERIC_FIELDS,
     GLOBAL_CATEGORICAL_FIELDS,
     GLOBAL_NUMERIC_FIELDS,
+    MAP_CATEGORICAL_FIELDS,
+    MAP_NUMERIC_FIELDS,
     GameTokenizer,
     TokenizationError,
 )
@@ -45,6 +47,8 @@ __all__ = [
     "GameVocabulary",
     "GLOBAL_CATEGORICAL_FIELDS",
     "GLOBAL_NUMERIC_FIELDS",
+    "MAP_CATEGORICAL_FIELDS",
+    "MAP_NUMERIC_FIELDS",
     "ENTITY_CATEGORICAL_FIELDS",
     "ENTITY_NUMERIC_FIELDS",
     "NumericFeature",
