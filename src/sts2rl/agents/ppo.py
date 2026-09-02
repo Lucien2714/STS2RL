@@ -14,7 +14,7 @@ from sts2rl.actions import GameAction
 from sts2rl.agents.action_space import LegalActionProvider
 from sts2rl.agents.base import Agent, Transition
 from sts2rl.encoder import FeatureEncoder
-from sts2rl.env.types import RawState
+from sts2rl.env.types import GameObservation, RawState
 
 
 @dataclass(frozen=True)
@@ -132,19 +132,20 @@ class CandidatePPOAgent(Agent):
         self._rollout: list[_RolloutStep] = []
         self.last_update: dict[str, float] = {}
 
-    def reset(self, initial_state: RawState) -> None:
+    def reset(self, initial_state: GameObservation) -> None:
         del initial_state
         self._pending = None
 
-    def choose_action(self, state: RawState) -> GameAction:
+    def choose_action(self, state: GameObservation) -> GameAction:
         if self._pending is not None:
             raise RuntimeError(
                 "observe() must be called before choosing another action"
             )
 
-        candidates = self.action_provider.require_candidates(state)
+        raw_state = state.raw_state
+        candidates = self.action_provider.require_candidates(raw_state)
         state_features = self._state_features(state)
-        candidate_features = self._candidate_features(state, candidates)
+        candidate_features = self._candidate_features(raw_state, candidates)
         with torch.no_grad():
             logits, value = self.model(state_features, candidate_features)
             distribution = Categorical(logits=logits)
@@ -194,7 +195,9 @@ class CandidatePPOAgent(Agent):
         if len(self._rollout) >= self.config.rollout_size or transition.done:
             self.update()
 
-    def finish_episode(self, final_state: RawState, truncated: bool) -> None:
+    def finish_episode(
+        self, final_state: GameObservation, truncated: bool
+    ) -> None:
         del final_state, truncated
         if self._pending is not None:
             raise RuntimeError("cannot finish an episode with an unobserved action")
@@ -307,8 +310,8 @@ class CandidatePPOAgent(Agent):
                 next_value = values[index]
         return advantages, advantages + values
 
-    def _state_features(self, state: RawState) -> Tensor:
-        features = self.feature_encoder.encode_state(state).to(self.device)
+    def _state_features(self, state: GameObservation) -> Tensor:
+        features = self.feature_encoder.encode_state(state.raw_state).to(self.device)
         if features.ndim != 1 or features.shape[0] != self.feature_encoder.state_dim:
             raise ValueError(
                 "encode_state() must return a flat tensor matching state_dim"

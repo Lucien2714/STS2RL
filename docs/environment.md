@@ -17,6 +17,19 @@ with GameEnv(base_url="http://localhost:15526/api/v1") as env:
 The environment deliberately does not encode state or calculate reward. Those
 layers consume `RawState` after the raw transition boundary is stable.
 
+`EpisodeRunner` turns that raw boundary into the Agent-facing observation:
+
+- it fetches player detail once after reset;
+- it fetches it once for every nonterminal next state;
+- a state refresh refreshes raw state and player detail together;
+- terminal observations use `player_detail=None` and make no detail request;
+- an `STS2ClientError` while loading required detail becomes an explicit
+  `ObservationError` instead of silently training without the permanent deck.
+
+Reward models continue to receive raw previous/next states. `EpisodeResult`
+also keeps raw initial/final states, while each `Transition` stores exactly the
+`GameObservation` passed to the Agent.
+
 `GameEnv.step()` accepts only `GameAction` and returns an immutable `EnvStep`:
 
 - `raw_state`: the next validated STS2MCP state.

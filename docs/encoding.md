@@ -54,8 +54,9 @@ remains.
 `GameObservation` is a frozen dataclass, but the raw dictionaries inside it are
 not copied or recursively frozen. Callers must treat them as read-only.
 
-The current `Agent` and `EpisodeRunner` still accept `RawState`; their migration
-to `GameObservation` belongs to a later stage.
+`Agent`, `Transition`, and `EpisodeRunner` use `GameObservation`. Reward models
+and `EpisodeResult.initial_state/final_state` deliberately retain raw-state
+inputs because rewards and external run summaries do not require model tokens.
 
 ## Vocabulary indices
 

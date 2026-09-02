@@ -5,7 +5,8 @@ is documented in [Structured Game Encoding](encoding.md). The current PPO still
 uses the temporary `FeatureEncoder` interface until the later integration stage.
 
 The first rebuilt agent uses PPO over a dynamic set of complete structured
-actions. There is no global discrete action ID. For every raw state,
+actions. There is no global discrete action ID. For every observation's raw
+state,
 `LegalActionProvider` creates candidates such as:
 
 ```python
@@ -38,9 +39,24 @@ The project deliberately provides no fallback feature encoder. A caller must
 inject an encoder that provides `state_dim`, `action_dim`, `encode_state()`, and
 `encode_action()`. This prevents accidental training on a placeholder encoding.
 
+The Agent lifecycle now receives `GameObservation` rather than a bare raw
+dictionary:
+
+```text
+reset(initial_observation)
+choose_action(observation)
+observe(Transition[GameObservation])
+finish_episode(final_observation, truncated)
+```
+
+As a short-lived compatibility layer, the current PPO passes
+`observation.raw_state` to `FeatureEncoder`. The structured tokenizer/encoder
+becomes the PPO model in the next stage.
+
 The legal-action provider covers combat, in-combat selection, rewards, map,
 events, rest sites, shops, treasure, card/bundle/relic overlays, and the Crystal
 Sphere. It returns no guessed action for `unknown` or unhandled `overlay`
 states. Pre-run menus also remain the responsibility of `ResetController`, not
-the learning agent. The runner refreshes short-lived states a bounded number of
-times and then raises `NoLegalActionsError` with the raw state for diagnosis.
+the learning agent. The runner refreshes short-lived states and their player
+detail together a bounded number of times, then raises `NoLegalActionsError`
+with the raw state for diagnosis.

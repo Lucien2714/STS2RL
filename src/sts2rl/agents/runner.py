@@ -4,12 +4,18 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from sts2rl.actions import GameAction
 from sts2rl.agents.action_space import NoLegalActionsError
 from sts2rl.agents.base import Agent, Transition
 from sts2rl.env.game_env import GameEnv
+from sts2rl.env.mcp_client import STS2ClientError
 from sts2rl.env.reset import ResetSpec
 from sts2rl.env.rewards import BattleProgressReward, RewardModel
-from sts2rl.env.types import RawState
+from sts2rl.env.types import GameObservation, RawState
+
+
+class ObservationError(RuntimeError):
+    """Raised when a required full player-detail snapshot cannot be obtained."""
 
 
 @dataclass(frozen=True)
@@ -52,14 +58,14 @@ class EpisodeRunner:
     def run(self, reset_spec: ResetSpec | None = None) -> EpisodeResult:
         """Reset the environment and run until game over or the step limit."""
         initial_state = self.env.reset(reset_spec)
-        state = initial_state
+        observation = self._observation(initial_state)
         transitions: list[Transition] = []
         total_reward = 0.0
         self.reward_model.reset(initial_state)
-        self.agent.reset(initial_state)
+        self.agent.reset(observation)
 
         for _ in range(self.max_steps):
-            action, state = self._choose_with_refresh(state)
+            action, observation = self._choose_with_refresh(observation)
             env_step = self.env.step(action)
             if env_step.info.get("action_error"):
                 reward, reward_info = self.reward_model.action_error_reward(
@@ -67,52 +73,75 @@ class EpisodeRunner:
                 )
             else:
                 reward, reward_info = self.reward_model.compute(
-                    state,
+                    observation.raw_state,
                     env_step.raw_state,
                     action.to_dict(),
                 )
+            next_observation = self._observation(
+                env_step.raw_state,
+                terminal=env_step.done,
+            )
             transition = Transition(
-                state=state,
+                state=observation,
                 action=action,
                 reward=float(reward),
-                next_state=env_step.raw_state,
+                next_state=next_observation,
                 done=env_step.done,
                 info={**env_step.info, "reward": reward_info},
             )
             transitions.append(transition)
             total_reward += float(reward)
             self.agent.observe(transition)
-            state = env_step.raw_state
+            observation = next_observation
             if env_step.done:
-                self.agent.finish_episode(state, truncated=False)
+                self.agent.finish_episode(observation, truncated=False)
                 return EpisodeResult(
                     initial_state=initial_state,
-                    final_state=state,
+                    final_state=observation.raw_state,
                     transitions=tuple(transitions),
                     total_reward=total_reward,
                     terminated=True,
                     truncated=False,
                 )
 
-        self.agent.finish_episode(state, truncated=True)
+        self.agent.finish_episode(observation, truncated=True)
         return EpisodeResult(
             initial_state=initial_state,
-            final_state=state,
+            final_state=observation.raw_state,
             transitions=tuple(transitions),
             total_reward=total_reward,
             terminated=False,
             truncated=True,
         )
 
-    def _choose_with_refresh(self, state: RawState):
+    def _choose_with_refresh(
+        self, observation: GameObservation
+    ) -> tuple[GameAction, GameObservation]:
         last_error: NoLegalActionsError | None = None
         for refresh_count in range(self.max_state_refreshes + 1):
             try:
-                return self.agent.choose_action(state), state
+                return self.agent.choose_action(observation), observation
             except NoLegalActionsError as exc:
                 last_error = exc
                 if refresh_count == self.max_state_refreshes:
                     break
-                state = self.env.get_state()
+                observation = self._observation(self.env.get_state())
         assert last_error is not None
         raise last_error
+
+    def _observation(
+        self,
+        raw_state: RawState,
+        *,
+        terminal: bool = False,
+    ) -> GameObservation:
+        if terminal or raw_state.get("state_type") == "game_over":
+            return GameObservation(raw_state=raw_state, player_detail=None)
+        try:
+            player_detail = self.env.get_player_detail()
+        except STS2ClientError as exc:
+            raise ObservationError(
+                "Failed to obtain required player detail for "
+                f"state_type={raw_state.get('state_type')!r}: {exc}"
+            ) from exc
+        return GameObservation(raw_state=raw_state, player_detail=player_detail)
