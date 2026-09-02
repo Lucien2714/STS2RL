@@ -1,6 +1,13 @@
 """State and policy-feature encoding interfaces."""
 
 from sts2rl.encoder.feature_encoder import FeatureEncoder
+from sts2rl.encoder.entity_encoder import (
+    ENTITY_CATEGORICAL_VOCABS,
+    GLOBAL_CATEGORICAL_VOCABS,
+    EncodedEntities,
+    EncoderConfig,
+    EntityTransformer,
+)
 from sts2rl.encoder.game_tokenizer import (
     ACTION_NUMERIC_FIELDS,
     ENTITY_CATEGORICAL_FIELDS,
@@ -41,11 +48,16 @@ __all__ = [
     "DefaultStateEncoder",
     "ACTION_NUMERIC_FIELDS",
     "EntityReference",
+    "EncodedEntities",
+    "EncoderConfig",
+    "EntityTransformer",
+    "ENTITY_CATEGORICAL_VOCABS",
     "EventOptionVocabulary",
     "FeatureEncoder",
     "GameTokenizer",
     "GameVocabulary",
     "GLOBAL_CATEGORICAL_FIELDS",
+    "GLOBAL_CATEGORICAL_VOCABS",
     "GLOBAL_NUMERIC_FIELDS",
     "MAP_CATEGORICAL_FIELDS",
     "MAP_NUMERIC_FIELDS",

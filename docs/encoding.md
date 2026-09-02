@@ -362,6 +362,60 @@ Entity row order is part of the state snapshot. It does not need to remain the
 same across later environment states because PPO stores the complete tokenized
 decision used during sampling.
 
+## EntityTransformer
+
+`EntityTransformer` is the first trainable encoding layer. Its default
+configuration is:
+
+```python
+EncoderConfig(
+    hidden_dim=128,
+    entity_layers=2,
+    entity_heads=4,
+    entity_ff_dim=256,
+    dropout=0.0,
+)
+```
+
+`hidden_dim` must be divisible by `entity_heads`. Nonzero dropout is rejected,
+because independently sampled encoder noise would contaminate PPO's old/new
+probability ratio.
+
+Each entity kind has separate embeddings for its categorical columns and a
+separate numeric projection. Numeric projection input concatenates values,
+missing masks, `active`, and `active_mask`. A shared entity-type embedding and
+a shared zone embedding are then added. The global fields similarly use their
+own categorical embeddings and numeric projection, added to a learned
+`[STATE]` token.
+
+Relationships are reduced before global self-attention:
+
+- power rows are mean-aggregated into their player/enemy/pet owner through a
+  learned projection;
+- intent rows are mean-aggregated into their enemy owner;
+- bundle child cards are mean-aggregated into their bundle;
+- relation rows and bundled child rows are not duplicated in the Transformer
+  sequence, although their base row embeddings remain addressable in the
+  structured result.
+
+`[STATE]` and the remaining entity rows pass through the configured Transformer
+layers. There is no positional embedding. Reordering an unordered entity batch
+therefore leaves the state embedding invariant and permutes that batch's row
+outputs in the same way. Positions that genuinely matter were already encoded
+as explicit numeric fields by the tokenizer.
+
+The result is:
+
+```python
+EncodedEntities(
+    state_embedding=Tensor[hidden_dim],
+    entity_embeddings={kind: Tensor[entity_count, hidden_dim]},
+)
+```
+
+`EncodedEntities.reference()` resolves ordinary `EntityReference` values. Map
+nodes remain the responsibility of the separate DAG encoder.
+
 ## TokenizedMap
 
 The map is stored separately because it is a directed graph rather than an
@@ -482,6 +536,7 @@ TokenizedState    validated model-visible state snapshot
 TokenizedMap      validated full map DAG
 TokenizedAction   one semantic structured candidate
 TokenizedDecision state plus ordered dynamic candidate set
+EntityTransformer trainable relation-aware non-map entity context
 GameEncoder       trainable state/action representation (planned)
 PPO               candidate selection and learning
 ```
