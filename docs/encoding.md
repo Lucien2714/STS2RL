@@ -3,9 +3,9 @@
 This document describes the data contract between raw STS2MCP observations,
 the deterministic tokenizer, trainable game encoder, and PPO agent.
 
-The value types and non-map state tokenizer described here are implemented.
-Candidate-action tokenization, map tokenization, and `GameEncoder` belong to
-later refactor stages and are explicitly marked as such below.
+The value types, non-map state tokenizer, and non-map action tokenizer described
+here are implemented. Map tokenization and `GameEncoder` belong to later
+refactor stages and are explicitly marked as such below.
 
 ## Data flow
 
@@ -183,6 +183,45 @@ are deliberately excluded. Later action tokenization resolves those handles to
 Descriptions, prompts, labels that are not plain numeric values, keyword prose,
 and other free text are ignored. The state tokenizer also deliberately returns
 `game_map=None`; complete map DAG parsing is a separate stage.
+
+## GameTokenizer action schema
+
+`GameTokenizer.tokenize_decision(observation, candidates)` tokenizes the state
+once and preserves the exact candidate order. Runtime handles are used only to
+resolve references:
+
+| Action | Source | Target |
+|---|---|---|
+| `play_card` | hand card | optional enemy |
+| `use_potion` | potion | optional enemy |
+| `discard_potion` | potion | none |
+| `combat_select_card` | hand-selection card | none |
+| `claim_reward` | reward | none |
+| `select_card_reward` | reward card | none |
+| `choose_event_option` | event option | none |
+| `choose_rest_option` | rest option | none |
+| `shop_purchase` | shop item | none |
+| `select_card` | selection card | none |
+| `select_bundle` | bundle | none |
+| `select_relic` | offered relic | none |
+| `claim_treasure_relic` | treasure relic | none |
+| `crystal_sphere_set_tool` | chosen tool | none |
+| `crystal_sphere_click_cell` | currently selected tool, when present | cell |
+
+Confirm, skip, proceed, end-turn, dialogue-advance, cancel, and Crystal Sphere
+proceed actions have no entity references. The fixed action numeric schema is
+`ACTION_NUMERIC_FIELDS = ("x", "y")`; only a Crystal cell click populates these
+coordinates, while every other action has false masks for both fields.
+
+Raw `card_index`, `slot`, option `index`, target `entity_id`, and tool strings do
+not become model features. Duplicate or missing handles are not resolved by
+list position. They raise `TokenizationError`, whose message includes both the
+state type and complete action payload.
+
+`choose_map_node` is recognized but deliberately raises `TokenizationError`
+until its index can be linked to a validated full-map node in the map tokenizer
+stage. `menu_select` is similarly outside the learning action space because
+reset navigation currently owns menus and no menu-option entity exists.
 
 ## EntityReference
 
@@ -371,9 +410,9 @@ reserved for parameters with semantic numeric meaning, such as a grid
 coordinate.
 
 Screen-local handles such as `card_index`, potion slot, or option index are not
-numeric model features. The future tokenizer will resolve them to a semantic
-source or target reference. End-turn, proceed, confirm, and skip actions can
-legitimately have no references.
+numeric model features. The tokenizer resolves them to a semantic source or
+target reference. End-turn, proceed, confirm, and skip actions legitimately
+have no references.
 
 ## TokenizedDecision
 
@@ -416,7 +455,7 @@ combinations.
 GameObservation   raw state plus complete player detail
 GameVocabulary    stable string-to-index identity
 numeric.py        finite values, scaling, and missing masks
-GameTokenizer     deterministic non-map state parsing; actions/map planned
+GameTokenizer     deterministic state/action parsing; full map planned
 TokenizedState    validated model-visible state snapshot
 TokenizedMap      validated full map DAG
 TokenizedAction   one semantic structured candidate

@@ -8,10 +8,11 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from types import MappingProxyType
-from typing import Mapping, Sequence
+from typing import Callable, Hashable, Mapping, Sequence
 
 import torch
 
+from sts2rl.actions import GameAction
 from sts2rl.encoder.numeric import (
     NumericFeature,
     linear_feature,
@@ -21,14 +22,17 @@ from sts2rl.encoder.numeric import (
 )
 from sts2rl.encoder.tokens import (
     EntityReference,
+    TokenizedAction,
+    TokenizedDecision,
     TokenizedEntityBatch,
     TokenizedState,
 )
-from sts2rl.encoder.vocabulary import GameVocabulary
+from sts2rl.encoder.vocabulary import GameVocabulary, UNKNOWN_INDEX
 from sts2rl.env.types import GameObservation
 
 
 GLOBAL_CATEGORICAL_FIELDS = ("state_type", "character")
+ACTION_NUMERIC_FIELDS = ("x", "y")
 GLOBAL_NUMERIC_FIELDS = (
     "act",
     "floor",
@@ -154,6 +158,36 @@ ENTITY_NUMERIC_FIELDS: Mapping[str, tuple[str, ...]] = MappingProxyType(
 ENTITY_KINDS = tuple(ENTITY_CATEGORICAL_FIELDS)
 
 
+class TokenizationError(ValueError):
+    """Raised when a structured legal action cannot resolve to state entities."""
+
+
+@dataclass
+class _ReferenceRegistry:
+    references: dict[tuple[str, Hashable], EntityReference] = field(
+        default_factory=dict
+    )
+    ambiguous: set[tuple[str, Hashable]] = field(default_factory=set)
+
+    def add(
+        self,
+        domain: str,
+        handle: Hashable | None,
+        reference: EntityReference,
+    ) -> None:
+        if handle is None:
+            return
+        key = (domain, handle)
+        if key in self.references:
+            self.references.pop(key)
+            self.ambiguous.add(key)
+        elif key not in self.ambiguous:
+            self.references[key] = reference
+
+    def resolve(self, domain: str, handle: Hashable) -> EntityReference | None:
+        return self.references.get((domain, handle))
+
+
 @dataclass
 class _EntityRows:
     categorical: list[list[int]] = field(default_factory=list)
@@ -193,6 +227,25 @@ class GameTokenizer:
 
     def tokenize_state(self, observation: GameObservation) -> TokenizedState:
         """Tokenize global values and all non-map entities in one snapshot."""
+        state, _ = self._tokenize_state(observation)
+        return state
+
+    def tokenize_decision(
+        self,
+        observation: GameObservation,
+        candidates: Sequence[GameAction],
+    ) -> TokenizedDecision:
+        """Tokenize a state and its ordered, structured legal-action set."""
+        state, registry = self._tokenize_state(observation)
+        actions = tuple(
+            self._tokenize_action(observation.raw_state, action, registry)
+            for action in candidates
+        )
+        return TokenizedDecision(state=state, actions=actions)
+
+    def _tokenize_state(
+        self, observation: GameObservation
+    ) -> tuple[TokenizedState, _ReferenceRegistry]:
         if not isinstance(observation, GameObservation):
             raise TypeError("observation must be a GameObservation")
 
@@ -215,18 +268,148 @@ class GameTokenizer:
         )
 
         rows = {kind: _EntityRows() for kind in ENTITY_KINDS}
+        registry = _ReferenceRegistry()
         player_ref = self._add_player(rows, player)
-        self._add_cards(rows, state, player, detail_player)
-        self._add_inventory(rows, player)
-        self._add_combat_entities(rows, state, player, player_ref)
-        self._add_screen_entities(rows, state)
+        self._add_cards(rows, state, player, detail_player, registry)
+        self._add_inventory(rows, player, registry)
+        self._add_combat_entities(rows, state, player, player_ref, registry)
+        self._add_screen_entities(rows, state, registry)
 
-        return TokenizedState(
+        tokenized = TokenizedState(
             global_categorical=global_categorical,
             global_numeric=global_numeric,
             global_numeric_mask=global_numeric_mask,
             entities=self._build_batches(rows),
             game_map=None,
+        )
+        return tokenized, registry
+
+    def _tokenize_action(
+        self,
+        state: Mapping[str, object],
+        action: GameAction,
+        registry: _ReferenceRegistry,
+    ) -> TokenizedAction:
+        if not isinstance(action, GameAction):
+            raise TypeError("candidates must contain GameAction values")
+        action_type = action.action_type
+        action_index = self.vocabulary.lookup("action_types", action_type)
+        if action_index == UNKNOWN_INDEX:
+            raise self._action_error(state, action, "unknown action type")
+        if action_type == "choose_map_node":
+            raise self._action_error(
+                state,
+                action,
+                "map-node references are implemented in the map tokenizer stage",
+            )
+        if action_type == "menu_select":
+            raise self._action_error(
+                state,
+                action,
+                "menu options do not yet have semantic state entities",
+            )
+
+        params = action.params
+        source: EntityReference | None = None
+        target: EntityReference | None = None
+        numeric = [NumericFeature.missing(), NumericFeature.missing()]
+
+        source_specs = {
+            "play_card": ("hand_card", "card_index", _integer),
+            "use_potion": ("potion", "slot", _integer),
+            "discard_potion": ("potion", "slot", _integer),
+            "combat_select_card": ("hand_selection_card", "card_index", _integer),
+            "claim_reward": ("reward", "index", _integer),
+            "select_card_reward": ("reward_card", "card_index", _integer),
+            "choose_event_option": ("event_option", "index", _integer),
+            "choose_rest_option": ("rest_option", "index", _integer),
+            "shop_purchase": ("shop_item", "index", _integer),
+            "select_card": ("selection_card", "index", _integer),
+            "select_bundle": ("bundle", "index", _integer),
+            "select_relic": ("selection_relic", "index", _integer),
+            "claim_treasure_relic": ("treasure_relic", "index", _integer),
+            "crystal_sphere_set_tool": ("crystal_tool", "tool", _normalized_text),
+        }
+        spec = source_specs.get(action_type)
+        if spec is not None:
+            source = self._resolve_action_reference(
+                state,
+                action,
+                registry,
+                domain=spec[0],
+                parameter=spec[1],
+                normalize=spec[2],
+            )
+
+        if action_type in {"play_card", "use_potion"} and "target" in params:
+            target = self._resolve_action_reference(
+                state,
+                action,
+                registry,
+                domain="enemy",
+                parameter="target",
+                normalize=_text,
+            )
+
+        if action_type == "crystal_sphere_click_cell":
+            x = _integer(params.get("x"))
+            y = _integer(params.get("y"))
+            if x is None or y is None:
+                raise self._action_error(state, action, "invalid x/y cell coordinates")
+            target = registry.resolve("crystal_cell", (x, y))
+            if target is None:
+                raise self._action_error(state, action, "cell coordinates are unresolved")
+            numeric = [linear_feature(x), linear_feature(y)]
+            sphere = _mapping(state.get("crystal_sphere"))
+            selected_tool = _normalized_text(sphere.get("tool"))
+            if selected_tool in {"big", "small"}:
+                source = registry.resolve("crystal_tool", selected_tool)
+                if source is None:
+                    raise self._action_error(
+                        state, action, "selected Crystal Sphere tool is unresolved"
+                    )
+
+        values, mask = pack_numeric(numeric)
+        return TokenizedAction(
+            action_type=torch.tensor(action_index, dtype=torch.long),
+            numeric=values,
+            numeric_mask=mask,
+            source=source,
+            target=target,
+        )
+
+    def _resolve_action_reference(
+        self,
+        state: Mapping[str, object],
+        action: GameAction,
+        registry: _ReferenceRegistry,
+        *,
+        domain: str,
+        parameter: str,
+        normalize: Callable[[object], Hashable | None],
+    ) -> EntityReference:
+        handle = normalize(action.params.get(parameter))
+        if handle is None:
+            raise self._action_error(
+                state, action, f"missing or invalid {parameter!r} parameter"
+            )
+        reference = registry.resolve(domain, handle)
+        if reference is None:
+            raise self._action_error(
+                state,
+                action,
+                f"{parameter!r} does not resolve to a unique {domain} entity",
+            )
+        return reference
+
+    @staticmethod
+    def _action_error(
+        state: Mapping[str, object], action: GameAction, reason: str
+    ) -> TokenizationError:
+        return TokenizationError(
+            "Cannot tokenize legal action "
+            f"for state_type={state.get('state_type')!r}: "
+            f"{action.to_dict()!r}: {reason}"
         )
 
     def _global_numeric(
@@ -279,9 +462,16 @@ class GameTokenizer:
         state: Mapping[str, object],
         player: Mapping[str, object],
         detail_player: Mapping[str, object],
+        registry: _ReferenceRegistry,
     ) -> None:
         self._add_grouped_cards(rows, _records(detail_player.get("deck")), "deck")
-        self._add_individual_cards(rows, _records(player.get("hand")), "hand")
+        self._add_individual_cards(
+            rows,
+            _records(player.get("hand")),
+            "hand",
+            registry=registry,
+            reference_domain="hand_card",
+        )
         for source, zone in (
             ("draw_pile", "draw"),
             ("discard_pile", "discard"),
@@ -296,12 +486,16 @@ class GameTokenizer:
             "selection",
             selection_type=_text(hand_select.get("mode")),
             selected_indices=_selected_indices(hand_select),
+            registry=registry,
+            reference_domain="hand_selection_card",
         )
         card_reward = _mapping(state.get("card_reward"))
         self._add_individual_cards(
             rows,
             _records(card_reward.get("cards")),
             "reward",
+            registry=registry,
+            reference_domain="reward_card",
         )
         card_select = _mapping(state.get("card_select"))
         self._add_individual_cards(
@@ -310,6 +504,8 @@ class GameTokenizer:
             "selection",
             selection_type=_text(card_select.get("screen_type")),
             selected_indices=_selected_indices(card_select),
+            registry=registry,
+            reference_domain="selection_card",
         )
 
     def _add_grouped_cards(
@@ -335,6 +531,8 @@ class GameTokenizer:
         *,
         selection_type: str | None = None,
         selected_indices: set[int] | None = None,
+        registry: _ReferenceRegistry | None = None,
+        reference_domain: str | None = None,
     ) -> list[EntityReference]:
         references = []
         for position, card in enumerate(cards):
@@ -351,7 +549,10 @@ class GameTokenizer:
                 selection_type=selection_type,
                 selected=selected,
             )
-            references.append(EntityReference("card", index))
+            reference = EntityReference("card", index)
+            references.append(reference)
+            if registry is not None and reference_domain is not None:
+                registry.add(reference_domain, raw_index, reference)
         return references
 
     def _append_card(
@@ -400,11 +601,12 @@ class GameTokenizer:
         self,
         rows: dict[str, _EntityRows],
         player: Mapping[str, object],
+        registry: _ReferenceRegistry,
     ) -> None:
         for relic in _records(player.get("relics")):
             self._append_relic(rows, relic, "inventory")
         for potion in _records(player.get("potions")):
-            rows["potion"].append(
+            index = rows["potion"].append(
                 [
                     self.vocabulary.lookup("potions", _identity(potion)),
                     self.vocabulary.lookup(
@@ -414,6 +616,11 @@ class GameTokenizer:
                 ],
                 [_bool_feature(potion.get("can_use_in_combat"))],
                 activity=_activity(potion),
+            )
+            registry.add(
+                "potion",
+                _integer(potion.get("slot")),
+                EntityReference("potion", index),
             )
         for position, orb in enumerate(_records(player.get("orbs"))):
             rows["orb"].append(
@@ -451,6 +658,7 @@ class GameTokenizer:
         state: Mapping[str, object],
         player: Mapping[str, object],
         player_ref: EntityReference | None,
+        registry: _ReferenceRegistry,
     ) -> None:
         if player_ref is not None:
             self._add_powers(
@@ -488,6 +696,11 @@ class GameTokenizer:
                 activity=_activity(enemy, positive=("alive", "active", "is_active")),
             )
             enemy_refs.append((EntityReference("enemy", index), enemy))
+            registry.add(
+                "enemy",
+                _text(enemy.get("entity_id")),
+                EntityReference("enemy", index),
+            )
         for reference, enemy in enemy_refs:
             self._add_powers(rows, _records(enemy.get("status")), reference, "enemy")
             for position, intent in enumerate(_records(enemy.get("intents"))):
@@ -524,22 +737,26 @@ class GameTokenizer:
         self,
         rows: dict[str, _EntityRows],
         state: Mapping[str, object],
+        registry: _ReferenceRegistry,
     ) -> None:
-        self._add_rewards(rows, state)
-        self._add_shop(rows, state)
-        self._add_event(rows, state)
-        self._add_rest(rows, state)
-        self._add_bundle(rows, state)
-        self._add_relic_selections(rows, state)
-        self._add_crystal_sphere(rows, state)
+        self._add_rewards(rows, state, registry)
+        self._add_shop(rows, state, registry)
+        self._add_event(rows, state, registry)
+        self._add_rest(rows, state, registry)
+        self._add_bundle(rows, state, registry)
+        self._add_relic_selections(rows, state, registry)
+        self._add_crystal_sphere(rows, state, registry)
 
     def _add_rewards(
-        self, rows: dict[str, _EntityRows], state: Mapping[str, object]
+        self,
+        rows: dict[str, _EntityRows],
+        state: Mapping[str, object],
+        registry: _ReferenceRegistry,
     ) -> None:
         rewards = _mapping(state.get("rewards"))
         for reward in _records(rewards.get("items")):
             reward_type = _text(reward.get("type"))
-            rows["reward"].append(
+            index = rows["reward"].append(
                 [
                     self.vocabulary.lookup("reward_types", reward_type),
                     self.vocabulary.lookup("potions", _text(reward.get("potion_id"))),
@@ -550,15 +767,23 @@ class GameTokenizer:
                 [signed_log_feature(reward.get("gold_amount"))],
                 activity=_activity(reward),
             )
+            registry.add(
+                "reward",
+                _integer(reward.get("index")),
+                EntityReference("reward", index),
+            )
 
     def _add_shop(
-        self, rows: dict[str, _EntityRows], state: Mapping[str, object]
+        self,
+        rows: dict[str, _EntityRows],
+        state: Mapping[str, object],
+        registry: _ReferenceRegistry,
     ) -> None:
         shop = _mapping(state.get("shop"))
         if not shop:
             shop = _mapping(_mapping(state.get("fake_merchant")).get("shop"))
         for item in _records(shop.get("items")):
-            rows["shop_item"].append(
+            index = rows["shop_item"].append(
                 [
                     self.vocabulary.lookup("shop_categories", _text(item.get("category"))),
                     self.vocabulary.lookup("cards", _text(item.get("card_id"))),
@@ -582,15 +807,23 @@ class GameTokenizer:
                 ],
                 activity=_activity(item, positive=("is_stocked",)),
             )
+            registry.add(
+                "shop_item",
+                _integer(item.get("index")),
+                EntityReference("shop_item", index),
+            )
 
     def _add_event(
-        self, rows: dict[str, _EntityRows], state: Mapping[str, object]
+        self,
+        rows: dict[str, _EntityRows],
+        state: Mapping[str, object],
+        registry: _ReferenceRegistry,
     ) -> None:
         event = _mapping(state.get("event"))
         event_id = _text(event.get("event_id"))
         for option in _records(event.get("options")):
             locked = option.get("is_locked")
-            rows["event_option"].append(
+            index = rows["event_option"].append(
                 [
                     self.vocabulary.lookup("events", event_id),
                     self.vocabulary.event_option_index(event_id, _text(option.get("title"))),
@@ -603,14 +836,22 @@ class GameTokenizer:
                 ],
                 activity=(not locked, True) if isinstance(locked, bool) else (False, False),
             )
+            registry.add(
+                "event_option",
+                _integer(option.get("index")),
+                EntityReference("event_option", index),
+            )
 
     def _add_rest(
-        self, rows: dict[str, _EntityRows], state: Mapping[str, object]
+        self,
+        rows: dict[str, _EntityRows],
+        state: Mapping[str, object],
+        registry: _ReferenceRegistry,
     ) -> None:
         rest = _mapping(state.get("rest_site"))
         for option in _records(rest.get("options")):
             enabled = option.get("is_enabled")
-            rows["rest_option"].append(
+            index = rows["rest_option"].append(
                 [
                     self.vocabulary.lookup("rest_options", _identity(option)),
                     self.vocabulary.lookup("entity_zones", "rest"),
@@ -618,9 +859,17 @@ class GameTokenizer:
                 [_bool_feature(enabled)],
                 activity=(enabled, True) if isinstance(enabled, bool) else (False, False),
             )
+            registry.add(
+                "rest_option",
+                _integer(option.get("index")),
+                EntityReference("rest_option", index),
+            )
 
     def _add_bundle(
-        self, rows: dict[str, _EntityRows], state: Mapping[str, object]
+        self,
+        rows: dict[str, _EntityRows],
+        state: Mapping[str, object],
+        registry: _ReferenceRegistry,
     ) -> None:
         selection = _mapping(state.get("bundle_select"))
         for bundle in _records(selection.get("bundles")):
@@ -629,8 +878,9 @@ class GameTokenizer:
                 _records(bundle.get("cards")),
                 "bundle",
                 selection_type="bundle",
+                registry=None,
             )
-            rows["bundle"].append(
+            index = rows["bundle"].append(
                 [
                     self.vocabulary.lookup("selection_types", "bundle"),
                     self.vocabulary.lookup("entity_zones", "bundle"),
@@ -638,17 +888,38 @@ class GameTokenizer:
                 [linear_feature(bundle.get("card_count", len(children)))],
                 children=children,
             )
+            registry.add(
+                "bundle",
+                _integer(bundle.get("index")),
+                EntityReference("bundle", index),
+            )
 
     def _add_relic_selections(
-        self, rows: dict[str, _EntityRows], state: Mapping[str, object]
+        self,
+        rows: dict[str, _EntityRows],
+        state: Mapping[str, object],
+        registry: _ReferenceRegistry,
     ) -> None:
         for relic in _records(_mapping(state.get("relic_select")).get("relics")):
-            self._append_relic(rows, relic, "selection")
+            index = self._append_relic(rows, relic, "selection")
+            registry.add(
+                "selection_relic",
+                _integer(relic.get("index")),
+                EntityReference("relic", index),
+            )
         for relic in _records(_mapping(state.get("treasure")).get("relics")):
-            self._append_relic(rows, relic, "treasure")
+            index = self._append_relic(rows, relic, "treasure")
+            registry.add(
+                "treasure_relic",
+                _integer(relic.get("index")),
+                EntityReference("relic", index),
+            )
 
     def _add_crystal_sphere(
-        self, rows: dict[str, _EntityRows], state: Mapping[str, object]
+        self,
+        rows: dict[str, _EntityRows],
+        state: Mapping[str, object],
+        registry: _ReferenceRegistry,
     ) -> None:
         sphere = _mapping(state.get("crystal_sphere"))
         if not sphere:
@@ -663,7 +934,7 @@ class GameTokenizer:
             item = revealed.get((_integer(cell.get("x")), _integer(cell.get("y"))), {})
             item_type = _text(cell.get("item_type") or item.get("item_type"))
             is_good = cell.get("is_good", item.get("is_good"))
-            rows["crystal_cell"].append(
+            index = rows["crystal_cell"].append(
                 [
                     self.vocabulary.lookup("crystal_item_types", item_type),
                     self.vocabulary.lookup("entity_zones", "crystal"),
@@ -683,13 +954,20 @@ class GameTokenizer:
                 ],
                 activity=_activity(cell, positive=("is_clickable",)),
             )
+            x = _integer(cell.get("x"))
+            y = _integer(cell.get("y"))
+            registry.add(
+                "crystal_cell",
+                (x, y) if x is not None and y is not None else None,
+                EntityReference("crystal_cell", index),
+            )
         selected_tool = _text(sphere.get("tool"))
         for tool, can_use_key in (
             ("big", "can_use_big_tool"),
             ("small", "can_use_small_tool"),
         ):
             can_use = sphere.get(can_use_key)
-            rows["crystal_tool"].append(
+            index = rows["crystal_tool"].append(
                 [
                     self.vocabulary.lookup("crystal_tools", tool),
                     self.vocabulary.lookup("entity_zones", "crystal"),
@@ -701,6 +979,11 @@ class GameTokenizer:
                     ),
                 ],
                 activity=(can_use, True) if isinstance(can_use, bool) else (False, False),
+            )
+            registry.add(
+                "crystal_tool",
+                tool,
+                EntityReference("crystal_tool", index),
             )
 
     def _build_batches(
@@ -738,6 +1021,11 @@ def _text(value: object) -> str | None:
     return str(value) if value is not None else None
 
 
+def _normalized_text(value: object) -> str | None:
+    text = _text(value)
+    return text.strip().casefold() if text is not None else None
+
+
 def _identity(record: Mapping[str, object], *, include_entity: bool = True) -> str | None:
     keys = ("id", "name") if not include_entity else ("id", "name", "entity_id")
     for key in keys:
@@ -750,9 +1038,11 @@ def _identity(record: Mapping[str, object], *, include_entity: bool = True) -> s
 def _integer(value: object) -> int | None:
     if value is None or isinstance(value, bool):
         return None
+    if isinstance(value, float):
+        return int(value) if value.is_integer() else None
     try:
         return int(value)  # type: ignore[arg-type]
-    except (TypeError, ValueError):
+    except (OverflowError, TypeError, ValueError):
         return None
 
 

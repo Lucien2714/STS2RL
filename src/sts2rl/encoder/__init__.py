@@ -2,11 +2,13 @@
 
 from sts2rl.encoder.feature_encoder import FeatureEncoder
 from sts2rl.encoder.game_tokenizer import (
+    ACTION_NUMERIC_FIELDS,
     ENTITY_CATEGORICAL_FIELDS,
     ENTITY_NUMERIC_FIELDS,
     GLOBAL_CATEGORICAL_FIELDS,
     GLOBAL_NUMERIC_FIELDS,
     GameTokenizer,
+    TokenizationError,
 )
 from sts2rl.encoder.numeric import (
     NumericFeature,
@@ -35,6 +37,7 @@ from sts2rl.encoder.vocabulary import (
 
 __all__ = [
     "DefaultStateEncoder",
+    "ACTION_NUMERIC_FIELDS",
     "EntityReference",
     "EventOptionVocabulary",
     "FeatureEncoder",
@@ -52,6 +55,7 @@ __all__ = [
     "TokenizedEntityBatch",
     "TokenizedMap",
     "TokenizedState",
+    "TokenizationError",
     "TokenVocabulary",
     "UNKNOWN_INDEX",
     "linear_feature",
