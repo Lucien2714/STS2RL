@@ -3,9 +3,9 @@
 This document describes the data contract between raw STS2MCP observations,
 the deterministic tokenizer, trainable game encoder, and PPO agent.
 
-The value types and complete state/action tokenizer described here are
-implemented. `GameEncoder` belongs to later refactor stages and is explicitly
-marked as such below.
+The value types, complete tokenizer, and composed trainable `GameEncoder`
+described here are implemented. Runner and PPO rollout integration belong to
+later refactor stages and are explicitly marked as such below.
 
 ## Data flow
 
@@ -508,6 +508,45 @@ EncodedMap(
 A candidate embedding therefore changes when a deep descendant changes, and a
 gradient from that candidate reaches the descendant's base node embedding.
 
+## GameEncoder and actor-critic heads
+
+`GameEncoder` owns the entity Transformer, map DAG encoder, action encoder, and
+shared actor-critic heads. Encoding follows this order:
+
+1. `EntityTransformer` produces the player-aware state context and contextual
+   ordinary entity rows.
+2. On map states, that context conditions `MapDAGEncoder`.
+3. A learned fusion of entity context and global map embedding produces the
+   final state vector. Non-map states use a learned no-map vector and do not run
+   the DAG module.
+4. Every action combines its action-type embedding, numeric values and masks,
+   role-specific source/target projections, and learned missing-role vectors.
+   A map-node reference reads the future-aware node embedding.
+
+The public encoding result is:
+
+```python
+EncodedDecision(
+    state_embedding=Tensor[hidden_dim],
+    candidate_embeddings=Tensor[candidate_count, hidden_dim],
+)
+```
+
+`GameEncoder.policy_value()` applies the shared candidate actor and critic:
+
+```text
+logit(action) =
+    dot(state_embedding, candidate_embedding) / sqrt(hidden_dim)
+    + CandidateBias(candidate_embedding)
+
+value = ValueHead(state_embedding)
+```
+
+`PolicyValueOutput` returns the rank-one dynamic logits, scalar value, and the
+underlying `EncodedDecision`. The same parameters handle combat, map, event,
+shop, rest, and selection screens; no screen-specific policy head or global
+discrete action ID is introduced.
+
 ## TokenizedAction
 
 `TokenizedAction` represents one complete candidate action:
@@ -579,6 +618,6 @@ TokenizedAction   one semantic structured candidate
 TokenizedDecision state plus ordered dynamic candidate set
 EntityTransformer trainable relation-aware non-map entity context
 MapDAGEncoder      conditioned reverse-DAG future propagation
-GameEncoder       trainable state/action representation (planned)
+GameEncoder        composed state/action encoder and actor-critic heads
 PPO               candidate selection and learning
 ```

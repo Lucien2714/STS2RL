@@ -19,6 +19,11 @@ from sts2rl.encoder.game_tokenizer import (
     GameTokenizer,
     TokenizationError,
 )
+from sts2rl.encoder.game_encoder import (
+    EncodedDecision,
+    GameEncoder,
+    PolicyValueOutput,
+)
 from sts2rl.encoder.numeric import (
     NumericFeature,
     linear_feature,
@@ -50,6 +55,7 @@ __all__ = [
     "ACTION_NUMERIC_FIELDS",
     "EntityReference",
     "EncodedEntities",
+    "EncodedDecision",
     "EncodedMap",
     "EncoderConfig",
     "EntityTransformer",
@@ -57,6 +63,7 @@ __all__ = [
     "EventOptionVocabulary",
     "FeatureEncoder",
     "GameTokenizer",
+    "GameEncoder",
     "GameVocabulary",
     "MapDAGEncoder",
     "GLOBAL_CATEGORICAL_FIELDS",
@@ -68,6 +75,7 @@ __all__ = [
     "ENTITY_NUMERIC_FIELDS",
     "NumericFeature",
     "PAD_INDEX",
+    "PolicyValueOutput",
     "StateEncoder",
     "TokenizedAction",
     "TokenizedDecision",
