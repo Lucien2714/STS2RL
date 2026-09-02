@@ -1,5 +1,9 @@
 # Agents
 
+The structured token data contract being introduced for the trainable encoder
+is documented in [Structured Game Encoding](encoding.md). The current PPO still
+uses the temporary `FeatureEncoder` interface until the later integration stage.
+
 The first rebuilt agent uses PPO over a dynamic set of complete structured
 actions. There is no global discrete action ID. For every raw state,
 `LegalActionProvider` creates candidates such as:
