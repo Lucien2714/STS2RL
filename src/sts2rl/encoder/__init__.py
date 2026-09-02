@@ -26,6 +26,7 @@ from sts2rl.encoder.numeric import (
     ratio_feature,
     signed_log_feature,
 )
+from sts2rl.encoder.map_encoder import EncodedMap, MapDAGEncoder
 from sts2rl.encoder.state_encoder import DefaultStateEncoder, StateEncoder
 from sts2rl.encoder.tokens import (
     EntityReference,
@@ -49,6 +50,7 @@ __all__ = [
     "ACTION_NUMERIC_FIELDS",
     "EntityReference",
     "EncodedEntities",
+    "EncodedMap",
     "EncoderConfig",
     "EntityTransformer",
     "ENTITY_CATEGORICAL_VOCABS",
@@ -56,6 +58,7 @@ __all__ = [
     "FeatureEncoder",
     "GameTokenizer",
     "GameVocabulary",
+    "MapDAGEncoder",
     "GLOBAL_CATEGORICAL_FIELDS",
     "GLOBAL_CATEGORICAL_VOCABS",
     "GLOBAL_NUMERIC_FIELDS",

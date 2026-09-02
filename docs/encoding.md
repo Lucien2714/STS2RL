@@ -467,6 +467,47 @@ candidate/boss/reachable flags, and shortest/longest Boss distances.
 `TokenizedMap` then independently validates shapes, index ranges, the
 topological permutation, and parent-before-child ordering.
 
+## MapDAGEncoder
+
+`MapDAGEncoder` consumes a `TokenizedMap` and the player-aware context produced
+by `EntityTransformer`. Passing `game_map=None` returns `None`, so non-map
+states skip this module.
+
+First, node type and numeric/mask features form a base embedding. Nodes are
+then evaluated once in reverse topological order:
+
+```text
+future(node) = update(
+    base(node),
+    attention(future(children), base(node), player_context),
+    player_context,
+)
+```
+
+The child query depends on both the current node and player context. Keys and
+values come from child embeddings that already contain all deeper descendants.
+One set of attention and update parameters is shared at every map depth. This
+is dynamic programming over the DAG: it is neither path enumeration nor a
+Graph Transformer.
+
+An additional player-conditioned attention pool reads only rows selected by
+`reachable_mask`. Disconnected or expired branches cannot affect the global map
+embedding. An empty reachable set uses a learned empty-map vector combined with
+player context.
+
+The output keeps both representations for testing and downstream lookup:
+
+```python
+EncodedMap(
+    base_node_embeddings=Tensor[node_count, hidden_dim],
+    node_embeddings=Tensor[node_count, hidden_dim],  # future-aware
+    global_embedding=Tensor[hidden_dim],
+)
+```
+
+A candidate embedding therefore changes when a deep descendant changes, and a
+gradient from that candidate reaches the descendant's base node embedding.
+
 ## TokenizedAction
 
 `TokenizedAction` represents one complete candidate action:
@@ -537,6 +578,7 @@ TokenizedMap      validated full map DAG
 TokenizedAction   one semantic structured candidate
 TokenizedDecision state plus ordered dynamic candidate set
 EntityTransformer trainable relation-aware non-map entity context
+MapDAGEncoder      conditioned reverse-DAG future propagation
 GameEncoder       trainable state/action representation (planned)
 PPO               candidate selection and learning
 ```
