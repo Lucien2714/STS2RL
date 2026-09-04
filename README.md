@@ -17,6 +17,16 @@ uv sync
 uv run pytest
 ```
 
+Start a resumable training run against a local STS2MCP server:
+
+```bash
+uv run python scripts/train.py --run-dir runs/ironclad-001 --total-episodes 100
+```
+
+Metrics are written to JSONL and TensorBoard. See
+[Training](docs/training.md) for checkpoint and resume behavior.
+
 See [Architecture](docs/architecture.md), [Environment](docs/environment.md),
-[Agents](docs/agents.md), [Rewards](docs/rewards.md), and the bundled
+[Agents](docs/agents.md), [Training](docs/training.md),
+[Rewards](docs/rewards.md), and the bundled
 [STS2MCP API reference](docs/STS2MCP-raw-full.md).

@@ -59,6 +59,12 @@ boundary or truncated episode bootstraps from the stored tokenized next state.
 Training samples stochastically, while `agent.eval()` selects the highest-logit
 candidate deterministically and does not collect rollout entries.
 
+The training runtime drains metrics for every completed PPO update instead of
+only reading `last_update`. At a clean episode boundary the agent can serialize
+its encoder, optimizer, environment-step count, and update count. Incomplete
+pending actions and rollouts must be observed, updated, or explicitly aborted
+before checkpointing.
+
 The legal-action provider covers combat, in-combat selection, rewards, map,
 events, rest sites, shops, treasure, card/bundle/relic overlays, and the Crystal
 Sphere. It returns no guessed action for `unknown` or unhandled `overlay`

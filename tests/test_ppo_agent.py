@@ -20,8 +20,7 @@ from sts2rl.env import GameObservation
 
 def _map_state(option_count: int = 2) -> dict[str, object]:
     options = [
-        {"index": index, "col": index, "row": 1}
-        for index in range(option_count)
+        {"index": index, "col": index, "row": 1} for index in range(option_count)
     ]
     nodes: list[dict[str, object]] = [
         {
@@ -126,10 +125,97 @@ def test_training_samples_only_current_candidates_and_updates_encoder_on_termina
 
     assert agent.last_update["rollout_steps"] == 1.0
     assert agent.last_update["value_loss"] >= 0.0
+    assert agent.environment_steps == 1
+    assert agent.optimizer_updates == 1
     assert not torch.equal(
         before,
         agent.game_encoder.entity_encoder.state_token.detach(),
     )
+
+
+def test_update_metrics_are_drained_once():
+    torch.manual_seed(36)
+    agent = _agent(rollout_size=8)
+    observation = _observation(_map_state(1))
+    action = agent.choose_action(observation)
+    agent.observe(
+        Transition(
+            state=observation,
+            action=action,
+            reward=1.0,
+            next_state=_observation({"state_type": "game_over"}),
+            done=True,
+        )
+    )
+
+    metrics = agent.drain_update_metrics()
+
+    assert len(metrics) == 1
+    assert metrics[0]["environment_steps"] == 1.0
+    assert metrics[0]["optimizer_update"] == 1.0
+    assert agent.drain_update_metrics() == ()
+
+
+def test_agent_checkpoint_round_trip_restores_logits_optimizer_and_counters():
+    torch.manual_seed(37)
+    agent = _agent(rollout_size=8)
+    observation = _observation(_map_state(2))
+    action = agent.choose_action(observation)
+    agent.observe(
+        Transition(
+            state=observation,
+            action=action,
+            reward=1.0,
+            next_state=_observation({"state_type": "game_over"}),
+            done=True,
+        )
+    )
+    candidates = agent.action_provider.require_candidates(observation.raw_state)
+    decision = agent.tokenizer.tokenize_decision(observation, candidates)
+    with torch.no_grad():
+        expected = agent.game_encoder.policy_value(decision).logits.clone()
+    with pytest.raises(RuntimeError, match="undrained update metrics"):
+        agent.checkpoint_state()
+    agent.drain_update_metrics()
+    checkpoint = agent.checkpoint_state()
+
+    restored = _agent(rollout_size=8)
+    restored.load_checkpoint_state(checkpoint)
+    with torch.no_grad():
+        actual = restored.game_encoder.policy_value(decision).logits
+
+    assert torch.equal(actual, expected)
+    assert restored.environment_steps == 1
+    assert restored.optimizer_updates == 1
+    assert restored.optimizer.state
+
+
+def test_checkpoint_requires_clean_boundary_and_abort_discards_partial_work():
+    torch.manual_seed(38)
+    agent = _agent(rollout_size=20)
+    observation = _observation(_map_state(1))
+    action = agent.choose_action(observation)
+
+    with pytest.raises(RuntimeError, match="unobserved action"):
+        agent.checkpoint_state()
+
+    agent.observe(
+        Transition(
+            state=observation,
+            action=action,
+            reward=0.0,
+            next_state=_observation(_map_state(1)),
+            done=False,
+        )
+    )
+    with pytest.raises(RuntimeError, match="non-empty rollout"):
+        agent.checkpoint_state()
+
+    agent.abort_episode()
+
+    assert agent._pending is None
+    assert not agent._rollout
+    assert agent.checkpoint_state()["environment_steps"] == 1
 
 
 def test_rollout_keeps_cpu_tokens_next_state_and_original_candidates():

@@ -5,6 +5,7 @@ Install the development environment and run the contract tests:
 ```bash
 uv sync
 uv run pytest
+uv run ruff check .
 ```
 
 During the environment-first rebuild:
@@ -13,3 +14,4 @@ During the environment-first rebuild:
 2. Represent commands with `sts2rl.actions.GameAction`.
 3. Keep `GameEnv` independent from encoders, rewards, and agents.
 4. Add contract tests before introducing a new upper layer.
+5. Keep training artifacts under a dedicated run directory; never commit them.

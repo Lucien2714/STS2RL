@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
 
 import torch
@@ -86,6 +87,9 @@ class CandidatePPOAgent(Agent):
         self._pending: _PendingDecision | None = None
         self._rollout: list[_RolloutStep] = []
         self.last_update: dict[str, float] = {}
+        self.environment_steps = 0
+        self.optimizer_updates = 0
+        self._completed_update_metrics: list[dict[str, float]] = []
 
     def reset(self, initial_state: GameObservation) -> None:
         del initial_state
@@ -130,6 +134,7 @@ class CandidatePPOAgent(Agent):
         if chosen_action.to_dict() != transition.action.to_dict():
             raise ValueError("observed action does not match the sampled PPO action")
 
+        self.environment_steps += 1
         self._rollout.append(
             _RolloutStep(
                 decision=self._pending.decision,
@@ -146,9 +151,7 @@ class CandidatePPOAgent(Agent):
         if len(self._rollout) >= self.config.rollout_size or transition.done:
             self.update()
 
-    def finish_episode(
-        self, final_state: GameObservation, truncated: bool
-    ) -> None:
+    def finish_episode(self, final_state: GameObservation, truncated: bool) -> None:
         del final_state, truncated
         if self._pending is not None:
             raise RuntimeError("cannot finish an episode with an unobserved action")
@@ -165,6 +168,47 @@ class CandidatePPOAgent(Agent):
     def eval(self) -> None:
         """Use deterministic candidate selection without collecting rollouts."""
         self.train(False)
+
+    def checkpoint_state(self) -> dict[str, object]:
+        """Return model, optimizer, and lifetime counters at a clean boundary."""
+        self._require_clean_checkpoint_boundary("save")
+        return {
+            "encoder": self.game_encoder.state_dict(),
+            "optimizer": self.optimizer.state_dict(),
+            "environment_steps": self.environment_steps,
+            "optimizer_updates": self.optimizer_updates,
+        }
+
+    def load_checkpoint_state(self, state: Mapping[str, object]) -> None:
+        """Restore model, optimizer, and counters into an unused agent."""
+        self._require_clean_checkpoint_boundary("load")
+        encoder_state = state.get("encoder")
+        optimizer_state = state.get("optimizer")
+        if not isinstance(encoder_state, Mapping):
+            raise ValueError("checkpoint agent encoder must be a mapping")
+        if not isinstance(optimizer_state, Mapping):
+            raise ValueError("checkpoint agent optimizer must be a mapping")
+        environment_steps = self._checkpoint_counter(state, "environment_steps")
+        optimizer_updates = self._checkpoint_counter(state, "optimizer_updates")
+
+        self.game_encoder.load_state_dict(dict(encoder_state))
+        self.optimizer.load_state_dict(dict(optimizer_state))
+        self._move_optimizer_state_to_device()
+        self.environment_steps = environment_steps
+        self.optimizer_updates = optimizer_updates
+        self.last_update = {}
+        self._completed_update_metrics.clear()
+
+    def drain_update_metrics(self) -> tuple[dict[str, float], ...]:
+        """Return completed PPO update metrics once, in completion order."""
+        metrics = tuple(dict(item) for item in self._completed_update_metrics)
+        self._completed_update_metrics.clear()
+        return metrics
+
+    def abort_episode(self) -> None:
+        """Discard an incomplete action and rollout without undoing prior updates."""
+        self._pending = None
+        self._rollout.clear()
 
     def update(self) -> dict[str, float]:
         """Run PPO updates over the current variable-length rollout."""
@@ -183,9 +227,7 @@ class CandidatePPOAgent(Agent):
             value_losses: list[Tensor] = []
             entropies: list[Tensor] = []
             for index, step in enumerate(self._rollout):
-                output = self.game_encoder.policy_value(
-                    step.decision.to(self.device)
-                )
+                output = self.game_encoder.policy_value(step.decision.to(self.device))
                 distribution = Categorical(logits=output.logits)
                 action_index = torch.tensor(step.action_index, device=self.device)
                 new_log_probability = distribution.log_prob(action_index)
@@ -229,8 +271,12 @@ class CandidatePPOAgent(Agent):
                 "rollout_steps": float(len(self._rollout)),
             }
 
+        self.optimizer_updates += 1
+        metrics["environment_steps"] = float(self.environment_steps)
+        metrics["optimizer_update"] = float(self.optimizer_updates)
         self._rollout.clear()
         self.last_update = metrics
+        self._completed_update_metrics.append(dict(metrics))
         return metrics
 
     def _advantages_and_returns(self) -> tuple[Tensor, Tensor]:
@@ -259,3 +305,30 @@ class CandidatePPOAgent(Agent):
                 advantages[index] = gae
                 next_value = values[index]
         return advantages, advantages + values
+
+    def _require_clean_checkpoint_boundary(self, operation: str) -> None:
+        if self._pending is not None:
+            raise RuntimeError(
+                f"cannot {operation} a checkpoint with an unobserved action"
+            )
+        if self._rollout:
+            raise RuntimeError(
+                f"cannot {operation} a checkpoint with a non-empty rollout"
+            )
+        if self._completed_update_metrics:
+            raise RuntimeError(
+                f"cannot {operation} a checkpoint with undrained update metrics"
+            )
+
+    @staticmethod
+    def _checkpoint_counter(state: Mapping[str, object], name: str) -> int:
+        value = state.get(name)
+        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+            raise ValueError(f"checkpoint agent {name} must be a non-negative integer")
+        return value
+
+    def _move_optimizer_state_to_device(self) -> None:
+        for optimizer_state in self.optimizer.state.values():
+            for key, value in optimizer_state.items():
+                if isinstance(value, Tensor):
+                    optimizer_state[key] = value.to(self.device)

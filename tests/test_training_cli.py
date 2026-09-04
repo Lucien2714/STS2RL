@@ -1,0 +1,127 @@
+"""Training CLI parsing and resume compatibility tests."""
+
+from __future__ import annotations
+
+import argparse
+from pathlib import Path
+from types import SimpleNamespace
+
+import pytest
+
+from sts2rl.training import TrainingConfig, TrainingPlan
+from sts2rl.training import cli
+
+
+def test_help_exits_without_starting_training(monkeypatch: pytest.MonkeyPatch):
+    called = False
+
+    def fail_if_called(args: argparse.Namespace) -> int:
+        nonlocal called
+        called = True
+        return 0
+
+    monkeypatch.setattr(cli, "run_training", fail_if_called)
+
+    with pytest.raises(SystemExit) as raised:
+        cli.main(["--help"])
+
+    assert raised.value.code == 0
+    assert not called
+
+
+def test_new_plan_maps_cli_options_and_can_disable_tensorboard(tmp_path: Path):
+    args = cli.create_parser().parse_args(
+        [
+            "--run-dir",
+            str(tmp_path / "run"),
+            "--total-episodes",
+            "12",
+            "--checkpoint-every",
+            "3",
+            "--hidden-dim",
+            "32",
+            "--entity-heads",
+            "4",
+            "--gamma",
+            "0.9",
+            "--no-tensorboard",
+        ]
+    )
+
+    plan = cli._new_plan(args)
+
+    assert plan.training.total_episodes == 12
+    assert plan.training.checkpoint_every == 3
+    assert not plan.training.tensorboard_enabled
+    assert plan.encoder.hidden_dim == 32
+    assert plan.ppo.gamma == 0.9
+
+
+def test_resume_uses_checkpoint_plan_and_allows_runtime_overrides(tmp_path: Path):
+    saved = TrainingPlan(
+        training=TrainingConfig(
+            total_episodes=10,
+            checkpoint_every=2,
+            run_dir=tmp_path / "run",
+        )
+    )
+    args = cli.create_parser().parse_args(
+        [
+            "--run-dir",
+            str(tmp_path / "run"),
+            "--resume",
+            "latest",
+            "--total-episodes",
+            "25",
+            "--checkpoint-every",
+            "5",
+            "--timeout",
+            "40",
+        ]
+    )
+
+    resumed = cli._resumed_plan(args, SimpleNamespace(plan=saved))  # type: ignore[arg-type]
+
+    assert resumed.training.total_episodes == 25
+    assert resumed.training.checkpoint_every == 5
+    assert resumed.training.timeout == 40
+    assert resumed.encoder == saved.encoder
+    assert resumed.ppo == saved.ppo
+
+
+def test_resume_rejects_model_defining_override(tmp_path: Path):
+    saved = TrainingPlan(training=TrainingConfig(run_dir=tmp_path / "run"))
+    args = cli.create_parser().parse_args(
+        [
+            "--run-dir",
+            str(tmp_path / "run"),
+            "--resume",
+            "latest",
+            "--gamma",
+            "0.5",
+        ]
+    )
+
+    with pytest.raises(ValueError, match="--gamma cannot change"):
+        cli._resumed_plan(args, SimpleNamespace(plan=saved))  # type: ignore[arg-type]
+
+
+def test_main_returns_training_status(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
+    monkeypatch.setattr(cli, "run_training", lambda args: 7)
+
+    result = cli.main(["--run-dir", str(tmp_path / "run")])
+
+    assert result == 7
+
+
+def test_main_maps_keyboard_interrupt_to_exit_130(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+):
+    def interrupt(args: argparse.Namespace) -> int:
+        del args
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(cli, "run_training", interrupt)
+
+    assert cli.main(["--run-dir", str(tmp_path / "run")]) == 130

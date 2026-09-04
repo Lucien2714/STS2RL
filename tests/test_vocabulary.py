@@ -2,9 +2,16 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 import json
+from types import MappingProxyType
 
-from sts2rl.encoder import GameVocabulary, PAD_INDEX, UNKNOWN_INDEX
+from sts2rl.encoder import (
+    GameVocabulary,
+    PAD_INDEX,
+    UNKNOWN_INDEX,
+    TokenVocabulary,
+)
 
 
 def test_bundled_vocabulary_reserves_special_indices_and_normalizes_ids():
@@ -76,8 +83,7 @@ def test_event_options_include_top_level_and_page_options(tmp_path):
     assert len(vocabulary.event_options) == 4
     assert vocabulary.event_option_index(None, "Leave") == PAD_INDEX
     assert (
-        vocabulary.event_option_index("TEST_EVENT", "Unknown option")
-        == UNKNOWN_INDEX
+        vocabulary.event_option_index("TEST_EVENT", "Unknown option") == UNKNOWN_INDEX
     )
 
 
@@ -104,3 +110,17 @@ def test_bundled_display_names_resolve_to_their_canonical_ids():
         "orbs", "LIGHTNING_ORB"
     )
     assert vocabulary.lookup("cards", "Strike") == UNKNOWN_INDEX
+
+
+def test_vocabulary_fingerprint_is_deterministic_and_content_sensitive():
+    first = GameVocabulary.from_bundled_data()
+    second = GameVocabulary.from_bundled_data()
+    changed_tables = dict(first.tables)
+    changed_tables["cards"] = TokenVocabulary.from_tokens(
+        (*first.table("cards").tokens[2:], "FINGERPRINT_ONLY_CARD")
+    )
+    changed = replace(first, tables=MappingProxyType(changed_tables))
+
+    assert first.fingerprint() == second.fingerprint()
+    assert len(first.fingerprint()) == 64
+    assert changed.fingerprint() != first.fingerprint()

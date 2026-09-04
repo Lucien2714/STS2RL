@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import hashlib
 import json
 from pathlib import Path
 from types import MappingProxyType
@@ -38,13 +39,10 @@ class TokenVocabulary:
             if key and key not in {PAD_TOKEN, UNKNOWN_TOKEN}:
                 canonical_by_key.setdefault(key, token)
 
-        ordered = tuple(
-            canonical_by_key[key] for key in sorted(canonical_by_key)
-        )
+        ordered = tuple(canonical_by_key[key] for key in sorted(canonical_by_key))
         indexed_tokens = (PAD_TOKEN, UNKNOWN_TOKEN, *ordered)
         indices = {
-            normalize_token(token): index
-            for index, token in enumerate(indexed_tokens)
+            normalize_token(token): index for index, token in enumerate(indexed_tokens)
         }
         return cls(indexed_tokens, MappingProxyType(indices))
 
@@ -83,9 +81,7 @@ class EventOptionVocabulary:
             if all(key):
                 canonical_by_key.setdefault(key, (event_id, title))
 
-        ordered = tuple(
-            canonical_by_key[key] for key in sorted(canonical_by_key)
-        )
+        ordered = tuple(canonical_by_key[key] for key in sorted(canonical_by_key))
         indexed_pairs = (
             (PAD_TOKEN, PAD_TOKEN),
             (UNKNOWN_TOKEN, UNKNOWN_TOKEN),
@@ -312,6 +308,8 @@ class GameVocabulary:
         compare=False,
     )
 
+    FINGERPRINT_VERSION: ClassVar[int] = 1
+
     @classmethod
     def from_bundled_data(
         cls,
@@ -398,6 +396,35 @@ class GameVocabulary:
     ) -> int:
         """Return a stable index for a visible event option."""
         return self.event_options.lookup(event_id, title)
+
+    def fingerprint(self) -> str:
+        """Return a stable digest of every model-visible categorical index.
+
+        Checkpoints use the digest to reject a vocabulary whose embedding rows
+        would have different meanings, even when all table sizes still match.
+        """
+        payload = {
+            "version": self.FINGERPRINT_VERSION,
+            "tables": {
+                name: [normalize_token(token) for token in table.tokens]
+                for name, table in sorted(self.tables.items())
+            },
+            "event_options": [
+                [normalize_token(event_id), normalize_token(title)]
+                for event_id, title in self.event_options.pairs
+            ],
+            "aliases": {
+                name: sorted((alias, index) for alias, index in aliases.items())
+                for name, aliases in sorted(self.aliases.items())
+            },
+        }
+        serialized = json.dumps(
+            payload,
+            ensure_ascii=True,
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode("utf-8")
+        return hashlib.sha256(serialized).hexdigest()
 
     @staticmethod
     def _event_option_pairs(
