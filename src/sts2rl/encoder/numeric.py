@@ -18,10 +18,6 @@ class NumericFeature:
     present: bool
 
     def __post_init__(self) -> None:
-        if not isinstance(self.present, bool):
-            raise TypeError("numeric feature present flag must be a boolean")
-        if not isinstance(self.value, int | float) or isinstance(self.value, bool):
-            raise TypeError("numeric feature value must be a number")
         normalized_value = float(self.value)
         if not math.isfinite(normalized_value):
             raise ValueError("numeric feature value must be finite")

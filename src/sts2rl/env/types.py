@@ -16,14 +16,6 @@ class GameObservation:
     raw_state: RawState
     player_detail: RawState | None = None
 
-    def __post_init__(self) -> None:
-        if not isinstance(self.raw_state, dict):
-            raise TypeError("raw_state must be a dictionary")
-        if self.player_detail is not None and not isinstance(
-            self.player_detail, dict
-        ):
-            raise TypeError("player_detail must be a dictionary or None")
-
 
 @dataclass(frozen=True)
 class EnvStep:

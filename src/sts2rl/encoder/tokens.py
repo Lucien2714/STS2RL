@@ -49,8 +49,6 @@ def _require_tensor(
     dtype: torch.dtype,
 ) -> None:
     """Validate the common rank and dtype parts of the token contract."""
-    if not isinstance(value, Tensor):
-        raise TypeError(f"{name} must be a torch.Tensor")
     if value.ndim != dimensions:
         raise ValueError(f"{name} must have {dimensions} dimensions")
     if value.dtype != dtype:
@@ -83,7 +81,7 @@ def _require_matching_numeric(
 
 def _validate_kind(kind: str) -> None:
     """Keep internal routing keys canonical and safe to compare directly."""
-    if not isinstance(kind, str) or not kind:
+    if not kind:
         raise ValueError("entity kind must be a non-empty string")
     if kind != kind.strip() or kind != kind.casefold():
         raise ValueError("entity kind must be a normalized lowercase string")
@@ -114,8 +112,6 @@ class EntityReference:
 
     def __post_init__(self) -> None:
         _validate_kind(self.kind)
-        if isinstance(self.index, bool) or not isinstance(self.index, int):
-            raise TypeError("entity reference index must be an integer")
         if self.index < 0:
             raise ValueError("entity reference index must not be negative")
 
@@ -243,17 +239,6 @@ class TokenizedEntityBatch:
             raise ValueError(f"{self.kind} owners must contain one value per row")
         if len(children) != entity_count:
             raise ValueError(f"{self.kind} children must contain one tuple per row")
-        if not all(
-            owner is None or isinstance(owner, EntityReference)
-            for owner in owners
-        ):
-            raise TypeError("entity owners must be EntityReference values or None")
-        if not all(
-            isinstance(child, EntityReference)
-            for row in children
-            for child in row
-        ):
-            raise TypeError("entity children must contain EntityReference values")
         object.__setattr__(self, "owners", owners)
         object.__setattr__(self, "children", children)
 
@@ -408,10 +393,6 @@ class TokenizedMap:
                 raise ValueError(f"map {name} contains an out-of-range node index")
 
         if self.current_index is not None:
-            if isinstance(self.current_index, bool) or not isinstance(
-                self.current_index, int
-            ):
-                raise TypeError("map current_index must be an integer or None")
             if not 0 <= self.current_index < node_count:
                 raise ValueError("map current_index is out of range")
 
@@ -488,14 +469,7 @@ class TokenizedState:
         )
         entities = dict(self.entities)
         object.__setattr__(self, "entities", MappingProxyType(entities))
-        if self.game_map is not None and not isinstance(self.game_map, TokenizedMap):
-            raise TypeError("state game_map must be a TokenizedMap or None")
         for kind, batch in self.entities.items():
-            _validate_kind(kind)
-            if not isinstance(batch, TokenizedEntityBatch):
-                raise TypeError(
-                    "state entities must contain TokenizedEntityBatch values"
-                )
             if kind != batch.kind:
                 raise ValueError("entity mapping key must match batch kind")
             if kind == "map_node":
@@ -574,11 +548,6 @@ class TokenizedAction:
             self.numeric_mask,
             dimensions=1,
         )
-        for name, reference in (("source", self.source), ("target", self.target)):
-            if reference is not None and not isinstance(reference, EntityReference):
-                raise TypeError(
-                    f"action {name} must be an EntityReference or None"
-                )
 
     def to(self, device: Device) -> TokenizedAction:
         """Return a copy whose tensors reside on the requested device."""
@@ -610,14 +579,10 @@ class TokenizedDecision:
     actions: tuple[TokenizedAction, ...]
 
     def __post_init__(self) -> None:
-        if not isinstance(self.state, TokenizedState):
-            raise TypeError("decision state must be a TokenizedState")
         object.__setattr__(self, "actions", tuple(self.actions))
         if not self.actions:
             raise ValueError("a tokenized decision requires at least one action")
         for action in self.actions:
-            if not isinstance(action, TokenizedAction):
-                raise TypeError("decision actions must be TokenizedAction values")
             if action.source is not None:
                 self.state.validate_reference(action.source)
             if action.target is not None:

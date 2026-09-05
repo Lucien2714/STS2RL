@@ -7,6 +7,7 @@ from sts2rl.agents import (
     Agent,
     EpisodeRunner,
     LegalActionProvider,
+    NoLegalActionsError,
     ObservationError,
     Transition,
 )
@@ -111,6 +112,59 @@ def test_runner_refreshes_transitional_state_before_asking_again():
 
     assert result.terminated is True
     assert env.detail_calls == 2
+
+
+@pytest.mark.parametrize("max_refreshes", [0, 1, 3])
+def test_runner_stops_when_state_refreshes_are_exhausted(max_refreshes):
+    class StuckEnv(FakeEnv):
+        def __init__(self):
+            super().__init__()
+            self.state = {"state_type": "treasure", "treasure": {}}
+            self.refreshes = 0
+
+        def get_state(self):
+            self.refreshes += 1
+            return self.state
+
+    env = StuckEnv()
+    agent = RecordingAgent()
+    runner = EpisodeRunner(env, agent, max_state_refreshes=max_refreshes)
+
+    with pytest.raises(NoLegalActionsError, match="treasure"):
+        runner.run()
+
+    assert env.refreshes == max_refreshes
+    assert env.detail_calls == max_refreshes + 1
+    assert agent.transitions == []
+
+
+@pytest.mark.parametrize("max_refreshes", [0, 1, 3])
+def test_runner_can_choose_on_the_last_allowed_attempt(max_refreshes):
+    class DelayedEnv(FakeEnv):
+        def __init__(self):
+            super().__init__()
+            self.ready_state = self.state
+            self.refreshes = 0
+            if max_refreshes:
+                self.state = {"state_type": "treasure", "treasure": {}}
+
+        def get_state(self):
+            self.refreshes += 1
+            if self.refreshes == max_refreshes:
+                self.state = self.ready_state
+            return self.state
+
+    env = DelayedEnv()
+    result = EpisodeRunner(
+        env,
+        RecordingAgent(),
+        reward_model=FixedReward(),
+        max_state_refreshes=max_refreshes,
+    ).run()
+
+    assert result.terminated is True
+    assert result.steps == 1
+    assert env.refreshes == max_refreshes
 
 
 def test_runner_fetches_detail_for_every_nonterminal_next_state():

@@ -369,10 +369,7 @@ class GameVocabulary:
     def table(self, name: str) -> TokenVocabulary:
         """Return a data or fixed-category table, accepting data aliases."""
         normalized_name = normalize_data_type(name)
-        try:
-            return self.tables[normalized_name]
-        except KeyError as exc:
-            raise KeyError(f"Unknown vocabulary table: {normalized_name}") from exc
+        return self.tables[normalized_name]
 
     def lookup(self, table_name: str, token: str | None) -> int:
         """Look up an ID or bundled display-name alias in a named table."""

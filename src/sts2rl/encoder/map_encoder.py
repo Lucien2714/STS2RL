@@ -22,16 +22,6 @@ class EncodedMap:
     node_embeddings: Tensor
     global_embedding: Tensor
 
-    def __post_init__(self) -> None:
-        if self.base_node_embeddings.ndim != 2:
-            raise ValueError("base_node_embeddings must have shape [nodes, hidden]")
-        if self.node_embeddings.shape != self.base_node_embeddings.shape:
-            raise ValueError("base and future node embeddings must have equal shape")
-        if self.global_embedding.ndim != 1:
-            raise ValueError("global_embedding must have shape [hidden]")
-        if self.global_embedding.shape[0] != self.node_embeddings.shape[1]:
-            raise ValueError("map embeddings must use one hidden dimension")
-
 
 class MapDAGEncoder(nn.Module):
     """Propagate future information from bosses toward current candidates."""
@@ -77,9 +67,6 @@ class MapDAGEncoder(nn.Module):
         """Encode a map, or skip the module entirely for non-map states."""
         if game_map is None:
             return None
-        if player_context.ndim != 1 or player_context.shape[0] != self.config.hidden_dim:
-            raise ValueError("player_context must have shape [hidden_dim]")
-
         base = self.node_type_embedding(game_map.node_categorical[:, 0])
         numeric = torch.cat(
             [game_map.node_numeric, game_map.node_numeric_mask.to(torch.float32)],
@@ -88,12 +75,13 @@ class MapDAGEncoder(nn.Module):
         base = base + self.node_numeric_projection(numeric)
 
         adjacency = self._adjacency(game_map)
-        future: list[Tensor | None] = [None] * base.shape[0]
+        # TokenizedMap already validates that parents precede their children.
+        future: dict[int, Tensor] = {}
         for node in reversed(game_map.topological_order.detach().cpu().tolist()):
             children = sorted(adjacency[node])
             if children:
                 child_values = torch.stack(
-                    [self._require_future(future[child]) for child in children]
+                    [future[child] for child in children]
                 )
                 query = self.child_query(
                     torch.cat([base[node], player_context])
@@ -112,7 +100,7 @@ class MapDAGEncoder(nn.Module):
 
         if future:
             future_nodes = torch.stack(
-                [self._require_future(value) for value in future]
+                [future[node] for node in range(base.shape[0])]
             )
         else:
             future_nodes = base
@@ -148,9 +136,3 @@ class MapDAGEncoder(nn.Module):
         for parent, child in zip(edges[0].tolist(), edges[1].tolist()):
             adjacency[parent].add(child)
         return adjacency
-
-    @staticmethod
-    def _require_future(value: Tensor | None) -> Tensor:
-        if value is None:
-            raise RuntimeError("topological order did not encode a child first")
-        return value

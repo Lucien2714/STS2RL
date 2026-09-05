@@ -117,17 +117,12 @@ class EpisodeRunner:
     def _choose_with_refresh(
         self, observation: GameObservation
     ) -> tuple[GameAction, GameObservation]:
-        last_error: NoLegalActionsError | None = None
-        for refresh_count in range(self.max_state_refreshes + 1):
+        for _ in range(self.max_state_refreshes):
             try:
                 return self.agent.choose_action(observation), observation
-            except NoLegalActionsError as exc:
-                last_error = exc
-                if refresh_count == self.max_state_refreshes:
-                    break
+            except NoLegalActionsError:
                 observation = self._observation(self.env.get_state())
-        assert last_error is not None
-        raise last_error
+        return self.agent.choose_action(observation), observation
 
     def _observation(
         self,

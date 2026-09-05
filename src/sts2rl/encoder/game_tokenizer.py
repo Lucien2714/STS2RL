@@ -261,9 +261,6 @@ class GameTokenizer:
     def _tokenize_state(
         self, observation: GameObservation
     ) -> tuple[TokenizedState, _ReferenceRegistry]:
-        if not isinstance(observation, GameObservation):
-            raise TypeError("observation must be a GameObservation")
-
         state = observation.raw_state
         detail = observation.player_detail or {}
         raw_player = _mapping(state.get("player"))
@@ -306,8 +303,6 @@ class GameTokenizer:
         action: GameAction,
         registry: _ReferenceRegistry,
     ) -> TokenizedAction:
-        if not isinstance(action, GameAction):
-            raise TypeError("candidates must contain GameAction values")
         action_type = action.action_type
         action_index = self.vocabulary.lookup("action_types", action_type)
         if action_index == UNKNOWN_INDEX:

@@ -32,16 +32,6 @@ class EncodedDecision:
     state_embedding: Tensor
     candidate_embeddings: Tensor
 
-    def __post_init__(self) -> None:
-        if self.state_embedding.ndim != 1:
-            raise ValueError("state_embedding must have shape [hidden_dim]")
-        if self.candidate_embeddings.ndim != 2:
-            raise ValueError(
-                "candidate_embeddings must have shape [candidates, hidden_dim]"
-            )
-        if self.candidate_embeddings.shape[1] != self.state_embedding.shape[0]:
-            raise ValueError("state and candidate hidden dimensions must match")
-
 
 @dataclass(frozen=True)
 class PolicyValueOutput:
@@ -50,14 +40,6 @@ class PolicyValueOutput:
     logits: Tensor
     value: Tensor
     encoded: EncodedDecision
-
-    def __post_init__(self) -> None:
-        if self.logits.ndim != 1:
-            raise ValueError("logits must have shape [candidates]")
-        if self.value.ndim != 0:
-            raise ValueError("value must be a scalar tensor")
-        if self.logits.shape[0] != self.encoded.candidate_embeddings.shape[0]:
-            raise ValueError("logits must contain one value per candidate")
 
 
 class GameEncoder(nn.Module):
@@ -105,9 +87,6 @@ class GameEncoder(nn.Module):
 
     def forward(self, decision: TokenizedDecision) -> EncodedDecision:
         """Encode one state and its complete ordered dynamic candidate set."""
-        if not isinstance(decision, TokenizedDecision):
-            raise TypeError("decision must be a TokenizedDecision")
-
         state_embedding, entities, encoded_map = self._encode_state(decision.state)
         candidates = torch.stack(
             [
@@ -153,9 +132,6 @@ class GameEncoder(nn.Module):
         entity_embeddings: Mapping[str, Tensor],
         encoded_map: EncodedMap | None,
     ) -> Tensor:
-        if not isinstance(action, TokenizedAction):
-            raise TypeError("action must be a TokenizedAction")
-
         result = self.action_type_embedding(action.action_type)
         numeric = torch.cat(
             [action.numeric, action.numeric_mask.to(torch.float32)]
@@ -195,7 +171,4 @@ class GameEncoder(nn.Module):
             if encoded_map is None:
                 raise ValueError("map-node action reference requires an encoded map")
             return encoded_map.node_embeddings[reference.index]
-        try:
-            return entity_embeddings[reference.kind][reference.index]
-        except (KeyError, IndexError) as exc:
-            raise ValueError(f"unresolved encoded action reference: {reference}") from exc
+        return entity_embeddings[reference.kind][reference.index]

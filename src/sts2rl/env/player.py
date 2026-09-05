@@ -220,16 +220,6 @@ class Player:
 
     def _parse_int(self, value: object, default: int = 0) -> int:
         """Parse an integer-like value with a safe default."""
-        if value is None:
-            return default
-        if isinstance(value, bool):
-            return int(value)
-        if isinstance(value, (dict, list, tuple, set)):
-            return default
-        if isinstance(value, str):
-            value = value.strip()
-            if not value:
-                return default
         try:
             return int(value)
         except (OverflowError, TypeError, ValueError):

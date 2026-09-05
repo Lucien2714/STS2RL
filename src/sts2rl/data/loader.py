@@ -96,12 +96,6 @@ class DataStore:
         cls.ensure_loaded()
         data_type = normalize_data_type(data_type)
 
-        if data_type not in cls.data:
-            raise KeyError(f"Unknown data type: {data_type}")
-
-        if item_id not in cls.data[data_type]:
-            raise KeyError(f"Unknown id '{item_id}' in {data_type}")
-
         return cls.data[data_type][item_id]
 
 

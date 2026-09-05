@@ -98,25 +98,13 @@ class EncodedEntities:
     entity_embeddings: Mapping[str, Tensor]
 
     def __post_init__(self) -> None:
-        if self.state_embedding.ndim != 1:
-            raise ValueError("state_embedding must have shape [hidden_dim]")
-        embeddings = dict(self.entity_embeddings)
-        hidden_dim = self.state_embedding.shape[0]
-        for kind, values in embeddings.items():
-            if values.ndim != 2 or values.shape[1] != hidden_dim:
-                raise ValueError(
-                    f"{kind} embeddings must have shape [count, hidden_dim]"
-                )
-        object.__setattr__(self, "entity_embeddings", MappingProxyType(embeddings))
+        object.__setattr__(
+            self, "entity_embeddings", MappingProxyType(dict(self.entity_embeddings))
+        )
 
     def reference(self, reference: EntityReference) -> Tensor:
         """Return the embedding addressed by a validated non-map reference."""
-        if reference.kind == "map_node":
-            raise ValueError("map-node embeddings belong to MapDAGEncoder")
-        try:
-            return self.entity_embeddings[reference.kind][reference.index]
-        except (KeyError, IndexError) as exc:
-            raise ValueError(f"unresolved encoded entity reference: {reference}") from exc
+        return self.entity_embeddings[reference.kind][reference.index]
 
 
 class EntityTransformer(nn.Module):
@@ -207,9 +195,6 @@ class EntityTransformer(nn.Module):
 
     def forward(self, state: TokenizedState) -> EncodedEntities:
         """Return contextual embeddings while preserving per-kind row addressing."""
-        if not isinstance(state, TokenizedState):
-            raise TypeError("state must be a TokenizedState")
-
         embeddings = {
             kind: self._project_entity_batch(kind, state)
             for kind in ENTITY_CATEGORICAL_FIELDS
