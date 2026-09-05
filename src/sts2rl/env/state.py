@@ -29,28 +29,27 @@ def parse_int(value: object, default: int = 0) -> int:
         return default
 
 
-def player_hp(state: dict, default: int | None = 0) -> int:
+def player_field(state: dict, field: str, default: int = 0) -> int:
+    """Return one integer player field from a raw state dictionary."""
+    player = state.get("player", {})
+    if isinstance(player, dict) and player.get(field) is not None:
+        return parse_int(player.get(field), default)
+    return default
+
+
+def player_hp(state: dict, default: int = 0) -> int:
     """Return the player's current HP from a raw state dictionary."""
-    player = state.get("player", {})
-    if isinstance(player, dict) and player.get("hp") is not None:
-        return parse_int(player.get("hp"), default or 0)
-    return default or 0
+    return player_field(state, "hp", default)
 
 
-def player_gold(state: dict, default: int | None = 0) -> int:
+def player_gold(state: dict, default: int = 0) -> int:
     """Return the player's gold from a raw state dictionary."""
-    player = state.get("player", {})
-    if isinstance(player, dict) and player.get("gold") is not None:
-        return parse_int(player.get("gold"), default or 0)
-    return default or 0
+    return player_field(state, "gold", default)
 
 
-def player_max_hp(state: dict, default: int | None = 0) -> int:
+def player_max_hp(state: dict, default: int = 0) -> int:
     """Return the player's maximum HP from a raw state dictionary."""
-    player = state.get("player", {})
-    if isinstance(player, dict) and player.get("max_hp") is not None:
-        return parse_int(player.get("max_hp"), default or 0)
-    return default or 0
+    return player_field(state, "max_hp", default)
 
 
 def enemy_key(enemy: dict, enemy_index: int) -> str:

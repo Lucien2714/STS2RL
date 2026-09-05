@@ -77,7 +77,6 @@ class EncoderConfig:
     entity_layers: int = 2
     entity_heads: int = 4
     entity_ff_dim: int = 256
-    dropout: float = 0.0
 
     def __post_init__(self) -> None:
         for name in ("hidden_dim", "entity_layers", "entity_heads", "entity_ff_dim"):
@@ -86,8 +85,6 @@ class EncoderConfig:
                 raise ValueError(f"{name} must be a positive integer")
         if self.hidden_dim % self.entity_heads:
             raise ValueError("hidden_dim must be divisible by entity_heads")
-        if self.dropout != 0.0:
-            raise ValueError("dropout must remain 0.0 for deterministic PPO ratios")
 
 
 @dataclass(frozen=True)
@@ -180,7 +177,10 @@ class EntityTransformer(nn.Module):
             d_model=config.hidden_dim,
             nhead=config.entity_heads,
             dim_feedforward=config.entity_ff_dim,
-            dropout=config.dropout,
+            # PPO compares log probabilities recorded at collection time against
+            # ones recomputed during the update; dropout would make the ratio
+            # noise rather than a policy change.
+            dropout=0.0,
             activation="gelu",
             batch_first=True,
             norm_first=True,

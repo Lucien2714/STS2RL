@@ -13,9 +13,6 @@ class ActionDispatcher:
 
     def dispatch(self, action: GameAction):
         """Execute a GameAction against the wrapped game client."""
-        if not isinstance(action, GameAction):
-            raise TypeError(f"action must be GameAction, got {type(action).__name__}")
-
         action_type = action.action_type
         params = action.params
         if action_type == "menu_select":

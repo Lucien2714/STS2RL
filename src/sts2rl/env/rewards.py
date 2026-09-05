@@ -6,10 +6,19 @@ from abc import ABC, abstractmethod
 
 from sts2rl.env.constants import (
     BATTLE_GOLD_LOSS_PENALTY,
+    BATTLE_HP_LOSS_PENALTY,
     BATTLE_LOSS_PENALTY,
     BATTLE_MAX_HP_LOSS_PENALTY,
     BATTLE_REWARD_STATE_TYPES,
     BATTLE_STATE_TYPES,
+    BATTLE_WIN_REWARD,
+    ENEMY_DAMAGE_REWARD,
+    ENEMY_KILL_REWARD,
+    FLOOR_PROGRESS_REWARD,
+    GAME_OVER_PENALTY,
+    POTION_USE_PENALTY,
+    RUN_HP_CHANGE_REWARD,
+    UNSPENT_ENERGY_PENALTY,
 )
 from sts2rl.env.state import (
     battle_has_alive_enemy,
@@ -54,9 +63,7 @@ class BattleProgressReward(RewardModel):
 
     def reset(self, raw_state: dict | None = None) -> None:
         """Clear battle bookkeeping and seed HP tracking from an optional state."""
-        self._last_player_hp = (
-            player_hp(raw_state, None) if raw_state is not None else None
-        )
+        self._last_player_hp = player_hp(raw_state) if raw_state is not None else None
         self._battle_start_hp = None
         self._battle_start_gold = None
         self._battle_start_max_hp = None
@@ -89,11 +96,11 @@ class BattleProgressReward(RewardModel):
         next_floor = next_state.get("run", {}).get("floor", 0)
 
         reward = 0.0
-        reward += float(next_floor - prev_floor) * 10.0
-        reward += float(next_hp - prev_hp) * 0.2
+        reward += float(next_floor - prev_floor) * FLOOR_PROGRESS_REWARD
+        reward += float(next_hp - prev_hp) * RUN_HP_CHANGE_REWARD
 
         if next_state.get("state_type") == "game_over":
-            reward -= 10.0
+            reward -= GAME_OVER_PENALTY
 
         return reward, {
             "type": "default",
@@ -158,7 +165,7 @@ class BattleProgressReward(RewardModel):
         total_max_hp_lost = max(0, battle_start_max_hp - next_max_hp)
 
         potion_used = bool(action and action.get("type") == "use_potion")
-        potion_penalty = -5.0 if potion_used else 0.0
+        potion_penalty = -POTION_USE_PENALTY if potion_used else 0.0
         prev_state_type = prev_state.get("state_type")
         next_state_type = next_state.get("state_type")
         battle_result = self._battle_result(prev_state, next_state)
@@ -167,12 +174,12 @@ class BattleProgressReward(RewardModel):
             next_state,
             count_missing_as_dead=battle_result != "lost",
         )
-        enemy_damage_reward = float(enemy_hp_lost)
-        enemy_kill_reward = float(enemies_killed) * 10.0
+        enemy_damage_reward = float(enemy_hp_lost) * ENEMY_DAMAGE_REWARD
+        enemy_kill_reward = float(enemies_killed) * ENEMY_KILL_REWARD
         end_turn_energy_penalty = self._end_turn_energy_penalty(prev_state, action)
-        win_reward = 200.0 if battle_result == "won" else 0.0
+        win_reward = BATTLE_WIN_REWARD if battle_result == "won" else 0.0
         loss_penalty = -BATTLE_LOSS_PENALTY if battle_result == "lost" else 0.0
-        hp_penalty = -float(step_hp_lost)
+        hp_penalty = -float(step_hp_lost) * BATTLE_HP_LOSS_PENALTY
         gold_penalty = (
             -float(total_gold_lost) * BATTLE_GOLD_LOSS_PENALTY
             if battle_result is not None
@@ -283,7 +290,7 @@ class BattleProgressReward(RewardModel):
             return 0.0
 
         energy = self._parse_int(prev_state.get("player", {}).get("energy", 0))
-        return -5 * float(max(0, energy))
+        return -UNSPENT_ENERGY_PENALTY * float(max(0, energy))
 
     def _parse_int(self, value: object, default: int = 0) -> int:
         """Parse an integer-like value with a safe default."""

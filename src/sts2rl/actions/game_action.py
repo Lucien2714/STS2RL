@@ -27,27 +27,12 @@ class GameAction:
         del params["type"]
         return cls(action_type, **params)
 
-    def get_type(self) -> str:
-        """Return the action type."""
-        return self.action_type
-
-    def get_params(self) -> dict[str, Any]:
-        """Return a copy of the action parameters."""
-        return dict(self.params)
-
     def to_dict(self) -> dict[str, Any]:
         """Convert this action to the dictionary shape used in logs and telemetry."""
         return {"type": self.action_type, **self.params}
 
     def __repr__(self) -> str:
         return f"GameAction(action_type={self.action_type!r}, params={self.params!r})"
-
-
-class SelectCardAction(GameAction):
-    """Select one card from a non-combat card-selection prompt."""
-
-    def __init__(self, card_index: int) -> None:
-        super().__init__("select_card", index=card_index)
 
 
 class MenuSelectAction(GameAction):

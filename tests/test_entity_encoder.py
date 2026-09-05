@@ -55,11 +55,11 @@ def test_default_config_builds_two_zero_dropout_layers(
     assert model.transformer.layers[0].linear1.out_features == 256
 
 
-def test_encoder_config_rejects_invalid_heads_and_stochastic_dropout():
+def test_encoder_config_rejects_invalid_heads_and_dimensions():
     with pytest.raises(ValueError, match="divisible"):
         EncoderConfig(hidden_dim=10, entity_heads=3)
-    with pytest.raises(ValueError, match="dropout"):
-        EncoderConfig(dropout=0.1)
+    with pytest.raises(ValueError, match="positive integer"):
+        EncoderConfig(entity_layers=0)
 
 
 def test_empty_entity_collections_still_encode_the_state_token(

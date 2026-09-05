@@ -50,9 +50,9 @@ class LegalActionProvider:
             actions = self._relic_select_actions(state)
         elif state_type == "crystal_sphere":
             actions = self._crystal_sphere_actions(state)
-        elif state_type in {"menu", "game_over", "unknown", "overlay"}:
-            actions = []
         else:
+            # menu, game_over, overlay, and anything unrecognized: the runner
+            # re-reads state and eventually truncates rather than guessing.
             actions = []
 
         return tuple(self._deduplicate(actions))

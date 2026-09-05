@@ -1,7 +1,7 @@
 import pytest
 
 from sts2rl.actions.dispatcher import ActionDispatcher
-from sts2rl.actions.game_action import GameAction, MenuSelectAction, SelectCardAction
+from sts2rl.actions.game_action import GameAction, MenuSelectAction
 
 
 class FakeClient:
@@ -27,7 +27,7 @@ def test_game_action_round_trips_legacy_dictionary():
     )
 
     assert action.action_type == "play_card"
-    assert action.get_params() == {"card_index": 2, "target": "ENEMY_0"}
+    assert action.params == {"card_index": 2, "target": "ENEMY_0"}
     assert action.to_dict() == {
         "type": "play_card",
         "card_index": 2,
@@ -51,7 +51,7 @@ def test_select_card_action_uses_api_index_parameter():
     client = FakeClient()
     dispatcher = ActionDispatcher(client)
 
-    dispatcher.dispatch(SelectCardAction(3))
+    dispatcher.dispatch(GameAction("select_card", index=3))
 
     assert client.calls == [("select_card", 3)]
 
@@ -65,9 +65,9 @@ def test_menu_select_action_routes_option_and_seed():
     assert client.calls == [("menu_select", "custom", "ABC")]
 
 
-def test_dispatcher_rejects_legacy_dictionary_directly():
-    with pytest.raises(TypeError):
-        ActionDispatcher(FakeClient()).dispatch({"type": "play_card"})
+def test_dispatcher_rejects_unknown_action_type():
+    with pytest.raises(ValueError, match="Unknown action type"):
+        ActionDispatcher(FakeClient()).dispatch(GameAction("not_an_action"))
 
 
 @pytest.mark.parametrize(
