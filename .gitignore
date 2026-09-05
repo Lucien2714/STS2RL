@@ -13,3 +13,5 @@ logs/
 .uv-cache/
 .ruff_cache/
 .env/
+
+bench_tmp.py

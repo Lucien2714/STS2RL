@@ -226,10 +226,6 @@ class TokenizedEntityBatch:
             raise ValueError(
                 f"{self.kind} active_mask must contain one value per row"
             )
-        if self.active.device.type != "meta" and bool(
-            torch.any(self.active & ~self.active_mask).item()
-        ):
-            raise ValueError("an unknown active state must use value false")
 
         owners = tuple(self.owners) or (None,) * entity_count
         children = tuple(tuple(row) for row in self.children) or (
@@ -267,9 +263,9 @@ class TokenizedMap:
 
     The STS map is a directed acyclic graph (DAG).  Every column in
     ``edge_index`` is ``[parent, child]``: traversal proceeds from the current
-    floor toward a boss.  ``topological_order`` therefore lists parents before
-    children.  The map encoder will iterate over that order in reverse so a
-    parent can aggregate already-computed representations of all its children.
+    floor toward a boss.  The map encoder groups nodes by their distance to a
+    sink and walks those levels so a parent always aggregates already-computed
+    representations of all its children.
 
     Attributes:
         node_categorical: Long tensor ``[node_count, categorical_feature_count]``
@@ -279,8 +275,6 @@ class TokenizedMap:
         node_numeric_mask: Bool tensor matching ``node_numeric``.
         edge_index: Long tensor ``[2, edge_count]``.  Row 0 contains parents;
             row 1 contains their corresponding children.
-        topological_order: Long tensor ``[node_count]`` containing every node
-            index exactly once, with each parent before its children.
         reachable_mask: Bool tensor ``[node_count]``.  True means the node is
             still reachable from the current decision; global map pooling must
             ignore false entries.
@@ -302,7 +296,6 @@ class TokenizedMap:
     node_numeric: Tensor
     node_numeric_mask: Tensor
     edge_index: Tensor
-    topological_order: Tensor
     reachable_mask: Tensor
     candidate_indices: Tensor
     boss_indices: Tensor
@@ -326,12 +319,6 @@ class TokenizedMap:
             "map edge_index",
             self.edge_index,
             dimensions=2,
-            dtype=torch.long,
-        )
-        _require_tensor(
-            "map topological_order",
-            self.topological_order,
-            dimensions=1,
             dtype=torch.long,
         )
         _require_tensor(
@@ -365,8 +352,6 @@ class TokenizedMap:
             raise ValueError("all map node tensors must have the same row count")
         if self.edge_index.shape[0] != 2:
             raise ValueError("map edge_index must have shape [2, edge_count]")
-        if self.topological_order.shape[0] != node_count:
-            raise ValueError("map topological_order must contain every node")
         if self.reachable_mask.shape[0] != node_count:
             raise ValueError("map reachable_mask must contain one value per node")
         if self.candidate_type_counts.shape[0] != self.candidate_indices.shape[0]:
@@ -375,7 +360,6 @@ class TokenizedMap:
             )
 
         self._validate_indices(node_count)
-        self._validate_topological_order(node_count)
 
     def _validate_indices(self, node_count: int) -> None:
         """Ensure every dense graph reference addresses an existing node row."""
@@ -396,22 +380,6 @@ class TokenizedMap:
             if not 0 <= self.current_index < node_count:
                 raise ValueError("map current_index is out of range")
 
-    def _validate_topological_order(self, node_count: int) -> None:
-        """Verify the supplied order is a permutation consistent with edges."""
-        order = self.topological_order.detach().cpu().tolist()
-        if len(set(order)) != node_count or set(order) != set(range(node_count)):
-            raise ValueError("map topological_order must be a node permutation")
-
-        positions = {node: position for position, node in enumerate(order)}
-        edges = self.edge_index.detach().cpu()
-        # edge_index is parent -> child, so equality is invalid even for a
-        # self-loop and a parent must always occur earlier in the order.
-        for parent, child in zip(edges[0].tolist(), edges[1].tolist()):
-            if positions[parent] >= positions[child]:
-                raise ValueError(
-                    "map topological_order must place parents before children"
-                )
-
     def to(self, device: Device) -> TokenizedMap:
         """Return a copy whose tensors reside on the requested device."""
         return TokenizedMap(
@@ -419,7 +387,6 @@ class TokenizedMap:
             node_numeric=self.node_numeric.to(device),
             node_numeric_mask=self.node_numeric_mask.to(device),
             edge_index=self.edge_index.to(device),
-            topological_order=self.topological_order.to(device),
             reachable_mask=self.reachable_mask.to(device),
             candidate_indices=self.candidate_indices.to(device),
             boss_indices=self.boss_indices.to(device),

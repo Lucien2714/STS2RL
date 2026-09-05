@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import math
-from typing import Mapping
+from typing import Mapping, Sequence
 
 import torch
 from torch import Tensor, nn
@@ -88,11 +88,10 @@ class GameEncoder(nn.Module):
     def forward(self, decision: TokenizedDecision) -> EncodedDecision:
         """Encode one state and its complete ordered dynamic candidate set."""
         state_embedding, entities, encoded_map = self._encode_state(decision.state)
-        candidates = torch.stack(
-            [
-                self._encode_action(action, entities.entity_embeddings, encoded_map)
-                for action in decision.actions
-            ]
+        candidates = self._encode_actions(
+            decision.actions,
+            entities.entity_embeddings,
+            encoded_map,
         )
         return EncodedDecision(state_embedding, candidates)
 
@@ -126,49 +125,86 @@ class GameEncoder(nn.Module):
         )
         return state_embedding, entities, encoded_map
 
-    def _encode_action(
+    def _encode_actions(
         self,
-        action: TokenizedAction,
+        actions: Sequence[TokenizedAction],
         entity_embeddings: Mapping[str, Tensor],
         encoded_map: EncodedMap | None,
     ) -> Tensor:
-        result = self.action_type_embedding(action.action_type)
-        numeric = torch.cat(
-            [action.numeric, action.numeric_mask.to(torch.float32)]
+        """Encode every candidate of one decision as a single [K, hidden] batch."""
+        result = self.action_type_embedding(
+            torch.stack([action.action_type for action in actions])
+        )
+        numeric = torch.stack(
+            [
+                torch.cat([action.numeric, action.numeric_mask.to(torch.float32)])
+                for action in actions
+            ]
         )
         result = result + self.action_numeric_projection(numeric)
-        source = self._reference_embedding(
-            action.source,
+        result = result + self._role_embeddings(
+            [action.source for action in actions],
             entity_embeddings,
             encoded_map,
+            self.source_projection,
+            self.no_source_embedding,
         )
-        target = self._reference_embedding(
-            action.target,
+        result = result + self._role_embeddings(
+            [action.target for action in actions],
             entity_embeddings,
             encoded_map,
-        )
-        result = result + (
-            self.source_projection(source)
-            if source is not None
-            else self.no_source_embedding
-        )
-        result = result + (
-            self.target_projection(target)
-            if target is not None
-            else self.no_target_embedding
+            self.target_projection,
+            self.no_target_embedding,
         )
         return self.candidate_norm(result)
 
     @staticmethod
-    def _reference_embedding(
-        reference: EntityReference | None,
+    def _role_embeddings(
+        references: Sequence[EntityReference | None],
         entity_embeddings: Mapping[str, Tensor],
         encoded_map: EncodedMap | None,
-    ) -> Tensor | None:
-        if reference is None:
-            return None
-        if reference.kind == "map_node":
-            if encoded_map is None:
-                raise ValueError("map-node action reference requires an encoded map")
-            return encoded_map.node_embeddings[reference.index]
-        return entity_embeddings[reference.kind][reference.index]
+        projection: nn.Linear,
+        missing: Tensor,
+    ) -> Tensor:
+        """Gather one referenced embedding per candidate, or the missing vector.
+
+        References are grouped by entity kind so each kind costs one gather
+        rather than one indexing call per candidate.
+        """
+        rows = missing.expand(len(references), -1)
+        grouped: dict[str, list[tuple[int, int]]] = {}
+        for slot, reference in enumerate(references):
+            if reference is not None:
+                grouped.setdefault(reference.kind, []).append((slot, reference.index))
+        if not grouped:
+            return rows
+
+        slots: list[int] = []
+        gathered: list[Tensor] = []
+        for kind, pairs in grouped.items():
+            if kind == "map_node":
+                if encoded_map is None:
+                    raise ValueError(
+                        "map-node action reference requires an encoded map"
+                    )
+                source = encoded_map.node_embeddings
+            else:
+                source = entity_embeddings[kind]
+            gathered.append(
+                source.index_select(
+                    0,
+                    torch.tensor(
+                        [index for _, index in pairs],
+                        dtype=torch.long,
+                        device=source.device,
+                    ),
+                )
+            )
+            slots.extend(slot for slot, _ in pairs)
+
+        values = projection(torch.cat(gathered))
+        return rows.index_copy(
+            0,
+            torch.tensor(slots, dtype=torch.long, device=values.device),
+            values,
+        )

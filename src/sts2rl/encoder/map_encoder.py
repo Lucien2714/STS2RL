@@ -75,41 +75,82 @@ class MapDAGEncoder(nn.Module):
         base = base + self.node_numeric_projection(numeric)
 
         adjacency = self._adjacency(game_map)
-        # TokenizedMap already validates that parents precede their children.
-        future: dict[int, Tensor] = {}
-        for node in reversed(game_map.topological_order.detach().cpu().tolist()):
-            children = sorted(adjacency[node])
-            if children:
-                child_values = torch.stack(
-                    [future[child] for child in children]
-                )
-                query = self.child_query(
-                    torch.cat([base[node], player_context])
-                )
-                scores = self.child_key(child_values).matmul(query)
-                weights = torch.softmax(scores / math.sqrt(self.config.hidden_dim), dim=0)
-                child_context = torch.sum(
-                    weights.unsqueeze(1) * self.child_value(child_values), dim=0
-                )
-            else:
-                child_context = torch.zeros_like(player_context)
-            update = self.node_update(
-                torch.cat([base[node], child_context, player_context])
-            )
-            future[node] = self.node_norm(base[node] + update)
-
-        if future:
-            future_nodes = torch.stack(
-                [future[node] for node in range(base.shape[0])]
-            )
-        else:
-            future_nodes = base
+        future_nodes = self._propagate_from_sinks(base, adjacency, player_context)
         global_embedding = self._pool_reachable(
             future_nodes,
             game_map.reachable_mask,
             player_context,
         )
         return EncodedMap(base, future_nodes, global_embedding)
+
+    def _propagate_from_sinks(
+        self,
+        base: Tensor,
+        adjacency: list[set[int]],
+        player_context: Tensor,
+    ) -> Tensor:
+        """Aggregate every node's reachable future in one pass per DAG level.
+
+        Nodes are grouped by their longest distance to a sink, so a whole level
+        can attend over its children at once: every child sits at a strictly
+        lower level and is therefore already final.
+        """
+        if base.shape[0] == 0:
+            return base
+        future = torch.zeros_like(base)
+        for level in self._levels(adjacency):
+            nodes = torch.tensor(level, dtype=torch.long, device=base.device)
+            node_base = base.index_select(0, nodes)
+            context = player_context.expand(len(level), -1)
+            children = [sorted(adjacency[node]) for node in level]
+            width = max(len(row) for row in children)
+            if width:
+                padded = torch.tensor(
+                    [row + [0] * (width - len(row)) for row in children],
+                    dtype=torch.long,
+                    device=base.device,
+                )
+                mask = torch.tensor(
+                    [
+                        [True] * len(row) + [False] * (width - len(row))
+                        for row in children
+                    ],
+                    dtype=torch.bool,
+                    device=base.device,
+                )
+                values = future.index_select(0, padded.reshape(-1)).view(
+                    len(level), width, -1
+                )
+                query = self.child_query(torch.cat([node_base, context], dim=1))
+                scores = torch.einsum(
+                    "nch,nh->nc", self.child_key(values), query
+                ) / math.sqrt(self.config.hidden_dim)
+                weights = torch.softmax(
+                    scores.masked_fill(~mask, float("-inf")), dim=1
+                )
+                child_context = torch.einsum(
+                    "nc,nch->nh", weights, self.child_value(values)
+                )
+            else:
+                child_context = torch.zeros_like(node_base)
+            update = self.node_update(
+                torch.cat([node_base, child_context, context], dim=1)
+            )
+            future = future.index_copy(
+                0, nodes, self.node_norm(node_base + update)
+            )
+        return future
+
+    @staticmethod
+    def _levels(adjacency: list[set[int]]) -> list[list[int]]:
+        """Group nodes by longest distance to a sink, sinks first."""
+        depths = [-1] * len(adjacency)
+        for node in range(len(adjacency)):
+            _resolve_depth(node, adjacency, depths)
+        levels: list[list[int]] = [[] for _ in range(max(depths) + 1)]
+        for node, depth in enumerate(depths):
+            levels[depth].append(node)
+        return levels
 
     def _pool_reachable(
         self,
@@ -136,3 +177,26 @@ class MapDAGEncoder(nn.Module):
         for parent, child in zip(edges[0].tolist(), edges[1].tolist()):
             adjacency[parent].add(child)
         return adjacency
+
+
+def _resolve_depth(
+    start: int,
+    adjacency: list[set[int]],
+    depths: list[int],
+) -> None:
+    """Set the longest distance from ``start`` to a sink, and from its subtree."""
+    stack = [start]
+    while stack:
+        node = stack[-1]
+        if depths[node] >= 0:
+            stack.pop()
+            continue
+        pending = [child for child in adjacency[node] if depths[child] < 0]
+        if pending:
+            stack.extend(pending)
+            continue
+        depths[node] = 1 + max(
+            (depths[child] for child in adjacency[node]),
+            default=-1,
+        )
+        stack.pop()

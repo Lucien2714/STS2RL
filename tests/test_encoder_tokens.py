@@ -171,14 +171,13 @@ def test_entity_activity_distinguishes_active_inactive_and_unknown():
     assert batch.active.tolist() == [True, False, False]
     assert batch.active_mask.tolist() == [True, True, False]
 
-    with pytest.raises(ValueError, match="unknown active state"):
+    with pytest.raises(ValueError, match="supplied together"):
         TokenizedEntityBatch(
             kind="relic",
             categorical=torch.tensor([[2]], dtype=torch.long),
             numeric=torch.zeros((1, 1), dtype=torch.float32),
             numeric_mask=torch.ones((1, 1), dtype=torch.bool),
             active=torch.tensor([True], dtype=torch.bool),
-            active_mask=torch.tensor([False], dtype=torch.bool),
         )
 
 
@@ -197,13 +196,12 @@ def test_state_copies_entity_mapping_and_requires_matching_batch_kind():
         )
 
 
-def test_tokenized_map_validates_shapes_indices_and_topological_order():
+def test_tokenized_map_validates_shapes_and_node_indices():
     game_map = TokenizedMap(
         node_categorical=torch.tensor([[2], [3], [4]], dtype=torch.long),
         node_numeric=torch.zeros((3, 2), dtype=torch.float32),
         node_numeric_mask=torch.ones((3, 2), dtype=torch.bool),
         edge_index=torch.tensor([[0, 1], [1, 2]], dtype=torch.long),
-        topological_order=torch.tensor([0, 1, 2], dtype=torch.long),
         reachable_mask=torch.tensor([True, True, True], dtype=torch.bool),
         candidate_indices=torch.tensor([1], dtype=torch.long),
         boss_indices=torch.tensor([2], dtype=torch.long),
@@ -213,13 +211,12 @@ def test_tokenized_map_validates_shapes_indices_and_topological_order():
 
     assert game_map.edge_index.shape == (2, 2)
 
-    with pytest.raises(ValueError, match="parents before children"):
+    with pytest.raises(ValueError, match="out-of-range node index"):
         TokenizedMap(
             node_categorical=game_map.node_categorical,
             node_numeric=game_map.node_numeric,
             node_numeric_mask=game_map.node_numeric_mask,
-            edge_index=game_map.edge_index,
-            topological_order=torch.tensor([2, 1, 0], dtype=torch.long),
+            edge_index=torch.tensor([[0, 1], [1, 9]], dtype=torch.long),
             reachable_mask=game_map.reachable_mask,
             candidate_indices=game_map.candidate_indices,
             boss_indices=game_map.boss_indices,

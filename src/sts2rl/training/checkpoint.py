@@ -26,53 +26,18 @@ class CheckpointCompatibilityError(CheckpointError):
 
 
 @dataclass(frozen=True)
-class LoggingState:
-    """Position needed to continue JSONL and TensorBoard without rewinding."""
-
-    tensorboard_log_dir: str = "tensorboard"
-    tensorboard_global_step: int = 0
-    last_logged_episode: int = 0
-    last_logged_optimizer_update: int = 0
-
-    def __post_init__(self) -> None:
-        log_path = Path(self.tensorboard_log_dir)
-        if (
-            not self.tensorboard_log_dir
-            or log_path.is_absolute()
-            or ".." in log_path.parts
-            or log_path == Path(".")
-        ):
-            raise ValueError("tensorboard_log_dir must be a non-empty relative path")
-        for name in (
-            "tensorboard_global_step",
-            "last_logged_episode",
-            "last_logged_optimizer_update",
-        ):
-            value = getattr(self, name)
-            if isinstance(value, bool) or not isinstance(value, int) or value < 0:
-                raise ValueError(f"{name} must be a non-negative integer")
-
-    def to_dict(self) -> dict[str, object]:
-        return {
-            "tensorboard_log_dir": self.tensorboard_log_dir,
-            "tensorboard_global_step": self.tensorboard_global_step,
-            "last_logged_episode": self.last_logged_episode,
-            "last_logged_optimizer_update": self.last_logged_optimizer_update,
-        }
-
-    @classmethod
-    def from_dict(cls, values: Mapping[str, object]) -> LoggingState:
-        return cls(**dict(values))  # type: ignore[arg-type]
-
-
-@dataclass(frozen=True)
 class LoadedCheckpoint:
-    """Validated checkpoint payload awaiting restoration into an agent."""
+    """Validated checkpoint payload awaiting restoration into an agent.
+
+    ``TrainingState`` is the single record of every counter.  Metrics and
+    TensorBoard resume from ``training_state.environment_steps`` rather than
+    from a parallel copy that then has to be proven equal to it.
+    """
 
     path: Path
     plan: TrainingPlan
     training_state: TrainingState
-    logging_state: LoggingState
+    tensorboard_log_dir: str
     agent_state: Mapping[str, object]
     torch_rng_state: torch.Tensor
     cuda_rng_states: tuple[torch.Tensor, ...]
@@ -81,7 +46,7 @@ class LoadedCheckpoint:
 class CheckpointManager:
     """Save and load checkpoints relative to one experiment directory."""
 
-    FORMAT_VERSION = 1
+    FORMAT_VERSION = 2
 
     def __init__(self, run_dir: str | Path, vocabulary: GameVocabulary) -> None:
         self.run_dir = Path(run_dir)
@@ -155,7 +120,7 @@ class CheckpointManager:
         agent: CandidatePPOAgent,
         plan: TrainingPlan,
         training_state: TrainingState,
-        logging_state: LoggingState,
+        tensorboard_log_dir: str,
     ) -> Path:
         """Save a numbered checkpoint after a completed episode."""
         return self.save(
@@ -163,7 +128,7 @@ class CheckpointManager:
             agent,
             plan,
             training_state,
-            logging_state,
+            tensorboard_log_dir,
         )
 
     def save_recovery(
@@ -172,7 +137,7 @@ class CheckpointManager:
         agent: CandidatePPOAgent,
         plan: TrainingPlan,
         training_state: TrainingState,
-        logging_state: LoggingState,
+        tensorboard_log_dir: str,
     ) -> Path:
         """Save an interrupted or failed run after its partial rollout is dropped."""
         if kind not in {"interrupted", "recovery"}:
@@ -182,7 +147,7 @@ class CheckpointManager:
             agent,
             plan,
             training_state,
-            logging_state,
+            tensorboard_log_dir,
         )
 
     def save(
@@ -191,12 +156,11 @@ class CheckpointManager:
         agent: CandidatePPOAgent,
         plan: TrainingPlan,
         training_state: TrainingState,
-        logging_state: LoggingState,
+        tensorboard_log_dir: str,
     ) -> Path:
         """Atomically publish a complete checkpoint and update ``latest``."""
         if Path(filename).name != filename or not filename.endswith(".pt"):
             raise ValueError("checkpoint filename must be a plain .pt filename")
-        self._validate_counter_alignment(agent, training_state, logging_state)
         self.checkpoint_dir.mkdir(parents=True, exist_ok=True)
         final_path = self.checkpoint_dir / filename
         temporary_path = final_path.with_suffix(final_path.suffix + ".tmp")
@@ -205,7 +169,7 @@ class CheckpointManager:
             "created_at_utc": datetime.now(timezone.utc).isoformat(),
             "agent_state": agent.checkpoint_state(),
             "training_state": training_state.to_dict(),
-            "logging_state": logging_state.to_dict(),
+            "tensorboard_log_dir": tensorboard_log_dir,
             "training_plan": plan.to_dict(),
             "vocabulary_fingerprint": self.vocabulary.fingerprint(),
             "torch_rng_state": torch.get_rng_state(),
@@ -259,14 +223,14 @@ class CheckpointManager:
             training_state = TrainingState.from_dict(
                 self._require_mapping(payload, "training_state")
             )
-            logging_state = LoggingState.from_dict(
-                self._require_mapping(payload, "logging_state")
-            )
             plan = TrainingPlan.from_dict(
                 self._require_mapping(payload, "training_plan")
             )
         except (TypeError, ValueError) as exc:
             raise CheckpointError(f"invalid checkpoint metadata: {exc}") from exc
+        tensorboard_log_dir = payload.get("tensorboard_log_dir")
+        if not isinstance(tensorboard_log_dir, str) or not tensorboard_log_dir:
+            raise CheckpointError("checkpoint tensorboard_log_dir must be a string")
         torch_rng_state = payload.get("torch_rng_state")
         if not isinstance(torch_rng_state, torch.Tensor):
             raise CheckpointError("checkpoint torch_rng_state must be a tensor")
@@ -276,17 +240,15 @@ class CheckpointManager:
         ):
             raise CheckpointError("checkpoint cuda_rng_states must be tensors")
 
-        loaded = LoadedCheckpoint(
+        return LoadedCheckpoint(
             path=path,
             plan=plan,
             training_state=training_state,
-            logging_state=logging_state,
+            tensorboard_log_dir=tensorboard_log_dir,
             agent_state=dict(agent_state),
             torch_rng_state=torch_rng_state.cpu(),
             cuda_rng_states=tuple(item.cpu() for item in raw_cuda_states),
         )
-        self._validate_loaded_alignment(loaded)
-        return loaded
 
     def restore_agent(
         self,
@@ -302,6 +264,8 @@ class CheckpointManager:
         if loaded.plan.reset != plan.reset:
             raise CheckpointCompatibilityError("reset configuration does not match")
         agent.load_checkpoint_state(loaded.agent_state)
+        agent.environment_steps = loaded.training_state.environment_steps
+        agent.optimizer_updates = loaded.training_state.optimizer_updates
         torch.set_rng_state(loaded.torch_rng_state)
         if loaded.cuda_rng_states and agent.device.type == "cuda":
             torch.cuda.set_rng_state_all(list(loaded.cuda_rng_states))
@@ -312,51 +276,6 @@ class CheckpointManager:
         if not isinstance(value, Mapping):
             raise CheckpointError(f"checkpoint {name} must be a mapping")
         return value
-
-    @staticmethod
-    def _validate_counter_alignment(
-        agent: CandidatePPOAgent,
-        training_state: TrainingState,
-        logging_state: LoggingState,
-    ) -> None:
-        if agent.environment_steps != training_state.environment_steps:
-            raise CheckpointError("agent and training environment_steps do not match")
-        if agent.optimizer_updates != training_state.optimizer_updates:
-            raise CheckpointError("agent and training optimizer_updates do not match")
-        if logging_state.tensorboard_global_step != training_state.environment_steps:
-            raise CheckpointError("logging global step does not match training state")
-        if logging_state.last_logged_episode != training_state.completed_episodes:
-            raise CheckpointError("logged episode does not match training state")
-        if (
-            logging_state.last_logged_optimizer_update
-            != training_state.optimizer_updates
-        ):
-            raise CheckpointError(
-                "logged optimizer update does not match training state"
-            )
-
-    def _validate_loaded_alignment(self, loaded: LoadedCheckpoint) -> None:
-        agent_environment_steps = loaded.agent_state.get("environment_steps")
-        agent_optimizer_updates = loaded.agent_state.get("optimizer_updates")
-        if agent_environment_steps != loaded.training_state.environment_steps:
-            raise CheckpointError("checkpoint environment step counters disagree")
-        if agent_optimizer_updates != loaded.training_state.optimizer_updates:
-            raise CheckpointError("checkpoint optimizer update counters disagree")
-        if (
-            loaded.logging_state.tensorboard_global_step
-            != loaded.training_state.environment_steps
-        ):
-            raise CheckpointError("checkpoint logging step counter disagrees")
-        if (
-            loaded.logging_state.last_logged_episode
-            != loaded.training_state.completed_episodes
-        ):
-            raise CheckpointError("checkpoint logged episode counter disagrees")
-        if (
-            loaded.logging_state.last_logged_optimizer_update
-            != loaded.training_state.optimizer_updates
-        ):
-            raise CheckpointError("checkpoint logged update counter disagrees")
 
     @staticmethod
     def _read_json(path: Path) -> dict[str, Any]:

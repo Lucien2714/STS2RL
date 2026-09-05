@@ -90,8 +90,8 @@ def run_training(args: argparse.Namespace) -> int:
         plan.training.validate_runtime_device()
         manager.initialize_run(plan, resume=True)
         state = loaded.training_state
-        resume_step = loaded.logging_state.tensorboard_global_step
-        tensorboard_log_dir = loaded.logging_state.tensorboard_log_dir
+        resume_step = state.environment_steps
+        tensorboard_log_dir = loaded.tensorboard_log_dir
 
     if plan.training.total_episodes < state.completed_episodes:
         raise ValueError(

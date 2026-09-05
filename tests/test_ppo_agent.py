@@ -154,7 +154,7 @@ def test_update_metrics_are_drained_once():
     assert agent.drain_update_metrics() == ()
 
 
-def test_agent_checkpoint_round_trip_restores_logits_optimizer_and_counters():
+def test_agent_checkpoint_round_trip_restores_logits_and_optimizer():
     torch.manual_seed(37)
     agent = _agent(rollout_size=8)
     observation = _observation(_map_state(2))
@@ -180,8 +180,6 @@ def test_agent_checkpoint_round_trip_restores_logits_optimizer_and_counters():
         actual = restored.game_encoder.policy_value(decision).logits
 
     assert torch.equal(actual, expected)
-    assert restored.environment_steps == 1
-    assert restored.optimizer_updates == 1
     assert restored.optimizer.state
 
 
@@ -210,7 +208,8 @@ def test_checkpoint_requires_clean_boundary_and_abort_discards_partial_work():
 
     assert agent._pending is None
     assert not agent._rollout
-    assert agent.checkpoint_state()["environment_steps"] == 1
+    assert set(agent.checkpoint_state()) == {"encoder", "optimizer"}
+    assert agent.environment_steps == 1
 
 
 def test_rollout_keeps_cpu_tokens_and_defers_next_state_tokenization():

@@ -111,7 +111,8 @@ def test_full_map_merges_boss_and_builds_topological_parent_child_edges(
     assert game_map is not None
     assert game_map.node_categorical.shape == (8, 1)
     assert game_map.edge_index.shape == (2, 8)
-    assert game_map.topological_order.tolist() == list(range(8))
+    parents, children = game_map.edge_index.tolist()
+    assert all(parent < child for parent, child in zip(parents, children))
     assert game_map.current_index == 0
     assert game_map.candidate_indices.tolist() == [1, 2]
     assert game_map.boss_indices.tolist() == [7]

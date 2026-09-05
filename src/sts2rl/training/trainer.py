@@ -6,7 +6,7 @@ from collections.abc import Callable
 from time import monotonic
 
 from sts2rl.agents import CandidatePPOAgent, EpisodeResult, EpisodeRunner
-from sts2rl.training.checkpoint import CheckpointManager, LoggingState
+from sts2rl.training.checkpoint import CheckpointManager
 from sts2rl.training.config import TrainingPlan, TrainingState
 from sts2rl.training.metrics import EpisodeMetrics, TrainingMetricsWriter
 
@@ -33,7 +33,6 @@ class Trainer:
         self.state = state or TrainingState()
         self.reporter = reporter
         self.tensorboard_log_dir = tensorboard_log_dir
-        self._validate_initial_state()
 
     def train(self) -> TrainingState:
         """Train until the configured cumulative episode target is reached."""
@@ -49,16 +48,8 @@ class Trainer:
         try:
             while self.state.completed_episodes < target:
                 started_at = monotonic()
-                previous_environment_steps = self.state.environment_steps
                 result = self.runner.run(self.plan.reset)
-                self._synchronize_agent_counters()
-                if (
-                    self.state.environment_steps - previous_environment_steps
-                    != result.steps
-                ):
-                    raise RuntimeError(
-                        "agent environment-step count does not match episode transitions"
-                    )
+                self._adopt_agent_counters()
                 self.state.completed_episodes += 1
                 self._log_pending_updates()
                 episode_metrics = self._episode_metrics(
@@ -92,13 +83,13 @@ class Trainer:
             self.agent,
             self.plan,
             self.state,
-            self._logging_state(),
+            self.tensorboard_log_dir,
         )
 
     def _recover(self, kind: str, original: BaseException) -> None:
         try:
             self.agent.abort_episode()
-            self._synchronize_agent_counters()
+            self._adopt_agent_counters()
             self._log_pending_updates()
             self.metrics_writer.log_event(
                 "training_interrupted" if kind == "interrupted" else "training_failed",
@@ -115,7 +106,7 @@ class Trainer:
                 self.agent,
                 self.plan,
                 self.state,
-                self._logging_state(),
+                self.tensorboard_log_dir,
             )
         except Exception as recovery_error:
             original.add_note(f"failed to save recovery state: {recovery_error}")
@@ -124,27 +115,10 @@ class Trainer:
         for metrics in self.agent.drain_update_metrics():
             self.metrics_writer.log_ppo_update(metrics)
 
-    def _synchronize_agent_counters(self) -> None:
-        if self.agent.environment_steps < self.state.environment_steps:
-            raise RuntimeError("agent environment_steps moved backwards")
-        if self.agent.optimizer_updates < self.state.optimizer_updates:
-            raise RuntimeError("agent optimizer_updates moved backwards")
+    def _adopt_agent_counters(self) -> None:
+        """Copy the agent's counters, which are the authority while training."""
         self.state.environment_steps = self.agent.environment_steps
         self.state.optimizer_updates = self.agent.optimizer_updates
-
-    def _logging_state(self) -> LoggingState:
-        return LoggingState(
-            tensorboard_log_dir=self.tensorboard_log_dir,
-            tensorboard_global_step=self.state.environment_steps,
-            last_logged_episode=self.state.completed_episodes,
-            last_logged_optimizer_update=self.state.optimizer_updates,
-        )
-
-    def _validate_initial_state(self) -> None:
-        if self.agent.environment_steps != self.state.environment_steps:
-            raise ValueError("agent and training environment_steps must match")
-        if self.agent.optimizer_updates != self.state.optimizer_updates:
-            raise ValueError("agent and training optimizer_updates must match")
 
     def _episode_metrics(
         self,

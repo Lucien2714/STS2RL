@@ -198,17 +198,19 @@ class CandidatePPOAgent(Agent):
         self.train(False)
 
     def checkpoint_state(self) -> dict[str, object]:
-        """Return model, optimizer, and lifetime counters at a clean boundary."""
+        """Return model and optimizer tensors at a clean boundary.
+
+        Lifetime counters belong to ``TrainingState``, which the checkpoint
+        stores once; the caller restores them onto the agent.
+        """
         self._require_clean_checkpoint_boundary("save")
         return {
             "encoder": self.game_encoder.state_dict(),
             "optimizer": self.optimizer.state_dict(),
-            "environment_steps": self.environment_steps,
-            "optimizer_updates": self.optimizer_updates,
         }
 
     def load_checkpoint_state(self, state: Mapping[str, object]) -> None:
-        """Restore model, optimizer, and counters into an unused agent."""
+        """Restore model and optimizer tensors into an unused agent."""
         self._require_clean_checkpoint_boundary("load")
         encoder_state = state.get("encoder")
         optimizer_state = state.get("optimizer")
@@ -216,14 +218,10 @@ class CandidatePPOAgent(Agent):
             raise ValueError("checkpoint agent encoder must be a mapping")
         if not isinstance(optimizer_state, Mapping):
             raise ValueError("checkpoint agent optimizer must be a mapping")
-        environment_steps = self._checkpoint_counter(state, "environment_steps")
-        optimizer_updates = self._checkpoint_counter(state, "optimizer_updates")
 
         self.game_encoder.load_state_dict(dict(encoder_state))
         self.optimizer.load_state_dict(dict(optimizer_state))
         self._move_optimizer_state_to_device()
-        self.environment_steps = environment_steps
-        self.optimizer_updates = optimizer_updates
         self.last_update = {}
         self._completed_update_metrics.clear()
 
@@ -365,13 +363,6 @@ class CandidatePPOAgent(Agent):
             raise RuntimeError(
                 f"cannot {operation} a checkpoint with a non-empty rollout"
             )
-
-    @staticmethod
-    def _checkpoint_counter(state: Mapping[str, object], name: str) -> int:
-        value = state.get(name)
-        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
-            raise ValueError(f"checkpoint agent {name} must be a non-negative integer")
-        return value
 
     def _move_optimizer_state_to_device(self) -> None:
         for optimizer_state in self.optimizer.state.values():

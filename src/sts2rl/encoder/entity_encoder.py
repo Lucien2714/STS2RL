@@ -263,6 +263,10 @@ class EntityTransformer(nn.Module):
             dtype=torch.float32,
             device=batch.categorical.device,
         )
+        # Most screens leave most kinds empty; projecting them anyway costs a
+        # dozen dispatches per kind for a guaranteed all-zero result.
+        if batch.entity_count == 0:
+            return result
         for column, field in enumerate(ENTITY_CATEGORICAL_FIELDS[kind]):
             if field == "entity_zone":
                 categorical = self.zone_embedding(batch.categorical[:, column])
@@ -294,6 +298,8 @@ class EntityTransformer(nn.Module):
         projection: nn.Linear,
     ) -> None:
         relations = embeddings[relation_kind]
+        if relations.shape[0] == 0:
+            return
         owners = state.entities[relation_kind].owners
         for owner_kind in embeddings:
             pairs = [
@@ -336,6 +342,8 @@ class EntityTransformer(nn.Module):
         state: TokenizedState,
     ) -> dict[str, set[int]]:
         excluded: dict[str, set[int]] = {}
+        if embeddings["bundle"].shape[0] == 0:
+            return excluded
         bundle_updates = torch.zeros_like(embeddings["bundle"])
         for bundle_index, children in enumerate(state.entities["bundle"].children):
             if not children:

@@ -1163,7 +1163,6 @@ class GameTokenizer:
                 torch.bool,
             ),
             edge_index=edge_index,
-            topological_order=torch.tensor(topological, dtype=torch.long),
             reachable_mask=torch.tensor(
                 [index in reachable for index in range(node_count)],
                 dtype=torch.bool,
