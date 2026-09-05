@@ -112,7 +112,12 @@ diagnosis rather than another HTTP request.
 
 ## Current limits
 
-The first runtime intentionally has one serial environment and computes PPO one
-transition at a time. It does not yet provide exact mid-episode game restore,
-padded minibatches, parallel environments, reward redesign, automatic fixture
-capture, checkpoint evaluation, or best-model selection.
+The runtime has one serial environment. Encoding is batched within a decision —
+the whole candidate set in one pass, the map one DAG level at a time — but not
+across rollout steps, so a PPO update still runs one encoder forward per stored
+transition. Padding whole steps together is the remaining throughput work, and
+it is also the prerequisite for a GPU being worth using; the tensors are
+currently small enough that kernel launch overhead would dominate.
+
+Not yet provided: exact mid-episode game restore, parallel environments,
+automatic fixture capture, checkpoint evaluation, or best-model selection.

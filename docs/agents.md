@@ -19,9 +19,11 @@ state,
 
 `CandidatePPOAgent` tokenizes and scores only those candidates, then samples
 from the resulting categorical distribution. Its rollout stores the complete
-CPU `TokenizedDecision`, tokenized next state, original ordered `GameAction`
-candidates, selected index, old log probability, old value, reward, and terminal
-flag. PPO updates rerun `GameEncoder` from those snapshots, so gradients reach
+CPU `TokenizedDecision`, the next `GameObservation`, the selected index, the old
+log probability, the old value, the reward, and the terminal flag. Only the
+final step's next state is ever tokenized, and only when bootstrapping, so the
+common case pays nothing for it. PPO updates rerun `GameEncoder` from those
+snapshots, so gradients reach
 the categorical embeddings, entity transformer, map DAG encoder, action
 encoder, and policy/value heads while the candidate identity remains stable.
 
@@ -53,22 +55,32 @@ observe(Transition[GameObservation])
 finish_episode(final_observation, truncated)
 ```
 
+A state offering exactly one candidate is executed directly and never enters
+the rollout: its log probability is always zero and its ratio always one, so it
+carries no policy gradient while still diluting the advantage statistics of
+genuine decisions. Its reward is folded into the preceding recorded decision,
+so the return of every trained step still matches what the environment paid.
+
 The default long-horizon return settings are `gamma=0.999` and
 `gae_lambda=0.98`. A terminal step bootstraps with zero; a non-terminal rollout
-boundary or truncated episode bootstraps from the stored tokenized next state.
-Training samples stochastically, while `agent.eval()` selects the highest-logit
-candidate deterministically and does not collect rollout entries.
+boundary or truncated episode bootstraps from the stored next observation.
+Updates run over shuffled minibatches (`minibatch_size`, default 32), which also
+bounds how many autograd graphs are live at once. Training samples
+stochastically, while `agent.eval()` selects the highest-logit candidate
+deterministically and does not collect rollout entries.
 
 The training runtime drains metrics for every completed PPO update instead of
-only reading `last_update`. At a clean episode boundary the agent can serialize
-its encoder, optimizer, environment-step count, and update count. Incomplete
-pending actions and rollouts must be observed, updated, or explicitly aborted
-before checkpointing.
+only reading `last_update`. At a clean episode boundary the agent serializes its
+encoder and optimizer; the lifetime counters belong to `TrainingState` and are
+stored once by the checkpoint rather than duplicated here. Incomplete pending
+actions and rollouts must be observed, updated, or explicitly aborted before
+checkpointing.
 
 The legal-action provider covers combat, in-combat selection, rewards, map,
 events, rest sites, shops, treasure, card/bundle/relic overlays, and the Crystal
 Sphere. It returns no guessed action for `unknown` or unhandled `overlay`
 states. Pre-run menus also remain the responsibility of `ResetController`, not
-the learning agent. The runner refreshes short-lived states and their player
-detail together a bounded number of times, then raises `NoLegalActionsError`
-with the raw state for diagnosis.
+the learning agent. The runner re-reads short-lived states a bounded number of
+times with exponential backoff — combat outside the play phase legally exposes
+no action, and the server needs time to settle — and then truncates the episode
+rather than raising through the trainer and ending the whole run.

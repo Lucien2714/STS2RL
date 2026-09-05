@@ -428,7 +428,6 @@ unordered entity collection:
 | `node_numeric` | float32 | `[N, F]` | coordinates, distances, summaries |
 | `node_numeric_mask` | bool | `[N, F]` | presence for numeric values |
 | `edge_index` | long | `[2, E]` | parent-to-child edges |
-| `topological_order` | long | `[N]` | every parent before its children |
 | `reachable_mask` | bool | `[N]` | nodes still reachable from this state |
 | `candidate_indices` | long | `[A]` | node row for every current map choice |
 | `boss_indices` | long | `[B]` | terminal boss node rows |
@@ -444,9 +443,11 @@ duplicate candidate coordinates, invalid coordinates, unresolved children,
 and unresolved candidates raise `TokenizationError`.
 
 Every `edge_index` column is `[parent, child]`, moving from the current floor
-toward a boss. The map encoder will traverse `topological_order` in reverse so
-each parent can aggregate child representations that already contain their own
-future descendants.
+toward a boss. `MapDAGEncoder` groups nodes by their longest distance to a sink
+and processes one level at a time, so each parent aggregates child
+representations that already contain their own future descendants. The
+tokenizer still runs a topological sort internally to detect cycles and to
+compute boss distances, but it is not carried in the token.
 
 `GameTokenizer` builds and validates the graph with these rules:
 
@@ -465,8 +466,7 @@ The exact map columns are public as `MAP_CATEGORICAL_FIELDS` and
 `MAP_NUMERIC_FIELDS`. Numeric fields contain coordinates, current/visited/
 candidate/boss/reachable flags, and shortest/longest Boss distances.
 
-`TokenizedMap` then independently validates shapes, index ranges, the
-topological permutation, and parent-before-child ordering.
+`TokenizedMap` then independently validates shapes and index ranges.
 
 ## MapDAGEncoder
 
@@ -475,7 +475,9 @@ by `EntityTransformer`. Passing `game_map=None` returns `None`, so non-map
 states skip this module.
 
 First, node type and numeric/mask features form a base embedding. Nodes are
-then evaluated once in reverse topological order:
+then grouped by their longest distance to a sink and evaluated one level at a
+time, so a whole level is computed in a single batched attention. Every child
+sits at a strictly lower level and is therefore already final:
 
 ```text
 future(node) = update(
@@ -487,9 +489,10 @@ future(node) = update(
 
 The child query depends on both the current node and player context. Keys and
 values come from child embeddings that already contain all deeper descendants.
-One set of attention and update parameters is shared at every map depth. This
-is dynamic programming over the DAG: it is neither path enumeration nor a
-Graph Transformer.
+Within a level, nodes with different child counts are padded and masked, so the
+softmax still normalizes over real children only. One set of attention and
+update parameters is shared at every map depth. This is dynamic programming
+over the DAG: it is neither path enumeration nor a Graph Transformer.
 
 An additional player-conditioned attention pool reads only rows selected by
 `reachable_mask`. Disconnected or expired branches cannot affect the global map

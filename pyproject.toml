@@ -17,6 +17,9 @@ dev = [
     "ruff>=0.15.0",
 ]
 
+[project.scripts]
+sts2rl-train = "sts2rl.training.cli:main"
+
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
