@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import time
 
 from sts2rl.actions import GameAction
 from sts2rl.agents.action_space import NoLegalActionsError
 from sts2rl.agents.base import Agent, Transition
+from sts2rl.env.constants import BATTLE_STATE_TYPES
 from sts2rl.env.game_env import GameEnv
 from sts2rl.env.mcp_client import STS2ClientError
 from sts2rl.env.reset import ResetSpec
@@ -34,6 +36,9 @@ class EpisodeResult:
         return len(self.transitions)
 
 
+REFRESH_BACKOFF_SECONDS = 0.25
+
+
 class EpisodeRunner:
     """Execute one complete run while keeping learning outside GameEnv."""
 
@@ -44,6 +49,7 @@ class EpisodeRunner:
         reward_model: RewardModel | None = None,
         max_steps: int = 10_000,
         max_state_refreshes: int = 3,
+        refresh_backoff_seconds: float = REFRESH_BACKOFF_SECONDS,
     ) -> None:
         if max_steps < 1:
             raise ValueError("max_steps must be positive")
@@ -54,9 +60,12 @@ class EpisodeRunner:
         self.reward_model = reward_model or BattleProgressReward()
         self.max_steps = max_steps
         self.max_state_refreshes = max_state_refreshes
+        self.refresh_backoff_seconds = refresh_backoff_seconds
+        self._cached_player_detail: RawState | None = None
 
     def run(self, reset_spec: ResetSpec | None = None) -> EpisodeResult:
         """Reset the environment and run until game over or the step limit."""
+        self._cached_player_detail = None
         initial_state = self.env.reset(reset_spec)
         observation = self._observation(initial_state)
         transitions: list[Transition] = []
@@ -65,7 +74,10 @@ class EpisodeRunner:
         self.agent.reset(observation)
 
         for _ in range(self.max_steps):
-            action, observation = self._choose_with_refresh(observation)
+            decision = self._choose_with_refresh(observation)
+            if decision is None:
+                break
+            action, observation = decision
             env_step = self.env.step(action)
             if env_step.info.get("action_error"):
                 reward, reward_info = self.reward_model.action_error_reward(
@@ -116,13 +128,22 @@ class EpisodeRunner:
 
     def _choose_with_refresh(
         self, observation: GameObservation
-    ) -> tuple[GameAction, GameObservation]:
-        for _ in range(self.max_state_refreshes):
+    ) -> tuple[GameAction, GameObservation] | None:
+        """Choose an action, re-reading state while none is legal yet.
+
+        Combat states outside the player's play phase legally expose no action,
+        so the server is given time to settle before each retry.  Returning
+        None truncates the episode instead of failing the whole training run.
+        """
+        for attempt in range(self.max_state_refreshes + 1):
             try:
                 return self.agent.choose_action(observation), observation
             except NoLegalActionsError:
+                if attempt == self.max_state_refreshes:
+                    return None
+                if self.refresh_backoff_seconds:
+                    time.sleep(self.refresh_backoff_seconds * (2**attempt))
                 observation = self._observation(self.env.get_state())
-        return self.agent.choose_action(observation), observation
 
     def _observation(
         self,
@@ -132,11 +153,28 @@ class EpisodeRunner:
     ) -> GameObservation:
         if terminal or raw_state.get("state_type") == "game_over":
             return GameObservation(raw_state=raw_state, player_detail=None)
+        return GameObservation(
+            raw_state=raw_state,
+            player_detail=self._player_detail(raw_state),
+        )
+
+    def _player_detail(self, raw_state: RawState) -> RawState:
+        """Fetch player detail, reusing the snapshot for the duration of a battle.
+
+        The deck is the only field this adds over the raw state, and the deck
+        cannot change mid-battle, so one fetch per battle replaces one per step.
+        """
+        if (
+            self._cached_player_detail is not None
+            and raw_state.get("state_type") in BATTLE_STATE_TYPES
+        ):
+            return self._cached_player_detail
         try:
-            player_detail = self.env.get_player_detail()
+            self._cached_player_detail = self.env.get_player_detail()
         except STS2ClientError as exc:
-            raise ObservationError(
-                "Failed to obtain required player detail for "
-                f"state_type={raw_state.get('state_type')!r}: {exc}"
-            ) from exc
-        return GameObservation(raw_state=raw_state, player_detail=player_detail)
+            if self._cached_player_detail is None:
+                raise ObservationError(
+                    "Failed to obtain required player detail for "
+                    f"state_type={raw_state.get('state_type')!r}: {exc}"
+                ) from exc
+        return self._cached_player_detail

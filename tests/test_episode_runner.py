@@ -7,7 +7,6 @@ from sts2rl.agents import (
     Agent,
     EpisodeRunner,
     LegalActionProvider,
-    NoLegalActionsError,
     ObservationError,
     Transition,
 )
@@ -128,14 +127,22 @@ def test_runner_stops_when_state_refreshes_are_exhausted(max_refreshes):
 
     env = StuckEnv()
     agent = RecordingAgent()
-    runner = EpisodeRunner(env, agent, max_state_refreshes=max_refreshes)
+    runner = EpisodeRunner(
+        env,
+        agent,
+        max_state_refreshes=max_refreshes,
+        refresh_backoff_seconds=0.0,
+    )
 
-    with pytest.raises(NoLegalActionsError, match="treasure"):
-        runner.run()
+    result = runner.run()
 
+    assert result.truncated is True
+    assert result.terminated is False
+    assert result.steps == 0
     assert env.refreshes == max_refreshes
     assert env.detail_calls == max_refreshes + 1
     assert agent.transitions == []
+    assert agent.finished == (agent.initial, True)
 
 
 @pytest.mark.parametrize("max_refreshes", [0, 1, 3])
@@ -160,6 +167,7 @@ def test_runner_can_choose_on_the_last_allowed_attempt(max_refreshes):
         RecordingAgent(),
         reward_model=FixedReward(),
         max_state_refreshes=max_refreshes,
+        refresh_backoff_seconds=0.0,
     ).run()
 
     assert result.terminated is True
@@ -191,6 +199,46 @@ def test_runner_fetches_detail_for_every_nonterminal_next_state():
     assert env.detail_calls == 2
     assert agent.transitions[0].next_state.player_detail is not None
     assert agent.finished == (agent.transitions[0].next_state, True)
+
+
+def test_runner_reuses_one_player_detail_snapshot_for_a_whole_battle():
+    class BattleEnv(FakeEnv):
+        def __init__(self):
+            super().__init__()
+            self.state = _battle_state()
+            self.steps = 0
+
+        def step(self, action):
+            self.steps += 1
+            self.state = _battle_state()
+            return EnvStep(self.state, done=False, info={"action_error": False})
+
+    env = BattleEnv()
+
+    result = EpisodeRunner(
+        env,
+        RecordingAgent(),
+        reward_model=FixedReward(),
+        max_steps=4,
+    ).run()
+
+    assert result.steps == 4
+    assert env.detail_calls == 1
+
+
+def _battle_state():
+    return {
+        "state_type": "monster",
+        "battle": {
+            "turn": "player",
+            "is_play_phase": True,
+            "enemies": [{"entity_id": "JAW_WORM_0", "hp": 40}],
+        },
+        "player": {
+            "hand": [{"index": 0, "id": "Strike", "can_play": True}],
+            "potions": [],
+        },
+    }
 
 
 def test_player_detail_failure_terminates_explicitly():

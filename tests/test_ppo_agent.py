@@ -5,7 +5,6 @@ from __future__ import annotations
 import pytest
 import torch
 
-from sts2rl.actions import GameAction
 from sts2rl.agents import CandidatePPOAgent, PPOConfig, Transition
 from sts2rl.encoder import (
     EncoderConfig,
@@ -13,7 +12,6 @@ from sts2rl.encoder import (
     GameTokenizer,
     GameVocabulary,
     TokenizedDecision,
-    TokenizedState,
 )
 from sts2rl.env import GameObservation
 
@@ -136,7 +134,7 @@ def test_training_samples_only_current_candidates_and_updates_encoder_on_termina
 def test_update_metrics_are_drained_once():
     torch.manual_seed(36)
     agent = _agent(rollout_size=8)
-    observation = _observation(_map_state(1))
+    observation = _observation(_map_state(2))
     action = agent.choose_action(observation)
     agent.observe(
         Transition(
@@ -174,9 +172,6 @@ def test_agent_checkpoint_round_trip_restores_logits_optimizer_and_counters():
     decision = agent.tokenizer.tokenize_decision(observation, candidates)
     with torch.no_grad():
         expected = agent.game_encoder.policy_value(decision).logits.clone()
-    with pytest.raises(RuntimeError, match="undrained update metrics"):
-        agent.checkpoint_state()
-    agent.drain_update_metrics()
     checkpoint = agent.checkpoint_state()
 
     restored = _agent(rollout_size=8)
@@ -193,7 +188,7 @@ def test_agent_checkpoint_round_trip_restores_logits_optimizer_and_counters():
 def test_checkpoint_requires_clean_boundary_and_abort_discards_partial_work():
     torch.manual_seed(38)
     agent = _agent(rollout_size=20)
-    observation = _observation(_map_state(1))
+    observation = _observation(_map_state(2))
     action = agent.choose_action(observation)
 
     with pytest.raises(RuntimeError, match="unobserved action"):
@@ -218,26 +213,27 @@ def test_checkpoint_requires_clean_boundary_and_abort_discards_partial_work():
     assert agent.checkpoint_state()["environment_steps"] == 1
 
 
-def test_rollout_keeps_cpu_tokens_next_state_and_original_candidates():
+def test_rollout_keeps_cpu_tokens_and_defers_next_state_tokenization():
     torch.manual_seed(31)
     agent = _agent(rollout_size=20)
     state = _map_state(3)
     observation = _observation(state)
+    next_observation = _observation(_map_state(2))
     action = agent.choose_action(observation)
     agent.observe(
         Transition(
             state=observation,
             action=action,
             reward=0.25,
-            next_state=_observation(_map_state(1)),
+            next_state=next_observation,
             done=False,
         )
     )
 
     step = agent._rollout[0]
     assert isinstance(step.decision, TokenizedDecision)
-    assert isinstance(step.next_state, TokenizedState)
-    assert len(step.candidates) == 3
+    assert len(step.decision.actions) == 3
+    assert step.next_observation is next_observation
     assert step.decision.state.global_categorical.device.type == "cpu"
     assert step.old_log_probability.device.type == "cpu"
     assert step.old_value.device.type == "cpu"
@@ -247,7 +243,7 @@ def test_rollout_keeps_cpu_tokens_next_state_and_original_candidates():
 def test_terminal_and_nonterminal_bootstrap_are_distinct(done: bool):
     torch.manual_seed(32)
     agent = _agent(rollout_size=20)
-    state = _map_state(1)
+    state = _map_state(2)
     observation = _observation(state)
     action = agent.choose_action(observation)
     assert agent._pending is not None
@@ -256,7 +252,7 @@ def test_terminal_and_nonterminal_bootstrap_are_distinct(done: bool):
     next_observation = (
         _observation({"state_type": "game_over"})
         if done
-        else _observation(_map_state(1))
+        else _observation(_map_state(2))
     )
     agent.observe(
         Transition(
@@ -274,7 +270,9 @@ def test_terminal_and_nonterminal_bootstrap_are_distinct(done: bool):
     else:
         with torch.no_grad():
             next_value = agent.game_encoder.value(
-                agent._rollout[0].next_state.to(agent.device)
+                agent.tokenizer.tokenize_state(
+                    agent._rollout[0].next_observation
+                ).to(agent.device)
             ).item()
         expected = 2.0 + agent.config.gamma * next_value - old_value
     assert advantages[0].item() == pytest.approx(expected)
@@ -283,9 +281,9 @@ def test_terminal_and_nonterminal_bootstrap_are_distinct(done: bool):
 def test_truncated_finish_updates_nonterminal_rollout():
     torch.manual_seed(33)
     agent = _agent(rollout_size=20)
-    observation = _observation(_map_state(1))
+    observation = _observation(_map_state(2))
     action = agent.choose_action(observation)
-    next_observation = _observation(_map_state(1))
+    next_observation = _observation(_map_state(2))
     agent.observe(
         Transition(
             state=observation,
@@ -302,23 +300,63 @@ def test_truncated_finish_updates_nonterminal_rollout():
     assert not agent._rollout
 
 
-def test_observed_action_must_match_sampled_candidate():
+def test_forced_single_candidate_is_executed_without_entering_the_rollout():
     torch.manual_seed(34)
-    agent = _agent()
-    observation = _observation(_map_state(2))
-    sampled = agent.choose_action(observation)
-    other_index = 1 - int(sampled.params["index"])
+    agent = _agent(rollout_size=20)
+    observation = _observation(_map_state(1))
 
-    with pytest.raises(ValueError, match="does not match"):
-        agent.observe(
-            Transition(
-                state=observation,
-                action=GameAction("choose_map_node", index=other_index),
-                reward=0.0,
-                next_state=_observation(_map_state(1)),
-                done=False,
-            )
+    action = agent.choose_action(observation)
+    agent.observe(
+        Transition(
+            state=observation,
+            action=action,
+            reward=3.0,
+            next_state=_observation(_map_state(2)),
+            done=False,
         )
+    )
+
+    assert action.to_dict() == {"type": "choose_map_node", "index": 0}
+    assert agent._pending is None
+    assert agent._rollout == []
+    assert agent.environment_steps == 1
+    assert agent._carried_reward == 3.0
+
+
+def test_forced_step_reward_is_folded_into_the_preceding_decision():
+    torch.manual_seed(39)
+    agent = _agent(rollout_size=20)
+    decision_observation = _observation(_map_state(2))
+    forced_observation = _observation(_map_state(1))
+
+    action = agent.choose_action(decision_observation)
+    agent.observe(
+        Transition(
+            state=decision_observation,
+            action=action,
+            reward=1.0,
+            next_state=forced_observation,
+            done=False,
+        )
+    )
+    forced_action = agent.choose_action(forced_observation)
+    terminal = _observation({"state_type": "game_over"})
+    agent.update = lambda: {}  # type: ignore[method-assign]
+    agent.observe(
+        Transition(
+            state=forced_observation,
+            action=forced_action,
+            reward=4.0,
+            next_state=terminal,
+            done=True,
+        )
+    )
+
+    assert len(agent._rollout) == 1
+    assert agent._rollout[0].reward == pytest.approx(5.0)
+    assert agent._rollout[0].done is True
+    assert agent._rollout[0].next_observation is terminal
+    assert agent.environment_steps == 2
 
 
 def test_evaluation_is_deterministic_and_does_not_collect_rollouts():

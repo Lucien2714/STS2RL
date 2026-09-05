@@ -13,7 +13,7 @@ from torch.nn import functional as F
 from sts2rl.actions import GameAction
 from sts2rl.agents.action_space import LegalActionProvider
 from sts2rl.agents.base import Agent, Transition
-from sts2rl.encoder import GameEncoder, GameTokenizer, TokenizedDecision, TokenizedState
+from sts2rl.encoder import GameEncoder, GameTokenizer, TokenizedDecision
 from sts2rl.env.types import GameObservation
 
 
@@ -30,10 +30,13 @@ class PPOConfig:
     max_grad_norm: float = 0.5
     rollout_size: int = 256
     update_epochs: int = 4
+    minibatch_size: int = 32
 
     def __post_init__(self) -> None:
         if self.rollout_size < 1 or self.update_epochs < 1:
             raise ValueError("rollout_size and update_epochs must be positive")
+        if self.minibatch_size < 1:
+            raise ValueError("minibatch_size must be positive")
         if self.learning_rate <= 0 or self.max_grad_norm <= 0:
             raise ValueError("learning_rate and max_grad_norm must be positive")
         if not 0 <= self.gamma <= 1 or not 0 <= self.gae_lambda <= 1:
@@ -45,7 +48,6 @@ class PPOConfig:
 @dataclass
 class _PendingDecision:
     decision: TokenizedDecision
-    candidates: tuple[GameAction, ...]
     action_index: int
     log_probability: Tensor
     value: Tensor
@@ -54,8 +56,7 @@ class _PendingDecision:
 @dataclass
 class _RolloutStep:
     decision: TokenizedDecision
-    next_state: TokenizedState
-    candidates: tuple[GameAction, ...]
+    next_observation: GameObservation
     action_index: int
     old_log_probability: Tensor
     old_value: Tensor
@@ -85,6 +86,8 @@ class CandidatePPOAgent(Agent):
         )
         self.training_enabled = True
         self._pending: _PendingDecision | None = None
+        self._forced_action = False
+        self._carried_reward = 0.0
         self._rollout: list[_RolloutStep] = []
         self.last_update: dict[str, float] = {}
         self.environment_steps = 0
@@ -94,6 +97,8 @@ class CandidatePPOAgent(Agent):
     def reset(self, initial_state: GameObservation) -> None:
         del initial_state
         self._pending = None
+        self._forced_action = False
+        self._carried_reward = 0.0
 
     def choose_action(self, state: GameObservation) -> GameAction:
         if self._pending is not None:
@@ -101,8 +106,14 @@ class CandidatePPOAgent(Agent):
                 "observe() must be called before choosing another action"
             )
 
-        raw_state = state.raw_state
-        candidates = self.action_provider.require_candidates(raw_state)
+        candidates = self.action_provider.require_candidates(state.raw_state)
+        # A single candidate carries no policy gradient: its log probability is
+        # always zero and its ratio always one, so training on it only dilutes
+        # the advantage statistics of genuine decisions.
+        if len(candidates) == 1:
+            self._forced_action = True
+            return candidates[0]
+
         decision = self.tokenizer.tokenize_decision(state, candidates)
         with torch.no_grad():
             output = self.game_encoder.policy_value(decision.to(self.device))
@@ -117,7 +128,6 @@ class CandidatePPOAgent(Agent):
         if self.training_enabled:
             self._pending = _PendingDecision(
                 decision=decision,
-                candidates=candidates,
                 action_index=action_index,
                 log_probability=log_probability.detach().cpu(),
                 value=output.value.detach().cpu(),
@@ -125,31 +135,49 @@ class CandidatePPOAgent(Agent):
         return candidates[action_index]
 
     def observe(self, transition: Transition) -> None:
+        forced = self._forced_action
+        self._forced_action = False
         if not self.training_enabled:
             return
-        if self._pending is None:
-            raise RuntimeError("choose_action() must be called before observe()")
-
-        chosen_action = self._pending.candidates[self._pending.action_index]
-        if chosen_action.to_dict() != transition.action.to_dict():
-            raise ValueError("observed action does not match the sampled PPO action")
 
         self.environment_steps += 1
-        self._rollout.append(
-            _RolloutStep(
-                decision=self._pending.decision,
-                next_state=self.tokenizer.tokenize_state(transition.next_state),
-                candidates=self._pending.candidates,
-                action_index=self._pending.action_index,
-                old_log_probability=self._pending.log_probability,
-                old_value=self._pending.value,
-                reward=float(transition.reward),
-                done=transition.done,
+        if forced:
+            self._absorb_forced_transition(transition)
+        else:
+            if self._pending is None:
+                raise RuntimeError("choose_action() must be called before observe()")
+            self._rollout.append(
+                _RolloutStep(
+                    decision=self._pending.decision,
+                    next_observation=transition.next_state,
+                    action_index=self._pending.action_index,
+                    old_log_probability=self._pending.log_probability,
+                    old_value=self._pending.value,
+                    reward=float(transition.reward) + self._carried_reward,
+                    done=transition.done,
+                )
             )
-        )
-        self._pending = None
-        if len(self._rollout) >= self.config.rollout_size or transition.done:
+            self._carried_reward = 0.0
+            self._pending = None
+        if self._rollout and (
+            len(self._rollout) >= self.config.rollout_size or self._rollout[-1].done
+        ):
             self.update()
+
+    def _absorb_forced_transition(self, transition: Transition) -> None:
+        """Merge a forced step into the decision it followed.
+
+        Forced steps are never scored, so their reward would otherwise be lost.
+        Extending the preceding recorded transition keeps the return of every
+        trained decision equal to the return the environment actually paid.
+        """
+        if not self._rollout or self._pending is not None:
+            self._carried_reward += float(transition.reward)
+            return
+        last = self._rollout[-1]
+        last.reward += float(transition.reward)
+        last.next_observation = transition.next_state
+        last.done = transition.done
 
     def finish_episode(self, final_state: GameObservation, truncated: bool) -> None:
         del final_state, truncated
@@ -208,6 +236,8 @@ class CandidatePPOAgent(Agent):
     def abort_episode(self) -> None:
         """Discard an incomplete action and rollout without undoing prior updates."""
         self._pending = None
+        self._forced_action = False
+        self._carried_reward = 0.0
         self._rollout.clear()
 
     def update(self) -> dict[str, float]:
@@ -223,53 +253,13 @@ class CandidatePPOAgent(Agent):
 
         metrics: dict[str, float] = {}
         for _ in range(self.config.update_epochs):
-            policy_losses: list[Tensor] = []
-            value_losses: list[Tensor] = []
-            entropies: list[Tensor] = []
-            for index, step in enumerate(self._rollout):
-                output = self.game_encoder.policy_value(step.decision.to(self.device))
-                distribution = Categorical(logits=output.logits)
-                action_index = torch.tensor(step.action_index, device=self.device)
-                new_log_probability = distribution.log_prob(action_index)
-                ratio = torch.exp(
-                    new_log_probability - step.old_log_probability.to(self.device)
+            order = torch.randperm(len(self._rollout)).tolist()
+            for start in range(0, len(order), self.config.minibatch_size):
+                metrics = self._optimize_minibatch(
+                    order[start : start + self.config.minibatch_size],
+                    advantages,
+                    returns,
                 )
-                advantage = advantages[index]
-                unclipped = ratio * advantage
-                clipped = (
-                    torch.clamp(
-                        ratio,
-                        1.0 - self.config.clip_ratio,
-                        1.0 + self.config.clip_ratio,
-                    )
-                    * advantage
-                )
-                policy_losses.append(-torch.minimum(unclipped, clipped))
-                value_losses.append(F.mse_loss(output.value, returns[index]))
-                entropies.append(distribution.entropy())
-
-            policy_loss = torch.stack(policy_losses).mean()
-            value_loss = torch.stack(value_losses).mean()
-            entropy = torch.stack(entropies).mean()
-            loss = (
-                policy_loss
-                + self.config.value_coefficient * value_loss
-                - self.config.entropy_coefficient * entropy
-            )
-            self.optimizer.zero_grad()
-            loss.backward()
-            gradient_norm = nn.utils.clip_grad_norm_(
-                self.game_encoder.parameters(), self.config.max_grad_norm
-            )
-            self.optimizer.step()
-            metrics = {
-                "loss": float(loss.detach().cpu()),
-                "policy_loss": float(policy_loss.detach().cpu()),
-                "value_loss": float(value_loss.detach().cpu()),
-                "entropy": float(entropy.detach().cpu()),
-                "gradient_norm": float(gradient_norm.detach().cpu()),
-                "rollout_steps": float(len(self._rollout)),
-            }
 
         self.optimizer_updates += 1
         metrics["environment_steps"] = float(self.environment_steps)
@@ -279,6 +269,62 @@ class CandidatePPOAgent(Agent):
         self._completed_update_metrics.append(dict(metrics))
         return metrics
 
+    def _optimize_minibatch(
+        self,
+        indices: list[int],
+        advantages: Tensor,
+        returns: Tensor,
+    ) -> dict[str, float]:
+        """Run one clipped-surrogate optimizer step over a subset of the rollout."""
+        policy_losses: list[Tensor] = []
+        value_losses: list[Tensor] = []
+        entropies: list[Tensor] = []
+        for index in indices:
+            step = self._rollout[index]
+            output = self.game_encoder.policy_value(step.decision.to(self.device))
+            distribution = Categorical(logits=output.logits)
+            action_index = torch.tensor(step.action_index, device=self.device)
+            new_log_probability = distribution.log_prob(action_index)
+            ratio = torch.exp(
+                new_log_probability - step.old_log_probability.to(self.device)
+            )
+            advantage = advantages[index]
+            unclipped = ratio * advantage
+            clipped = (
+                torch.clamp(
+                    ratio,
+                    1.0 - self.config.clip_ratio,
+                    1.0 + self.config.clip_ratio,
+                )
+                * advantage
+            )
+            policy_losses.append(-torch.minimum(unclipped, clipped))
+            value_losses.append(F.mse_loss(output.value, returns[index]))
+            entropies.append(distribution.entropy())
+
+        policy_loss = torch.stack(policy_losses).mean()
+        value_loss = torch.stack(value_losses).mean()
+        entropy = torch.stack(entropies).mean()
+        loss = (
+            policy_loss
+            + self.config.value_coefficient * value_loss
+            - self.config.entropy_coefficient * entropy
+        )
+        self.optimizer.zero_grad()
+        loss.backward()
+        gradient_norm = nn.utils.clip_grad_norm_(
+            self.game_encoder.parameters(), self.config.max_grad_norm
+        )
+        self.optimizer.step()
+        return {
+            "loss": float(loss.detach().cpu()),
+            "policy_loss": float(policy_loss.detach().cpu()),
+            "value_loss": float(value_loss.detach().cpu()),
+            "entropy": float(entropy.detach().cpu()),
+            "gradient_norm": float(gradient_norm.detach().cpu()),
+            "rollout_steps": float(len(self._rollout)),
+        }
+
     def _advantages_and_returns(self) -> tuple[Tensor, Tensor]:
         values = torch.stack([step.old_value for step in self._rollout]).to(self.device)
         advantages = torch.zeros(len(self._rollout), device=self.device)
@@ -287,7 +333,11 @@ class CandidatePPOAgent(Agent):
             next_value = (
                 torch.zeros((), device=self.device)
                 if last_step.done
-                else self.game_encoder.value(last_step.next_state.to(self.device))
+                else self.game_encoder.value(
+                    self.tokenizer.tokenize_state(last_step.next_observation).to(
+                        self.device
+                    )
+                )
             )
             gae = torch.zeros((), device=self.device)
             for index in range(len(self._rollout) - 1, -1, -1):
@@ -314,10 +364,6 @@ class CandidatePPOAgent(Agent):
         if self._rollout:
             raise RuntimeError(
                 f"cannot {operation} a checkpoint with a non-empty rollout"
-            )
-        if self._completed_update_metrics:
-            raise RuntimeError(
-                f"cannot {operation} a checkpoint with undrained update metrics"
             )
 
     @staticmethod
