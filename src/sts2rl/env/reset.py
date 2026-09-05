@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import time
 from typing import Any
 
 from sts2rl.actions.dispatcher import ActionDispatcher
@@ -37,9 +38,17 @@ class ResetSpec:
 
 
 def enabled_option_names(raw_state: RawState) -> set[str]:
-    """Return enabled menu option names normalized for comparisons."""
+    """Return enabled menu option names normalized for comparisons.
+
+    Some screens advertise their options inside the block named after the
+    state type rather than at the top level; ``game_over`` is one.
+    """
     names: set[str] = set()
-    options = raw_state.get("options", [])
+    options = raw_state.get("options")
+    if options is None:
+        nested = raw_state.get(str(raw_state.get("state_type")))
+        if isinstance(nested, dict):
+            options = nested.get("options")
     if not isinstance(options, list):
         return names
 
@@ -55,22 +64,71 @@ def enabled_option_names(raw_state: RawState) -> set[str]:
     return names
 
 
+MENU_STATE_TYPES = frozenset({"menu", "game_over"})
+
+# The API reports "unknown" while a screen is still loading. It is neither a
+# menu to navigate nor a state any agent can act in, so reset waits it out
+# rather than handing it to the caller.
+TRANSITIONAL_STATE_TYPES = frozenset({"unknown"})
+
+
+def is_run_state(raw_state: RawState) -> bool:
+    """Return whether this state is a settled, playable part of a run."""
+    state_type = raw_state.get("state_type")
+    return (
+        state_type not in MENU_STATE_TYPES
+        and state_type not in TRANSITIONAL_STATE_TYPES
+    )
+
+
+def selected_character_id(raw_state: RawState) -> str | None:
+    """Return the currently selected character id, or None if none is reported.
+
+    The menu reports the selection in one of two shapes depending on screen and
+    mod build: a top-level ``selected`` object, or a ``selected`` flag on each
+    character entry.  Reading only the per-entry flag makes an already-selected
+    character look unselected, so reset re-sends the same option forever.
+    """
+    selected = raw_state.get("selected")
+    if isinstance(selected, dict):
+        identifier = selected.get("character") or selected.get("id")
+        if isinstance(identifier, str) and identifier:
+            return identifier
+    elif isinstance(selected, str) and selected:
+        return selected
+
+    characters = raw_state.get("characters")
+    if isinstance(characters, list):
+        for character in characters:
+            if isinstance(character, dict) and character.get("selected"):
+                identifier = character.get("id") or character.get("name")
+                if isinstance(identifier, str) and identifier:
+                    return identifier
+    return None
+
+
 class ResetController:
     """Drive the STS2MCP menu state machine until a run becomes active."""
 
     MAX_TRANSITIONS = 10
+    START_POLL_ATTEMPTS = 20
+    START_POLL_SECONDS = 0.25
 
     def __init__(
         self,
         client: Any,
         dispatcher: ActionDispatcher,
         max_transitions: int = MAX_TRANSITIONS,
+        start_poll_attempts: int = START_POLL_ATTEMPTS,
+        start_poll_seconds: float = START_POLL_SECONDS,
     ) -> None:
         if max_transitions < 1:
             raise ValueError("max_transitions must be at least 1")
         self.client = client
         self.dispatcher = dispatcher
         self.max_transitions = max_transitions
+        self.start_poll_attempts = start_poll_attempts
+        self.start_poll_seconds = start_poll_seconds
 
     def reset(self, spec: ResetSpec) -> RawState:
         """Start a new run, or explicitly reuse an active run when permitted."""
@@ -79,8 +137,9 @@ class ResetController:
             raise ValueError(f"Unsupported character index: {spec.character}")
 
         raw_state = extract_raw_state(self.client.get_state())
-        state_type = raw_state.get("state_type")
-        if state_type not in {"menu", "game_over"}:
+        if raw_state.get("state_type") in TRANSITIONAL_STATE_TYPES:
+            raw_state = self._await_stable_state(raw_state)
+        if raw_state.get("state_type") not in MENU_STATE_TYPES:
             if spec.allow_active_run:
                 return raw_state
             raise STS2ClientError(
@@ -91,8 +150,11 @@ class ResetController:
         seen_states: set[tuple[Any, ...]] = set()
         for _ in range(self.max_transitions):
             state_type = raw_state.get("state_type")
-            if state_type not in {"menu", "game_over"}:
+            if is_run_state(raw_state):
                 return raw_state
+            if state_type in TRANSITIONAL_STATE_TYPES:
+                raw_state = self._await_stable_state(raw_state)
+                continue
 
             signature = self._menu_signature(raw_state)
             if signature in seen_states:
@@ -102,9 +164,18 @@ class ResetController:
             seen_states.add(signature)
 
             if state_type == "game_over":
-                raw_state = self._select(raw_state, "main_menu")
+                advanced = self._leave_game_over(raw_state)
             else:
-                raw_state = self._advance_menu(raw_state, spec, character_id)
+                advanced = self._advance_menu(raw_state, spec, character_id)
+
+            # A menu that reports no change may simply not have applied the
+            # transition yet, so give it a moment before calling it a stall.
+            if (
+                not is_run_state(advanced)
+                and self._menu_signature(advanced) == signature
+            ):
+                advanced = self._await_stable_state(advanced)
+            raw_state = advanced
 
         raise STS2ClientError(
             f"Reset did not start a run after {self.max_transitions} "
@@ -141,23 +212,18 @@ class ResetController:
                 seed=spec.run_seed if spec.uses_seed else None,
             )
 
-        if menu_screen == "custom_run":
+        if menu_screen in {"custom_run", "character_select"}:
             if self._needs_character_selection(
-                raw_state, character_id, missing_means_selected=True
+                raw_state,
+                character_id,
+                missing_means_selected=menu_screen == "custom_run",
             ):
                 return self._select(raw_state, character_id)
-            return self._select(
+            return self._start_run(
                 raw_state,
-                spec.start_run_option,
+                spec,
                 seed=spec.run_seed if spec.uses_seed else None,
             )
-
-        if menu_screen == "character_select":
-            if self._needs_character_selection(
-                raw_state, character_id, missing_means_selected=False
-            ):
-                return self._select(raw_state, character_id)
-            return self._select(raw_state, spec.start_run_option)
 
         if menu_screen == "tutorial_prompt":
             return self._select(raw_state, "no")
@@ -166,6 +232,80 @@ class ResetController:
             f"Reset stopped at unsupported menu_screen={menu_screen!r}: "
             f"{raw_state}"
         )
+
+    def _leave_game_over(self, raw_state: RawState) -> RawState:
+        """Return to the main menu, tolerating a screen that already left.
+
+        The game-over screen dismisses itself, so the request can arrive after
+        the menu has moved on and be rejected as an unknown option.  That is
+        the outcome we wanted, not a failure.
+        """
+        try:
+            return self._select(raw_state, "main_menu")
+        except STS2ClientError:
+            return self._await_stable_state(raw_state)
+
+    def _start_run(
+        self,
+        raw_state: RawState,
+        spec: ResetSpec,
+        *,
+        seed: str | None = None,
+    ) -> RawState:
+        """Press the start button, then wait for the run to actually begin.
+
+        Starting is not instantaneous: the menu first disables every control
+        while the run loads, so the screen briefly advertises character buttons
+        and nothing else.  Pressing start again there fails, so a screen that no
+        longer offers it is treated as already-started and waited on instead.
+        """
+        option = self._start_option(raw_state, spec.start_run_option)
+        if option is None:
+            return self._await_stable_state(raw_state)
+        started = self._select(raw_state, option, seed=seed)
+        if is_run_state(started):
+            return started
+        return self._await_stable_state(started)
+
+    @staticmethod
+    def _start_option(raw_state: RawState, preferred: str) -> str | None:
+        """Pick a usable start button, or None when the screen offers none.
+
+        A menu that advertises no options at all tells us nothing, so the
+        preferred button is sent as before; only an explicit option list that
+        omits every start button means the run is already on its way.
+        """
+        advertised = raw_state.get("options")
+        if not isinstance(advertised, list) or not advertised:
+            return preferred
+        options = enabled_option_names(raw_state)
+        return next(
+            (
+                candidate
+                for candidate in (preferred, "confirm", "embark")
+                if candidate.casefold() in options
+            ),
+            None,
+        )
+
+    def _await_stable_state(self, raw_state: RawState) -> RawState:
+        """Poll until the game settles into a run, or into a different menu.
+
+        Both the start button and the first screen of a run take a moment to
+        land, and in between the API reports either an unchanged menu or a
+        transitional state. Returning either would hand the caller something
+        no agent can act in.
+        """
+        for _ in range(self.start_poll_attempts):
+            time.sleep(self.start_poll_seconds)
+            polled = extract_raw_state(self.client.get_state())
+            if is_run_state(polled):
+                return polled
+            if polled.get("state_type") in MENU_STATE_TYPES and self._menu_signature(
+                polled
+            ) != self._menu_signature(raw_state):
+                return polled
+        return raw_state
 
     def _select(
         self,
@@ -198,28 +338,16 @@ class ResetController:
             return not missing_means_selected
 
         target = character_id.casefold()
-        for character in characters:
-            if not isinstance(character, dict):
-                continue
-            identifier = character.get("id") or character.get("name")
-            if isinstance(identifier, str) and identifier.casefold() == target:
-                return not bool(character.get("selected"))
-        return True
+        selected = selected_character_id(raw_state)
+        if selected is not None:
+            return selected.casefold() != target
+        return not missing_means_selected
 
     @staticmethod
     def _menu_signature(raw_state: RawState) -> tuple[Any, ...]:
-        characters = raw_state.get("characters", [])
-        character_state = tuple(
-            (
-                str(character.get("id") or character.get("name")),
-                bool(character.get("selected")),
-            )
-            for character in characters
-            if isinstance(character, dict)
-        ) if isinstance(characters, list) else ()
         return (
             raw_state.get("state_type"),
             raw_state.get("menu_screen"),
             tuple(sorted(enabled_option_names(raw_state))),
-            character_state,
+            selected_character_id(raw_state),
         )

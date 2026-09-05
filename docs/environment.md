@@ -19,12 +19,16 @@ layers consume `RawState` after the raw transition boundary is stable.
 
 `EpisodeRunner` turns that raw boundary into the Agent-facing observation:
 
-- it fetches player detail once after reset;
-- it fetches it once for every nonterminal next state;
-- a state refresh refreshes raw state and player detail together;
+- it fetches player detail once after reset, and once per nonterminal state
+  outside battle;
+- inside a battle it reuses one snapshot, because the master deck it supplies
+  cannot change mid-battle and refetching would cost an HTTP round trip per
+  step;
 - terminal observations use `player_detail=None` and make no detail request;
-- an `STS2ClientError` while loading required detail becomes an explicit
-  `ObservationError` instead of silently training without the permanent deck.
+- player detail is an enrichment, not a requirement. Older STS2MCP builds do
+  not serve `/player-detail` at all; the runner then warns once, leaves
+  `player_detail=None`, and stops requesting it, so training runs without the
+  master deck in observations rather than failing.
 
 Reward models continue to receive raw previous/next states. `EpisodeResult`
 also keeps raw initial/final states, while each `Transition` stores exactly the

@@ -14,10 +14,11 @@ STS2RL is built from the environment boundary outward. The layers are:
 - `training/`: multi-episode orchestration, JSONL and TensorBoard metrics, and
   versioned atomic checkpoints.
 
-The environment returns a raw game state and the runner pairs it with full
-player detail, reusing one detail snapshot for the duration of a battle since
-the deck cannot change mid-battle. Encoding and reward calculation stay outside
-the environment. PPO consumes the resulting `GameObservation`, scores only its
+The environment returns a raw game state and the runner pairs it with player
+detail when the mod serves it, reusing one snapshot for the duration of a
+battle since the deck cannot change mid-battle. Detail is optional: builds
+without the endpoint simply train without the master deck. Encoding and reward
+calculation stay outside the environment. PPO consumes the resulting `GameObservation`, scores only its
 current structured legal actions, and trains the full encoder without a fixed
 global action table.
 

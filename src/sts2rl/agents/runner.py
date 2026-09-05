@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import time
+import warnings
 
 from sts2rl.actions import GameAction
 from sts2rl.agents.action_space import NoLegalActionsError
@@ -14,10 +15,6 @@ from sts2rl.env.mcp_client import STS2ClientError
 from sts2rl.env.reset import ResetSpec
 from sts2rl.env.rewards import BattleProgressReward, RewardModel
 from sts2rl.env.types import GameObservation, RawState
-
-
-class ObservationError(RuntimeError):
-    """Raised when a required full player-detail snapshot cannot be obtained."""
 
 
 @dataclass(frozen=True)
@@ -62,6 +59,7 @@ class EpisodeRunner:
         self.max_state_refreshes = max_state_refreshes
         self.refresh_backoff_seconds = refresh_backoff_seconds
         self._cached_player_detail: RawState | None = None
+        self._player_detail_available = True
 
     def run(self, reset_spec: ResetSpec | None = None) -> EpisodeResult:
         """Reset the environment and run until game over or the step limit."""
@@ -158,12 +156,17 @@ class EpisodeRunner:
             player_detail=self._player_detail(raw_state),
         )
 
-    def _player_detail(self, raw_state: RawState) -> RawState:
+    def _player_detail(self, raw_state: RawState) -> RawState | None:
         """Fetch player detail, reusing the snapshot for the duration of a battle.
 
-        The deck is the only field this adds over the raw state, and the deck
-        cannot change mid-battle, so one fetch per battle replaces one per step.
+        The master deck is the only field this adds over the raw state, and the
+        deck cannot change mid-battle, so one fetch per battle replaces one per
+        step.  Older STS2MCP builds do not serve the endpoint at all; the deck
+        is then simply absent from observations rather than fatal, and the
+        endpoint is not retried on every later step.
         """
+        if not self._player_detail_available:
+            return None
         if (
             self._cached_player_detail is not None
             and raw_state.get("state_type") in BATTLE_STATE_TYPES
@@ -173,8 +176,12 @@ class EpisodeRunner:
             self._cached_player_detail = self.env.get_player_detail()
         except STS2ClientError as exc:
             if self._cached_player_detail is None:
-                raise ObservationError(
-                    "Failed to obtain required player detail for "
-                    f"state_type={raw_state.get('state_type')!r}: {exc}"
-                ) from exc
+                self._player_detail_available = False
+                warnings.warn(
+                    f"STS2MCP did not serve player detail ({exc}). Training "
+                    "continues, but observations will not include the master "
+                    "deck. A newer STS2MCP build restores it.",
+                    RuntimeWarning,
+                    stacklevel=2,
+                )
         return self._cached_player_detail

@@ -7,7 +7,6 @@ from sts2rl.agents import (
     Agent,
     EpisodeRunner,
     LegalActionProvider,
-    ObservationError,
     Transition,
 )
 from sts2rl.env.mcp_client import STS2ClientError
@@ -241,14 +240,21 @@ def _battle_state():
     }
 
 
-def test_player_detail_failure_terminates_explicitly():
+def test_missing_player_detail_endpoint_degrades_instead_of_failing():
+    """Older STS2MCP builds do not serve player detail; the deck is optional."""
+
     class BrokenDetailEnv(FakeEnv):
         def get_player_detail(self):
-            raise STS2ClientError("detail unavailable")
+            self.detail_calls += 1
+            raise STS2ClientError("HTTP 404: Not found")
 
-    with pytest.raises(ObservationError, match="state_type='map'"):
-        EpisodeRunner(
-            BrokenDetailEnv(),
-            RecordingAgent(),
-            reward_model=FixedReward(),
-        ).run()
+    env = BrokenDetailEnv()
+    agent = RecordingAgent()
+
+    with pytest.warns(RuntimeWarning, match="master deck"):
+        result = EpisodeRunner(env, agent, reward_model=FixedReward()).run()
+
+    assert result.terminated is True
+    assert result.steps == 1
+    assert agent.initial.player_detail is None
+    assert env.detail_calls == 1
