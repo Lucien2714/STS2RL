@@ -133,11 +133,8 @@ class GameTokenizer:
         self, observation: GameObservation
     ) -> tuple[TokenizedState, _ReferenceRegistry]:
         state = observation.raw_state
-        detail = observation.player_detail or {}
-        raw_player = _mapping(state.get("player"))
-        detail_player = _mapping(detail.get("player"))
-        player = {**detail_player, **raw_player}
-        run = {**_mapping(detail.get("run")), **_mapping(state.get("run"))}
+        player = _mapping(state.get("player"))
+        run = _mapping(state.get("run"))
 
         global_values = {
             "state_type": _text(state.get("state_type")),
@@ -157,7 +154,7 @@ class GameTokenizer:
         rows = {kind: _EntityRows() for kind in ENTITY_KINDS}
         registry = _ReferenceRegistry()
         player_ref = self._add_player(rows, player)
-        self._add_cards(rows, state, player, detail_player, registry)
+        self._add_cards(rows, state, player, registry)
         self._add_inventory(rows, player, registry)
         self._add_combat_entities(rows, state, player, player_ref, registry)
         self._add_screen_entities(rows, state, registry)
@@ -321,7 +318,6 @@ class GameTokenizer:
             ratio_feature(player.get("energy"), player.get("max_energy")),
             linear_feature(player.get("stars")),
             linear_feature(player.get("max_potion_slots")),
-            signed_log_feature(player.get("deck_count")),
             signed_log_feature(player.get("draw_pile_count")),
             signed_log_feature(player.get("discard_pile_count")),
             signed_log_feature(player.get("exhaust_pile_count")),
@@ -351,10 +347,8 @@ class GameTokenizer:
         rows: dict[str, _EntityRows],
         state: Mapping[str, object],
         player: Mapping[str, object],
-        detail_player: Mapping[str, object],
         registry: _ReferenceRegistry,
     ) -> None:
-        self._add_grouped_cards(rows, _records(detail_player.get("deck")), "deck")
         self._add_individual_cards(
             rows,
             _records(player.get("hand")),
@@ -456,11 +450,6 @@ class GameTokenizer:
         selection_type: str | None = None,
         selected: bool | None = None,
     ) -> int:
-        enchanted = card.get("is_enchanted")
-        enchantment = _mapping(card.get("enchantment"))
-        enchantment_id = _text(enchantment.get("id") or enchantment.get("name"))
-        if enchanted is True and enchantment_id is None:
-            enchantment_id = "<present-but-unknown>"
         return rows["card"].append(
             [
                 self.vocabulary.lookup("cards", _identity(card)),
@@ -469,19 +458,15 @@ class GameTokenizer:
                 self.vocabulary.lookup("card_zones", zone),
                 self.vocabulary.lookup("entity_zones", zone),
                 self.vocabulary.lookup("target_types", _text(card.get("target_type"))),
-                self.vocabulary.lookup("enchantments", enchantment_id),
                 self.vocabulary.lookup("selection_types", selection_type),
             ],
             [
                 _cost_feature(card.get("cost")),
                 _cost_feature(card.get("star_cost")),
                 _upgrade_feature(card),
-                linear_feature(card.get("max_upgrade_level")),
                 signed_log_feature(copy_count),
                 linear_feature(position),
                 _bool_feature(card.get("can_play")),
-                _bool_feature(card.get("is_upgradable")),
-                _bool_feature(enchanted),
                 _bool_feature(selected),
             ],
             activity=_activity(card, positive=("active", "is_active", "can_play")),
@@ -1314,7 +1299,11 @@ def _selected_indices(selection: Mapping[str, object]) -> set[int]:
 
 
 def _card_signature(card: Mapping[str, object]) -> tuple[object, ...]:
-    enchantment = _mapping(card.get("enchantment"))
+    """Group observationally identical pile cards.
+
+    Pile cards carry only name, cost, star cost, and description, so the
+    description is what separates an upgraded copy from its base version.
+    """
     return (
         _identity(card),
         _text(card.get("type")),
@@ -1322,12 +1311,9 @@ def _card_signature(card: Mapping[str, object]) -> tuple[object, ...]:
         _text(card.get("star_cost")),
         _text(card.get("target_type")),
         _text(card.get("rarity")),
+        _text(card.get("description")),
         card.get("is_upgraded"),
-        card.get("is_upgradable"),
         card.get("current_upgrade_level"),
-        card.get("max_upgrade_level"),
-        card.get("is_enchanted"),
-        _identity(enchantment),
     )
 
 

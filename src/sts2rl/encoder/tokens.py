@@ -131,7 +131,7 @@ class TokenizedEntityBatch:
             ``"enemy"``.  Map nodes are not allowed here.
         categorical: Long tensor
             ``[entity_count, categorical_feature_count]``.  A card row can
-            contain card ID, type, rarity, zone, enchantment, and target IDs.
+            contain card ID, type, rarity, zone, and target IDs.
         numeric: Float32 tensor ``[entity_count, numeric_feature_count]``.
         numeric_mask: Bool tensor matching ``numeric``.  False entries mark
             source values that were absent rather than numerically zero.

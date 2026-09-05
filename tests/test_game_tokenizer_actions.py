@@ -529,10 +529,7 @@ def test_every_legal_screen_fixture_tokenizes_its_complete_candidate_set(
 ):
     del case_name
     candidates = LegalActionProvider().require_candidates(state)
-    observation = GameObservation(
-        state,
-        {"state_type": "player_detail", "player": {"deck": []}},
-    )
+    observation = GameObservation(state)
 
     decision = tokenizer.tokenize_decision(observation, candidates)
 

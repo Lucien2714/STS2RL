@@ -11,10 +11,14 @@ RawState: TypeAlias = dict[str, Any]
 
 @dataclass(frozen=True)
 class GameObservation:
-    """Agent input combining one raw state with optional full player detail."""
+    """Agent input for one decision point.
+
+    The official API exposes everything the agent sees under one state, so this
+    currently wraps exactly that; it stays a type of its own so enrichment can
+    be added without changing every signature between the env and the agent.
+    """
 
     raw_state: RawState
-    player_detail: RawState | None = None
 
 
 @dataclass(frozen=True)

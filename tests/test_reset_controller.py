@@ -480,3 +480,70 @@ def test_reset_waits_out_a_stale_transition_response():
     state = controller(client).reset(ResetSpec(character=0))
 
     assert state["state_type"] == "map"
+
+
+class AscensionClient(TopLevelSelectionClient):
+    """character_select exposes ascension_up / ascension_down, one step each."""
+
+    def __init__(self, level=10, maximum=10):
+        super().__init__()
+        self.level = level
+        self.maximum = maximum
+
+    def menu_select(self, option, seed=None):
+        if option in {"ascension_up", "ascension_down"}:
+            self.calls.append((option, seed))
+            self.level += 1 if option == "ascension_up" else -1
+            self.state = self._character_select()
+            return {"state": self.state}
+        return super().menu_select(option, seed)
+
+    def _character_select(self):
+        state = super()._character_select()
+        state["ascension"] = {"level": self.level, "max": self.maximum}
+        options = [dict(item) for item in state["options"]]
+        if self.level < self.maximum:
+            options.append({"name": "ascension_up", "enabled": True})
+        if self.level > 0:
+            options.append({"name": "ascension_down", "enabled": True})
+        state["options"] = options
+        return state
+
+
+def test_reset_lowers_ascension_to_the_requested_level():
+    client = AscensionClient(level=10)
+
+    state = controller(client).reset(ResetSpec(character=0, ascension=2))
+
+    assert state["state_type"] == "map"
+    assert client.level == 2
+    assert client.calls.count(("ascension_down", None)) == 8
+    assert ("ascension_up", None) not in client.calls
+
+
+def test_reset_raises_ascension_to_the_requested_level():
+    client = AscensionClient(level=0, maximum=10)
+
+    state = controller(client).reset(ResetSpec(character=0, ascension=3))
+
+    assert state["state_type"] == "map"
+    assert client.level == 3
+    assert client.calls.count(("ascension_up", None)) == 3
+
+
+def test_reset_leaves_ascension_alone_when_none_is_requested():
+    client = AscensionClient(level=7)
+
+    controller(client).reset(ResetSpec(character=0))
+
+    assert client.level == 7
+    assert not any(name.startswith("ascension") for name, _ in client.calls)
+
+
+def test_reset_stops_at_the_end_of_the_ascension_range():
+    client = AscensionClient(level=0, maximum=10)
+
+    controller(client).reset(ResetSpec(character=0, ascension=-0))
+
+    assert client.level == 0
+    assert not any(name.startswith("ascension") for name, _ in client.calls)

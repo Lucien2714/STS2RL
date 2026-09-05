@@ -17,8 +17,27 @@ ResponseFormat = Literal["json", "markdown"]
 WikiItemType = Literal["all", "card", "relic"]
 GameCharacter = {0: "IRONCLAD", 1: "SILENT", 2: "REGENT", 3: "NECROBINDER", 4: "DEFECT"}
 
+
+def _state_of(data: Any) -> Optional[dict[str, Any]]:
+    """Return the game state an action response carries, if it carries one."""
+    if isinstance(data, dict):
+        state = data.get("state")
+        if isinstance(state, dict):
+            return state
+    return None
+
+
 class STS2ClientError(Exception):
-    """Raised when the STS2_MCP API returns an error or invalid response."""
+    """Raised when the STS2_MCP API returns an error or invalid response.
+
+    A rejected action changes nothing and the API returns the unchanged state
+    alongside the error, so it is carried here and callers can use it instead
+    of issuing a second request.
+    """
+
+    def __init__(self, message: str, state: Optional[dict[str, Any]] = None) -> None:
+        super().__init__(message)
+        self.state = state
 
 
 class STS2Client:
@@ -110,10 +129,13 @@ class STS2Client:
                 msg = data.get("error") or data.get("message") or str(data)
             else:
                 msg = str(data)
-            raise STS2ClientError(f"HTTP {response.status_code}: {msg}")
+            raise STS2ClientError(f"HTTP {response.status_code}: {msg}", _state_of(data))
 
         if isinstance(data, dict) and data.get("status") == "error":
-            raise STS2ClientError(data.get("error", "Unknown API error"))
+            raise STS2ClientError(
+                data.get("error", "Unknown API error"),
+                _state_of(data),
+            )
 
         return data
 
@@ -155,10 +177,6 @@ class STS2Client:
 
     def get_multiplayer_state(self, format: ResponseFormat = "json") -> Any:
         return self._get("multiplayer", {"format": format})
-
-    def get_player_detail(self) -> dict[str, Any]:
-        """Read full local player details for the active run."""
-        return self._get("player-detail")
 
     def get_profile(self) -> dict[str, Any]:
         return self._get("profile")

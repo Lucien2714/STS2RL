@@ -29,4 +29,4 @@ Metrics are written to JSONL and TensorBoard. See
 See [Architecture](docs/architecture.md), [Environment](docs/environment.md),
 [Agents](docs/agents.md), [Training](docs/training.md),
 [Rewards](docs/rewards.md), and the bundled
-[STS2MCP API reference](docs/STS2MCP-raw-full.md).
+[STS2MCP API reference](docs/raw-full.md).

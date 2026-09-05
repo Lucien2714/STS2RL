@@ -4,14 +4,11 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import time
-import warnings
 
 from sts2rl.actions import GameAction
 from sts2rl.agents.action_space import NoLegalActionsError
 from sts2rl.agents.base import Agent, Transition
-from sts2rl.env.constants import BATTLE_STATE_TYPES
 from sts2rl.env.game_env import GameEnv
-from sts2rl.env.mcp_client import STS2ClientError
 from sts2rl.env.reset import ResetSpec
 from sts2rl.env.rewards import BattleProgressReward, RewardModel
 from sts2rl.env.types import GameObservation, RawState
@@ -58,14 +55,11 @@ class EpisodeRunner:
         self.max_steps = max_steps
         self.max_state_refreshes = max_state_refreshes
         self.refresh_backoff_seconds = refresh_backoff_seconds
-        self._cached_player_detail: RawState | None = None
-        self._player_detail_available = True
 
     def run(self, reset_spec: ResetSpec | None = None) -> EpisodeResult:
         """Reset the environment and run until game over or the step limit."""
-        self._cached_player_detail = None
         initial_state = self.env.reset(reset_spec)
-        observation = self._observation(initial_state)
+        observation = GameObservation(initial_state)
         transitions: list[Transition] = []
         total_reward = 0.0
         self.reward_model.reset(initial_state)
@@ -87,10 +81,7 @@ class EpisodeRunner:
                     env_step.raw_state,
                     action.to_dict(),
                 )
-            next_observation = self._observation(
-                env_step.raw_state,
-                terminal=env_step.done,
-            )
+            next_observation = GameObservation(env_step.raw_state)
             transition = Transition(
                 state=observation,
                 action=action,
@@ -141,47 +132,5 @@ class EpisodeRunner:
                     return None
                 if self.refresh_backoff_seconds:
                     time.sleep(self.refresh_backoff_seconds * (2**attempt))
-                observation = self._observation(self.env.get_state())
+                observation = GameObservation(self.env.get_state())
 
-    def _observation(
-        self,
-        raw_state: RawState,
-        *,
-        terminal: bool = False,
-    ) -> GameObservation:
-        if terminal or raw_state.get("state_type") == "game_over":
-            return GameObservation(raw_state=raw_state, player_detail=None)
-        return GameObservation(
-            raw_state=raw_state,
-            player_detail=self._player_detail(raw_state),
-        )
-
-    def _player_detail(self, raw_state: RawState) -> RawState | None:
-        """Fetch player detail, reusing the snapshot for the duration of a battle.
-
-        The master deck is the only field this adds over the raw state, and the
-        deck cannot change mid-battle, so one fetch per battle replaces one per
-        step.  Older STS2MCP builds do not serve the endpoint at all; the deck
-        is then simply absent from observations rather than fatal, and the
-        endpoint is not retried on every later step.
-        """
-        if not self._player_detail_available:
-            return None
-        if (
-            self._cached_player_detail is not None
-            and raw_state.get("state_type") in BATTLE_STATE_TYPES
-        ):
-            return self._cached_player_detail
-        try:
-            self._cached_player_detail = self.env.get_player_detail()
-        except STS2ClientError as exc:
-            if self._cached_player_detail is None:
-                self._player_detail_available = False
-                warnings.warn(
-                    f"STS2MCP did not serve player detail ({exc}). Training "
-                    "continues, but observations will not include the master "
-                    "deck. A newer STS2MCP build restores it.",
-                    RuntimeWarning,
-                    stacklevel=2,
-                )
-        return self._cached_player_detail

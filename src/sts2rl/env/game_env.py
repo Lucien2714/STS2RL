@@ -6,7 +6,7 @@ from sts2rl.actions.dispatcher import ActionDispatcher
 from sts2rl.actions.game_action import GameAction
 from sts2rl.env.mcp_client import STS2Client, STS2ClientError
 from sts2rl.env.reset import ResetController, ResetSpec
-from sts2rl.env.state import extract_raw_state
+from sts2rl.env.state import extract_raw_state, response_state as _response_state
 from sts2rl.env.types import EnvStep, RawState
 
 
@@ -45,7 +45,7 @@ class GameEnv:
         try:
             api_result = self.action_dispatcher.dispatch(action)
         except STS2ClientError as exc:
-            raw_state = self.get_state()
+            raw_state = self._state_after(exc.state)
             return EnvStep(
                 raw_state=raw_state,
                 done=self._is_done(raw_state),
@@ -56,24 +56,23 @@ class GameEnv:
                 },
             )
 
-        raw_state = extract_raw_state(api_result)
+        raw_state = self._state_after(_response_state(api_result))
+        info: dict = {
+            "api_result": api_result,
+            "action": action_payload,
+            "action_error": False,
+        }
+        if isinstance(api_result, dict) and api_result.get("state_wait_timed_out"):
+            info["state_wait_timed_out"] = True
         return EnvStep(
             raw_state=raw_state,
             done=self._is_done(raw_state),
-            info={
-                "api_result": api_result,
-                "action": action_payload,
-                "action_error": False,
-            },
+            info=info,
         )
 
     def get_state(self) -> RawState:
         """Return and validate the current raw STS2MCP state."""
         return extract_raw_state(self.client.get_state())
-
-    def get_player_detail(self) -> RawState:
-        """Return full local player details for the active run."""
-        return extract_raw_state(self.client.get_player_detail())
 
     def is_end_state(self) -> bool:
         """Return whether the current backend state is game over."""
@@ -89,6 +88,17 @@ class GameEnv:
 
     def __exit__(self, exc_type, exc_value, traceback) -> None:
         self.close()
+
+    def _state_after(self, state: RawState | None) -> RawState:
+        """Use the state an action response carried, or read it if it carried none.
+
+        Every action response embeds the resulting state, so the common path
+        costs no extra request. A response whose state could not be read
+        (``state_error``) falls back to one GET.
+        """
+        if state is not None and state.get("state_type") is not None:
+            return state
+        return self.get_state()
 
     @staticmethod
     def _is_done(raw_state: RawState) -> bool:

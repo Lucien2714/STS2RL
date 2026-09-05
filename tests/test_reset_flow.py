@@ -63,9 +63,11 @@ def test_custom_seed_reset_embarks_before_returning_raw_state():
     state = env.reset(spec)
 
     assert state["state_type"] == "map"
+    # The seed rides on embark, not on the submenu's custom option: the API
+    # only accepts it in contexts that expose a real seeded flow.
     assert client.actions == [
         ("singleplayer", None),
-        ("custom", "ABC"),
+        ("custom", None),
         ("embark", "ABC"),
     ]
 

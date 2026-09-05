@@ -60,13 +60,7 @@ def _map_state(option_count: int = 2) -> dict[str, object]:
 
 
 def _observation(state: dict[str, object]) -> GameObservation:
-    detail = None
-    if state.get("state_type") != "game_over":
-        detail = {
-            "state_type": "player_detail",
-            "player": {"deck_count": 0, "deck": []},
-        }
-    return GameObservation(state, detail)
+    return GameObservation(state)
 
 
 def _agent(

@@ -1,3 +1,5 @@
+import pytest
+
 from sts2rl.env import mcp_client
 from sts2rl.env.mcp_client import STS2Client, STS2ClientError
 
@@ -78,3 +80,30 @@ def test_http_error_with_non_object_json_has_clear_message():
         assert str(exc) == "HTTP 500: ['backend failure']"
     else:
         raise AssertionError("Expected STS2ClientError")
+
+
+def test_rejected_actions_carry_the_unchanged_state():
+    """The API returns HTTP 200 with status=error and the state it did not change."""
+    session = FakeSession(
+        FakeResponse(
+            {
+                "status": "error",
+                "error": "card_index 99 out of range",
+                "state": {"state_type": "monster"},
+            }
+        )
+    )
+
+    with pytest.raises(STS2ClientError, match="out of range") as caught:
+        STS2Client(session=session).play_card(99)
+
+    assert caught.value.state == {"state_type": "monster"}
+
+
+def test_errors_without_a_state_carry_none():
+    session = FakeSession(FakeResponse({"error": "Not found"}, status_code=404))
+
+    with pytest.raises(STS2ClientError) as caught:
+        STS2Client(session=session).get_state()
+
+    assert caught.value.state is None

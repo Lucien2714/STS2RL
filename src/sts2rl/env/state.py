@@ -8,6 +8,17 @@ from sts2rl.env.mcp_client import STS2ClientError
 from sts2rl.env.types import RawState
 
 
+def response_state(response: Any) -> RawState | None:
+    """Return the state an action response embeds, or None if it embeds none.
+
+    Every action response carries the resulting state under ``state``, except
+    when the mod could not read it and reports ``state_error`` instead.
+    """
+    if isinstance(response, dict) and isinstance(response.get("state"), dict):
+        return response["state"]
+    return None
+
+
 def extract_raw_state(response: Any) -> RawState:
     """Extract a raw state from any supported STS2MCP response shape."""
     if isinstance(response, dict):

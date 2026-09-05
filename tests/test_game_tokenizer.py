@@ -44,11 +44,7 @@ def _card(**changes: object) -> dict[str, object]:
         "target_type": "AnyEnemy",
         "rarity": "Uncommon",
         "is_upgraded": False,
-        "is_upgradable": True,
         "current_upgrade_level": 0,
-        "max_upgrade_level": 1,
-        "is_enchanted": False,
-        "enchantment": None,
         "description": "This text is deliberately ignored.",
     }
     card.update(changes)
@@ -77,7 +73,7 @@ def _base_player(**changes: object) -> dict[str, object]:
     return player
 
 
-def test_global_player_and_full_deck_use_raw_and_detail_sources(
+def test_globals_come_from_the_single_state_the_api_returns(
     tokenizer: GameTokenizer,
     vocabulary: GameVocabulary,
 ):
@@ -87,16 +83,8 @@ def test_global_player_and_full_deck_use_raw_and_detail_sources(
         "player": _base_player(),
         "battle": {"enemies": []},
     }
-    detail = {
-        "state_type": "player_detail",
-        "run": {"act": 1, "floor": 11, "ascension": 3},
-        "player": {
-            "deck_count": 3,
-            "deck": [_card(), _card(), _card(is_upgraded=True, current_upgrade_level=1)],
-        },
-    }
 
-    tokenized = tokenizer.tokenize_state(GameObservation(state, detail))
+    tokenized = tokenizer.tokenize_state(GameObservation(state))
 
     assert tokenized.global_categorical.tolist() == [
         vocabulary.lookup("state_types", "monster"),
@@ -104,20 +92,9 @@ def test_global_player_and_full_deck_use_raw_and_detail_sources(
     ]
     floor = _column(GLOBAL_NUMERIC_FIELDS, "floor")
     energy = _column(GLOBAL_NUMERIC_FIELDS, "energy")
-    deck_count = _column(GLOBAL_NUMERIC_FIELDS, "deck_count")
     assert tokenized.global_numeric[floor].item() == pytest.approx(math.log1p(12))
     assert tokenized.global_numeric[energy].item() == 0
     assert tokenized.global_numeric_mask[energy].item() is True
-    assert tokenized.global_numeric[deck_count].item() == pytest.approx(math.log1p(3))
-
-    cards = tokenized.entities["card"]
-    zone = _column(ENTITY_CATEGORICAL_FIELDS["card"], "card_zone")
-    count = _column(ENTITY_NUMERIC_FIELDS["card"], "copy_count")
-    deck_rows = cards.categorical[:, zone] == vocabulary.lookup("card_zones", "deck")
-    assert deck_rows.sum().item() == 2
-    assert sorted(cards.numeric[deck_rows, count].tolist()) == pytest.approx(
-        sorted([math.log1p(1), math.log1p(2)])
-    )
     assert tokenized.game_map is None
 
 

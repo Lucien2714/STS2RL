@@ -7,14 +7,13 @@ HTTP API served by the STS2_MCP mod on `localhost:15526`. No authentication. Loc
 - `POST /api/v1/singleplayer` — perform a game action
 - `GET  /api/v1/multiplayer` — read multiplayer game state
 - `POST /api/v1/multiplayer` — perform a multiplayer action
-- `GET  /api/v1/player-detail` — read local player stats, full deck, potions, relics, and combat piles
 - `GET  /api/v1/profile` — read current profile progress
 - `GET  /api/v1/compendium` — read Compendium-shaped profile progress
 - `GET  /api/v1/wiki` — fuzzy-search discovered card/relic wiki entries
 - `GET  /api/v1/profiles` — list profile slots
 - `POST /api/v1/profiles` — switch or delete profile slots
 
-The singleplayer and multiplayer run endpoints are mutually exclusive: calling singleplayer during a multiplayer run (or vice versa) returns HTTP 409. Profile, wiki, and player-detail endpoints are independent of that routing. `GET /api/v1/playerDetail` is accepted as a compatibility alias for `GET /api/v1/player-detail`.
+The endpoints are mutually exclusive: calling singleplayer during a multiplayer run (or vice versa) returns HTTP 409.
 
 ---
 
@@ -121,13 +120,7 @@ Always present at the top level (except `menu`). Contains everything about the l
   "target_type": "AnyEnemy", // None, Self, AnyEnemy, AllEnemies, etc.
   "can_play": true,
   "unplayable_reason": null, // e.g. "NotEnoughEnergy", "Unplayable", null if playable
-  "rarity": "Common",
   "is_upgraded": false,
-  "is_upgradable": true,
-  "current_upgrade_level": 0,
-  "max_upgrade_level": 1,
-  "is_enchanted": false,
-  "enchantment": null,        // Enchantment Object if enchanted, null otherwise
   "keywords": [ /* Keyword Objects */ ]
 }
 ```
@@ -136,34 +129,10 @@ Always present at the top level (except `menu`). Contains everything about the l
 
 ```jsonc
 {
-  "id": "STRIKE_R",
   "name": "Strike",
-  "type": "Attack",
   "cost": "1",               // Energy cost as string ("X" for X-cost)
   "star_cost": null,          // Regent star cost as string, null if N/A
-  "description": "Deal 6 damage.",
-  "rarity": "Common",
-  "is_upgraded": false,
-  "is_upgradable": true,
-  "current_upgrade_level": 0,
-  "max_upgrade_level": 1,
-  "is_enchanted": false,
-  "enchantment": null,
-  "keywords": [ /* Keyword Objects */ ]
-}
-```
-
-### Enchantment Object
-
-Present as `card.enchantment` when `is_enchanted` is true.
-
-```jsonc
-{
-  "id": "SOME_ENCHANTMENT",
-  "name": "Enchantment Name",
-  "description": "Rules text for the enchantment.",
-  "extra_card_text": null,     // Extra card text if the enchantment contributes it
-  "keywords": [ /* Keyword Objects */ ]
+  "description": "Deal 6 damage."
 }
 ```
 
@@ -231,9 +200,9 @@ Menu sub-screens expose their own options:
 - `multiplayer_host`: `standard`, `daily`, `custom`, `back`
 - `multiplayer_join`: `refresh`, `back`, `join_<index>`, `join_<player_id>`
 - `multiplayer_load_lobby`: `confirm` / `embark`, `unready`, `back`
-- `custom_run`: character IDs/names, `modifier_<index>`, `set_seed`, `confirm` / `embark`, `back`
 - `profile_select`: `profile_1`, `profile_2`, `profile_3`, `back`
-- `character_select`: character IDs/names, `back`, `confirm` / `embark`, `unready` (MP, after readying)
+- `character_select`: character IDs/names, `ascension_up` / `ascension_down`, `back`, `confirm` / `embark`, `unready` (MP, after readying)
+- `custom_run`: character IDs/names, `modifier_<key>` (toggle a run modifier), `ascension_up` / `ascension_down`, `back`, `confirm` / `embark`, `unready` (MP, after readying)
 - `tutorial_prompt`: `no`, `yes`
 - `popup`: advertised popup button labels, normalized to lowercase words such as `ignore` or `back`
 - `timeline`: `advance`, `back`
@@ -304,54 +273,6 @@ Reached via the `multiplayer` submenu's `load` option (host) or by joining a hos
 }
 ```
 
-#### `custom_run` — Custom run setup
-
-Reached from the singleplayer or multiplayer host submenu's `custom` option. The screen exposes character selection, visible custom modifiers, optional seed editing, confirm/embark, and back.
-
-```jsonc
-{
-  "state_type": "menu",
-  "menu_screen": "custom_run",
-  "message": "Custom run setup. Select a character, optionally toggle modifiers, then confirm.",
-  "characters": [
-    {
-      "name": "The Ironclad",
-      "id": "IRONCLAD",
-      "locked": false,
-      "selected": true,
-      "hp": 80,
-      "gold": 99,
-      "energy": 3,
-      "description": "Starting deck description..."
-    }
-  ],
-  "modifiers": [
-    {
-      "index": 0,
-      "id": "DRAFT",
-      "name": "Draft",
-      "description": "Draft a custom starting deck.",
-      "enabled": true,
-      "selected": false,
-      "option": "modifier_0"
-    }
-  ],
-  "lobby": { /* same StartRunLobby-style fields used by character_select, when available */ },
-  "seed_editable": true,
-  "seed": "ABC123",
-  "options": [
-    { "name": "IRONCLAD",   "enabled": true },
-    { "name": "modifier_0", "enabled": true },
-    { "name": "set_seed",   "enabled": true },
-    { "name": "confirm",    "enabled": true },
-    { "name": "embark",     "enabled": true },
-    { "name": "back",       "enabled": true }
-  ]
-}
-```
-
-Use `menu_select` with a character ID/name to select a character, `modifier_<index>` (or `toggle_modifier_<index>`) to toggle a visible modifier, `set_seed` with a `seed` value to edit the seed, and `confirm`/`embark` to start. Passing `seed` together with `confirm`/`embark` sets the seed immediately before starting. Passing `seed` with the submenu's `custom` option stores it and applies it when the custom-run screen opens.
-
 #### `character_select` — extended for MP
 
 The same screen drives SP, MP host, and MP client. In MP, an additional `lobby` block appears, and the `unready` option becomes available after the local player has hit `confirm`/`embark`:
@@ -387,10 +308,19 @@ The same screen drives SP, MP host, and MP client. In MP, an additional `lobby` 
       }
     ]
   },
+  "ascension": {                   // present whenever the ascension panel is on screen
+    "level": 0,
+    "max": 5
+  },
+  "selected": {                    // reflects the current on-screen selection
+    "character": "REGENT"          // selected character id, or null if none yet
+  },
   "options": [
     { "name": "REGENT",  "enabled": true },
     { "name": "IRONCLAD","enabled": true },
     /* ... other characters and lockable RANDOM ... */
+    { "name": "ascension_up",   "enabled": true },
+    { "name": "ascension_down", "enabled": true },
     { "name": "confirm", "enabled": true },
     { "name": "embark",  "enabled": true },
     { "name": "back",    "enabled": true },
@@ -400,6 +330,99 @@ The same screen drives SP, MP host, and MP client. In MP, an additional `lobby` 
 ```
 
 In SP the `lobby` field is omitted, and `unready` does not appear (the unready button is only enabled after MP ready).
+
+`ascension_up` / `ascension_down` move the level by one and are only advertised while that
+direction is actually available — the game hides the corresponding arrow at either end of
+the range and for MP clients (the host owns the lobby's ascension). Each call responds with
+the resulting `ascension` level.
+
+#### `custom_run` — Custom mode setup
+
+Reached via the `singleplayer` or `multiplayer_host` submenu's `custom` option. This is a
+character-select variant with two extras: a `seed` and a list of run `modifiers`. Everything
+else — `characters`, `ascension`, `lobby`, `confirm`/`embark`/`back`/`unready` — behaves
+exactly as on `character_select`.
+
+Each modifier carries the game's own `title` and `description`, so the agent can tell what
+it does before enabling it, plus two identifiers:
+
+- `id` — the raw modifier model id. **Not unique**: the per-character card modifiers are all
+  `CHARACTER_CARDS`, one tickbox per character.
+- `key` — unique on this screen and the thing you select. It equals `id` except for those
+  per-character modifiers, where it is `CHARACTER_CARDS_<character id>`. `selected.modifiers`
+  and the toggle response both report keys.
+
+```jsonc
+{
+  "state_type": "menu",
+  "menu_screen": "custom_run",
+  "message": "Custom run setup. Select a character, optionally toggle run modifiers (modifier_<key>) and adjust ascension, then confirm to embark.",
+  "characters": [ /* same shape as character_select */ ],
+  "seed": "ABC123",                // present only when a seed has been set
+  "modifiers": [
+    {
+      "id": "DRAFT",
+      "key": "DRAFT",              // what you select: option name is "modifier_DRAFT"
+      "option": "modifier_DRAFT",
+      "title": "Draft",
+      "description": "Choose 1 of 5 cards after each combat...",
+      "ticked": true
+    },
+    {
+      "id": "CHARACTER_CARDS",     // shared by one tickbox per character
+      "key": "CHARACTER_CARDS_IRONCLAD",
+      "option": "modifier_CHARACTER_CARDS_IRONCLAD",
+      "title": "Ironclad Cards",
+      "description": "Ironclad cards will now appear in rewards and shops.",
+      "character": "IRONCLAD",     // present only for per-character modifiers
+      "ticked": true
+    }
+  ],
+  "ascension": { "level": 0, "max": 5 },
+  "lobby": { /* present only in MP host/client, same shape as character_select */ },
+  "selected": {
+    "character": "REGENT",         // or null if none selected yet
+    "modifiers": ["DRAFT", "CHARACTER_CARDS_IRONCLAD"]   // keys of every ticked modifier
+  },
+  "options": [
+    { "name": "REGENT", "enabled": true },
+    /* ... other characters ... */
+    { "name": "modifier_DRAFT", "enabled": true },                    // toggle option
+    { "name": "modifier_CHARACTER_CARDS_IRONCLAD", "enabled": true },
+    { "name": "ascension_up",   "enabled": true },
+    { "name": "ascension_down", "enabled": false },
+    { "name": "confirm", "enabled": false },
+    { "name": "embark",  "enabled": false },
+    { "name": "back",    "enabled": true }
+  ]
+}
+```
+
+Toggle modifiers with `menu_select` using the advertised `modifier_<key>` option name, the
+bare `key`, or the raw `id` when that id is unambiguous. Selecting `CHARACTER_CARDS` — an id
+several tickboxes share — returns an error listing the keys to choose from instead of
+silently toggling the first one.
+
+**Modifiers can be mutually exclusive**: enabling one makes the game disable the others in
+its group, so the response always reports the resulting set —
+
+```json
+{
+  "status": "ok",
+  "message": "Modifier 'Sealed Deck' enabled. Mutually exclusive, so also disabled: DRAFT",
+  "modifiers": ["SEALED_DECK", "CHARACTER_CARDS_IRONCLAD"]
+}
+```
+
+Treat that `modifiers` array as authoritative rather than assuming only the requested
+modifier changed. A modifier whose tickbox is not interactive (an MP client, which may not
+change the host's modifiers) is advertised with `"enabled": false` and returns an error if
+selected.
+
+Unlike standard singleplayer character select, a `seed` **is** supported here in SP as well
+as MP-host: supply it with `confirm`/`embark` to start a seeded custom run. It is applied to
+the lobby immediately before the run starts, and a seed already set (by a previous call or
+typed by a human) is echoed back in the state's `seed` field.
 
 ### `unknown`
 
@@ -958,69 +981,9 @@ Prevents soft-locks when an unrecognized overlay is active.
 
 ---
 
-## Profiles and Player Detail
+## Profiles
 
-Profile and player-detail endpoints are independent of the singleplayer and multiplayer run endpoints.
-
-### `GET /api/v1/player-detail`
-
-Returns detailed live state for the local player during a run. It works for both singleplayer and multiplayer runs, and returns `status: "error"` when no run is active.
-
-The `player` object starts with the normal Player Object fields, then adds a full `deck_count` and `deck`. During combat it also includes the same hand and pile fields described in the Player Object section.
-
-```jsonc
-{
-  "state_type": "player_detail",
-  "status": "ok",
-  "game_mode": "singleplayer",      // or "multiplayer"
-  "net_type": "Local",              // network service type as reported by the game
-  "run": {
-    "act": 1,
-    "floor": 3,
-    "ascension": 0
-  },
-  "player": {
-    "character": "The Ironclad",
-    "hp": 72,
-    "max_hp": 80,
-    "gold": 99,
-    "status": [ /* Power Objects */ ],
-    "relics": [ /* Relic Objects */ ],
-    "potions": [ /* Potion Objects */ ],
-    "max_potion_slots": 3,
-    "deck_count": 10,
-    "deck": [
-      {
-        "index": 0,
-        "id": "STRIKE_R",
-        "name": "Strike",
-        "type": "Attack",
-        "cost": "1",
-        "star_cost": null,
-        "description": "Deal 6 damage.",
-        "rarity": "Common",
-        "is_upgraded": false,
-        "is_upgradable": true,
-        "current_upgrade_level": 0,
-        "max_upgrade_level": 1,
-        "is_enchanted": false,
-        "enchantment": null,
-        "keywords": []
-      }
-    ]
-  }
-}
-```
-
-No active run:
-
-```jsonc
-{
-  "state_type": "player_detail",
-  "status": "error",
-  "message": "No run in progress. Player detail is only available during a run."
-}
-```
+Profile endpoints are independent of the singleplayer and multiplayer run endpoints.
 
 ### `GET /api/v1/profile`
 
@@ -1191,30 +1154,48 @@ All POST requests use a JSON body with an `"action"` field and action-specific p
 
 ### Success Response
 
+Every action response embeds the resulting game state under `state` — the same object
+`GET` on the same endpoint returns (singleplayer state on `/api/v1/singleplayer`,
+multiplayer state on `/api/v1/multiplayer`). There is no need to follow an action with
+a `GET`.
+
 ```jsonc
 {
   "status": "ok",
   "message": "Playing 'Strike' targeting Jaw Worm",
-  "state_loaded": true,
-  "state": { /* latest game state after the action */ }
+  "state": { "state_type": "monster", "player": { /* ... */ }, "battle": { /* ... */ } }
 }
 ```
 
-Successful singleplayer and multiplayer POST action responses include `state_loaded` and a nested `state` containing the latest loaded game state after the action. The server polls for the post-action state to settle before returning. If that wait times out, the response still includes the latest state it saw with `state_loaded: false` and `state_warning`.
-
-Most actions wait for the state to differ from the previous state. Same-screen selection actions such as grid `select_card`, `combat_select_card`, and selecting a character may validly return the same state.
+The mod waits for the game to settle before capturing that state: the action queue is
+drained and, in combat, the local player is back in the play phase — so an `end_turn`
+response already carries the state of your **next** turn, after the enemies have acted.
+The wait is capped at 8 seconds; if it expires, the state is returned as-is plus
+`"state_wait_timed_out": true` (poll with `GET` until `battle.is_play_phase` is true).
+If the state cannot be read at all, `state` is replaced by `state_error`.
 
 ### Error Response
 
+Rejected actions changed nothing, so their `state` is captured immediately without
+waiting.
+
 ```jsonc
-{ "status": "error", "error": "Card requires a target. Provide 'target' with an entity_id." }
+{
+  "status": "error",
+  "error": "Card requires a target. Provide 'target' with an entity_id.",
+  "state": { "state_type": "monster", /* ... */ }
+}
 ```
 
 ---
 
 ### `menu_select`
 
-Select an option from the main menu, a menu submenu, custom run setup, profile select, character select, tutorial prompt, blocking popup, timeline screen, or game-over screen.
+Select an option from the main menu, a menu submenu, profile select, character select, custom-run setup, tutorial prompt, blocking popup, timeline screen, or game-over screen.
+
+On `custom_run`, `option` may also be a run-modifier toggle — the advertised `modifier_<key>` name, the bare `key`, or the raw modifier `id` when unambiguous. Because modifiers can be mutually exclusive, the response reports the resulting set of ticked modifiers in `modifiers` (keys), not just the one that was addressed.
+
+On `character_select` and `custom_run`, `ascension_up` / `ascension_down` move the ascension level by one; the response returns the resulting `ascension` level. They are advertised only while that direction is available (not at the ends of the range, and not for MP clients).
 
 ```json
 { "action": "menu_select", "option": "singleplayer" }
@@ -1227,11 +1208,10 @@ Select an option from the main menu, a menu submenu, custom run setup, profile s
 | Parameter | Type | Required | Description |
 |---|---|---|---|
 | `option` | string | Yes | One of the current state's advertised menu options. Matching is case-insensitive. |
-| `seed` | string | No | Supported in menu contexts that expose a real seeded flow. For custom runs, use it with `set_seed`/`seed`, with `confirm`/`embark`, or while selecting the submenu's `custom` option so it is applied after the custom-run screen opens. Standard singleplayer character select returns an error without starting a run when `seed` is supplied. |
+| `seed` | string | No | Only supported in menu contexts that expose a real seeded flow — `custom_run` (SP and MP host), MP lobbies, daily. Standard singleplayer character select returns an error without starting a run when `seed` is supplied. |
 
 `game_over` advertises only `main_menu`. `continue` is not actionable on that screen and returns an error.
 If `timeline` is blocked by pending obtained epochs, `menu_select` returns an error with `manual_action_required: true` and `pending_epoch_ids` instead of opening Timeline.
-On `custom_run`, `option` also accepts `modifier_<index>` / `toggle_modifier_<index>` for visible modifiers and `set_seed` / `seed` for seed editing.
 
 ---
 
@@ -1406,8 +1386,6 @@ Purchase a shop item.
 | Parameter | Type | Required | Description |
 |---|---|---|---|
 | `index` | int | Yes | 0-based index in the flat items list |
-
-Shop purchase indices match the `shop.items` order exposed by state: cards first, then relics, then potions, then card removal when present.
 
 **Errors:** Not in shop, item sold out, not enough gold, inventory not ready.
 

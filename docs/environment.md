@@ -17,18 +17,14 @@ with GameEnv(base_url="http://localhost:15526/api/v1") as env:
 The environment deliberately does not encode state or calculate reward. Those
 layers consume `RawState` after the raw transition boundary is stable.
 
-`EpisodeRunner` turns that raw boundary into the Agent-facing observation:
+`EpisodeRunner` turns that raw boundary into the Agent-facing observation by
+wrapping the state directly. The API has one state response and no separate
+player-detail endpoint, so an observation costs no extra request.
 
-- it fetches player detail once after reset, and once per nonterminal state
-  outside battle;
-- inside a battle it reuses one snapshot, because the master deck it supplies
-  cannot change mid-battle and refetching would cost an HTTP round trip per
-  step;
-- terminal observations use `player_detail=None` and make no detail request;
-- player detail is an enrichment, not a requirement. Older STS2MCP builds do
-  not serve `/player-detail` at all; the runner then warns once, leaves
-  `player_detail=None`, and stops requesting it, so training runs without the
-  master deck in observations rather than failing.
+`GameEnv.step` also issues no follow-up read: every action response embeds the
+resulting state, and a rejected action returns the unchanged state alongside
+its error. Only a response whose state could not be read falls back to a
+`GET`.
 
 Reward models continue to receive raw previous/next states. `EpisodeResult`
 also keeps raw initial/final states, while each `Transition` stores exactly the

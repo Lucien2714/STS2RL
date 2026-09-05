@@ -22,6 +22,7 @@ class ResetSpec:
     run_seed: str | None = None
     start_run_option: str = "confirm"
     allow_active_run: bool = False
+    ascension: int | None = None
 
     def __post_init__(self) -> None:
         if self.game_mode not in {"standard", "custom", "daily"}:
@@ -30,6 +31,8 @@ class ResetSpec:
             raise ValueError(
                 f"Unsupported start-run option: {self.start_run_option!r}"
             )
+        if self.ascension is not None and self.ascension < 0:
+            raise ValueError("ascension must not be negative")
 
     @property
     def uses_seed(self) -> bool:
@@ -81,6 +84,18 @@ def is_run_state(raw_state: RawState) -> bool:
     )
 
 
+def _ascension_level(raw_state: RawState) -> int | None:
+    """Return the ascension level the character screen currently shows."""
+    ascension = raw_state.get("ascension")
+    if isinstance(ascension, dict):
+        level = ascension.get("level")
+    else:
+        level = ascension
+    if isinstance(level, bool) or not isinstance(level, int):
+        return None
+    return level
+
+
 def selected_character_id(raw_state: RawState) -> str | None:
     """Return the currently selected character id, or None if none is reported.
 
@@ -113,6 +128,7 @@ class ResetController:
     MAX_TRANSITIONS = 10
     START_POLL_ATTEMPTS = 20
     START_POLL_SECONDS = 0.25
+    MAX_ASCENSION_STEPS = 30
 
     def __init__(
         self,
@@ -121,6 +137,7 @@ class ResetController:
         max_transitions: int = MAX_TRANSITIONS,
         start_poll_attempts: int = START_POLL_ATTEMPTS,
         start_poll_seconds: float = START_POLL_SECONDS,
+        max_ascension_steps: int = MAX_ASCENSION_STEPS,
     ) -> None:
         if max_transitions < 1:
             raise ValueError("max_transitions must be at least 1")
@@ -129,6 +146,7 @@ class ResetController:
         self.max_transitions = max_transitions
         self.start_poll_attempts = start_poll_attempts
         self.start_poll_seconds = start_poll_seconds
+        self.max_ascension_steps = max_ascension_steps
 
     def reset(self, spec: ResetSpec) -> RawState:
         """Start a new run, or explicitly reuse an active run when permitted."""
@@ -206,10 +224,13 @@ class ResetController:
             )
 
         if menu_screen == "singleplayer":
+            # Only daily accepts a seed at the submenu; a custom run's seed
+            # belongs to confirm/embark on the custom-run screen itself.
+            seeded_here = spec.uses_seed and spec.game_mode == "daily"
             return self._select(
                 raw_state,
                 spec.game_mode,
-                seed=spec.run_seed if spec.uses_seed else None,
+                seed=spec.run_seed if seeded_here else None,
             )
 
         if menu_screen in {"custom_run", "character_select"}:
@@ -219,6 +240,8 @@ class ResetController:
                 missing_means_selected=menu_screen == "custom_run",
             ):
                 return self._select(raw_state, character_id)
+            if spec.ascension is not None:
+                raw_state = self._apply_ascension(raw_state, spec.ascension)
             return self._start_run(
                 raw_state,
                 spec,
@@ -232,6 +255,23 @@ class ResetController:
             f"Reset stopped at unsupported menu_screen={menu_screen!r}: "
             f"{raw_state}"
         )
+
+    def _apply_ascension(self, raw_state: RawState, target: int) -> RawState:
+        """Step the ascension level toward the target one press at a time.
+
+        ``ascension_up`` / ``ascension_down`` each move by one and are only
+        advertised while that direction is still available, so the loop stops
+        as soon as the level matches or the screen stops offering the button.
+        """
+        for _ in range(self.max_ascension_steps):
+            level = _ascension_level(raw_state)
+            if level is None or level == target:
+                return raw_state
+            option = "ascension_up" if level < target else "ascension_down"
+            if option not in enabled_option_names(raw_state):
+                return raw_state
+            raw_state = self._select(raw_state, option)
+        return raw_state
 
     def _leave_game_over(self, raw_state: RawState) -> RawState:
         """Return to the main menu, tolerating a screen that already left.
@@ -350,4 +390,5 @@ class ResetController:
             raw_state.get("menu_screen"),
             tuple(sorted(enabled_option_names(raw_state))),
             selected_character_id(raw_state),
+            _ascension_level(raw_state),
         )

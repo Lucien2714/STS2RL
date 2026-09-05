@@ -47,11 +47,9 @@ def _state_with_card() -> TokenizedState:
 
 def test_game_observation_is_frozen_without_changing_raw_dictionaries():
     raw_state = {"state_type": "map"}
-    player_detail = {"state_type": "player_detail"}
-    observation = GameObservation(raw_state, player_detail)
+    observation = GameObservation(raw_state)
 
     assert observation.raw_state is raw_state
-    assert observation.player_detail is player_detail
     with pytest.raises(FrozenInstanceError):
         observation.raw_state = {}  # type: ignore[misc]
 

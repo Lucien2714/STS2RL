@@ -9,7 +9,7 @@ and PPO rollout integration described here are implemented.
 ## Data flow
 
 ```text
-GameEnv raw state + player-detail
+GameEnv raw state
                  |
                  v
          GameObservation
@@ -37,19 +37,17 @@ The boundary is deliberately split into deterministic and trainable work:
 
 ## GameObservation
 
-`GameObservation` combines two STS2MCP responses:
+`GameObservation` wraps the one STS2MCP state response:
 
 ```python
-GameObservation(
-    raw_state=raw_state,
-    player_detail=player_detail,
-)
+GameObservation(raw_state=raw_state)
 ```
 
 `raw_state` contains the current screen, legal-decision context, player state,
-and combat or map data. `player_detail` additionally provides the complete
-permanent deck. It may be `None` for a terminal state where no active run
-remains.
+and combat or map data. The API exposes no separate player-detail response and
+no master deck, so this is everything the agent sees. It stays a type of its
+own so enrichment can be added later without changing signatures between the
+environment and the agent.
 
 `GameObservation` is a frozen dataclass, but the raw dictionaries inside it are
 not copied or recursively frozen. Callers must treat them as read-only.
@@ -141,12 +139,12 @@ orb_slots, orb_empty_slots
 
 Small bounded values such as act, ascension, energy, stars, and slot counts use
 linear values. Counts whose useful range can grow, such as HP, block, gold,
-floor, deck size, and pile size, use signed `log1p`. HP and energy also include
+floor, and pile size, use signed `log1p`. HP and energy also include
 ratio columns with independently validated denominators.
 
-The raw state is authoritative for live player and combat values. Player detail
-fills fields absent from the raw player and is the sole source for the full
-permanent deck. The raw run fields similarly override player-detail run fields.
+The raw state is the only source of player and combat values. Fields the API
+omits for a given character or screen — stars outside Regent, orb slots outside
+Defect, energy outside combat — arrive masked as missing rather than zero.
 
 Every supported entity kind is present in `TokenizedState.entities`, even when
 it has zero rows. Empty tensors retain the kind's correct feature width. The
@@ -624,7 +622,7 @@ combinations.
 ## Responsibility summary
 
 ```text
-GameObservation   raw state plus complete player detail
+GameObservation   the one raw state the API returns
 GameVocabulary    stable string-to-index identity
 numeric.py        finite values, scaling, and missing masks
 GameTokenizer     deterministic state, action, and full-map parsing
