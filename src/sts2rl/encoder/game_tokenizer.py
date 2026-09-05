@@ -9,12 +9,19 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 import heapq
-from types import MappingProxyType
 from typing import Callable, Hashable, Mapping, Sequence
 
 import torch
 
 from sts2rl.actions import GameAction
+from sts2rl.encoder.schema import (
+    ENTITY_CATEGORICAL_FIELDS,
+    ENTITY_KINDS,
+    ENTITY_NUMERIC_FIELDS,
+    GLOBAL_CATEGORICAL,
+    MAP_CATEGORICAL_FIELDS,
+    MAP_NUMERIC_FIELDS,
+)
 from sts2rl.encoder.numeric import (
     NumericFeature,
     linear_feature,
@@ -34,143 +41,7 @@ from sts2rl.encoder.vocabulary import GameVocabulary, UNKNOWN_INDEX
 from sts2rl.env.types import GameObservation
 
 
-GLOBAL_CATEGORICAL_FIELDS = ("state_type", "character")
-ACTION_NUMERIC_FIELDS = ("x", "y")
-MAP_CATEGORICAL_FIELDS = ("node_type",)
-MAP_NUMERIC_FIELDS = (
-    "col",
-    "row",
-    "is_current",
-    "is_visited",
-    "is_candidate",
-    "is_boss",
-    "is_reachable",
-    "min_distance_to_boss",
-    "max_distance_to_boss",
-)
-GLOBAL_NUMERIC_FIELDS = (
-    "act",
-    "floor",
-    "ascension",
-    "hp",
-    "max_hp",
-    "hp_ratio",
-    "block",
-    "gold",
-    "energy",
-    "max_energy",
-    "energy_ratio",
-    "stars",
-    "max_potion_slots",
-    "deck_count",
-    "draw_pile_count",
-    "discard_pile_count",
-    "exhaust_pile_count",
-    "orb_slots",
-    "orb_empty_slots",
-)
 
-ENTITY_CATEGORICAL_FIELDS: Mapping[str, tuple[str, ...]] = MappingProxyType(
-    {
-        "player": ("character", "owner_type"),
-        "card": (
-            "card_id",
-            "card_type",
-            "rarity",
-            "card_zone",
-            "entity_zone",
-            "target_type",
-            "enchantment_id",
-            "selection_type",
-        ),
-        "relic": ("relic_id", "rarity", "entity_zone"),
-        "potion": ("potion_id", "target_type", "entity_zone"),
-        "orb": ("orb_id", "entity_zone"),
-        "pet": ("monster_id", "owner_type", "entity_zone"),
-        "enemy": ("monster_id", "owner_type", "entity_zone"),
-        "power": ("power_id", "power_type", "owner_type", "entity_zone"),
-        "intent": ("intent_id", "entity_zone"),
-        "reward": (
-            "reward_type",
-            "potion_id",
-            "relic_id",
-            "card_id",
-            "entity_zone",
-        ),
-        "shop_item": (
-            "shop_category",
-            "card_id",
-            "relic_id",
-            "potion_id",
-            "card_type",
-            "rarity",
-            "target_type",
-            "entity_zone",
-        ),
-        "event_option": ("event_id", "event_option", "entity_zone"),
-        "rest_option": ("rest_option", "entity_zone"),
-        "bundle": ("selection_type", "entity_zone"),
-        "crystal_cell": ("item_type", "entity_zone"),
-        "crystal_tool": ("tool", "entity_zone"),
-    }
-)
-
-ENTITY_NUMERIC_FIELDS: Mapping[str, tuple[str, ...]] = MappingProxyType(
-    {
-        "player": GLOBAL_NUMERIC_FIELDS[3:],
-        "card": (
-            "cost",
-            "star_cost",
-            "upgrade_level",
-            "max_upgrade_level",
-            "copy_count",
-            "position",
-            "can_play",
-            "is_upgradable",
-            "is_enchanted",
-            "selected",
-        ),
-        "relic": ("counter",),
-        "potion": ("can_use_in_combat",),
-        "orb": ("passive", "evoke", "position"),
-        "pet": ("hp", "max_hp", "hp_ratio", "block", "position"),
-        "enemy": ("hp", "max_hp", "hp_ratio", "block", "position"),
-        "power": ("amount",),
-        "intent": ("label", "position"),
-        "reward": ("gold_amount",),
-        "shop_item": (
-            "price",
-            "is_stocked",
-            "can_afford",
-            "on_sale",
-            "card_cost",
-            "card_star_cost",
-        ),
-        "event_option": (
-            "is_locked",
-            "is_proceed",
-            "was_chosen",
-        ),
-        "rest_option": ("is_enabled",),
-        "bundle": ("card_count",),
-        "crystal_cell": (
-            "x",
-            "y",
-            "x_ratio",
-            "y_ratio",
-            "is_hidden",
-            "is_clickable",
-            "is_highlighted",
-            "is_hovered",
-            "is_good",
-            "item_width",
-            "item_height",
-        ),
-        "crystal_tool": ("can_use", "selected"),
-    }
-)
-
-ENTITY_KINDS = tuple(ENTITY_CATEGORICAL_FIELDS)
 
 
 class TokenizationError(ValueError):
@@ -268,10 +139,14 @@ class GameTokenizer:
         player = {**detail_player, **raw_player}
         run = {**_mapping(detail.get("run")), **_mapping(state.get("run"))}
 
+        global_values = {
+            "state_type": _text(state.get("state_type")),
+            "character": _text(player.get("character")),
+        }
         global_categorical = torch.tensor(
             [
-                self.vocabulary.lookup("state_types", _text(state.get("state_type"))),
-                self.vocabulary.lookup("characters", _text(player.get("character"))),
+                self.vocabulary.lookup(table, global_values[field])
+                for field, table in GLOBAL_CATEGORICAL
             ],
             dtype=torch.long,
         )

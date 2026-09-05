@@ -7,16 +7,18 @@ from sts2rl.encoder.entity_encoder import (
     EncoderConfig,
     EntityTransformer,
 )
-from sts2rl.encoder.game_tokenizer import (
+from sts2rl.encoder.game_tokenizer import GameTokenizer, TokenizationError
+from sts2rl.encoder.schema import (
     ACTION_NUMERIC_FIELDS,
+    ENTITY_CATEGORICAL,
     ENTITY_CATEGORICAL_FIELDS,
+    ENTITY_KINDS,
     ENTITY_NUMERIC_FIELDS,
+    GLOBAL_CATEGORICAL,
     GLOBAL_CATEGORICAL_FIELDS,
     GLOBAL_NUMERIC_FIELDS,
     MAP_CATEGORICAL_FIELDS,
     MAP_NUMERIC_FIELDS,
-    GameTokenizer,
-    TokenizationError,
 )
 from sts2rl.encoder.game_encoder import (
     EncodedDecision,
@@ -62,12 +64,15 @@ __all__ = [
     "GameEncoder",
     "GameVocabulary",
     "MapDAGEncoder",
+    "GLOBAL_CATEGORICAL",
     "GLOBAL_CATEGORICAL_FIELDS",
     "GLOBAL_CATEGORICAL_VOCABS",
     "GLOBAL_NUMERIC_FIELDS",
     "MAP_CATEGORICAL_FIELDS",
     "MAP_NUMERIC_FIELDS",
+    "ENTITY_CATEGORICAL",
     "ENTITY_CATEGORICAL_FIELDS",
+    "ENTITY_KINDS",
     "ENTITY_NUMERIC_FIELDS",
     "NumericFeature",
     "PAD_INDEX",

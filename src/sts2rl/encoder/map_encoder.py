@@ -9,7 +9,7 @@ import torch
 from torch import Tensor, nn
 
 from sts2rl.encoder.entity_encoder import EncoderConfig
-from sts2rl.encoder.game_tokenizer import MAP_NUMERIC_FIELDS
+from sts2rl.encoder.schema import MAP_NUMERIC_FIELDS
 from sts2rl.encoder.tokens import TokenizedMap
 from sts2rl.encoder.vocabulary import GameVocabulary
 

@@ -9,10 +9,11 @@ from typing import Mapping
 import torch
 from torch import Tensor, nn
 
-from sts2rl.encoder.game_tokenizer import (
+from sts2rl.encoder.schema import (
+    ENTITY_CATEGORICAL,
     ENTITY_CATEGORICAL_FIELDS,
     ENTITY_NUMERIC_FIELDS,
-    GLOBAL_CATEGORICAL_FIELDS,
+    GLOBAL_CATEGORICAL,
     GLOBAL_NUMERIC_FIELDS,
 )
 from sts2rl.encoder.tokens import EntityReference, TokenizedState
@@ -20,51 +21,13 @@ from sts2rl.encoder.vocabulary import GameVocabulary
 
 
 GLOBAL_CATEGORICAL_VOCABS: Mapping[str, str] = MappingProxyType(
-    {"state_type": "state_types", "character": "characters"}
+    dict(GLOBAL_CATEGORICAL)
 )
 
 ENTITY_CATEGORICAL_VOCABS: Mapping[str, tuple[str, ...]] = MappingProxyType(
     {
-        "player": ("characters", "owner_types"),
-        "card": (
-            "cards",
-            "card_types",
-            "rarities",
-            "card_zones",
-            "entity_zones",
-            "target_types",
-            "enchantments",
-            "selection_types",
-        ),
-        "relic": ("relics", "rarities", "entity_zones"),
-        "potion": ("potions", "target_types", "entity_zones"),
-        "orb": ("orbs", "entity_zones"),
-        "pet": ("monsters", "owner_types", "entity_zones"),
-        "enemy": ("monsters", "owner_types", "entity_zones"),
-        "power": ("powers", "power_types", "owner_types", "entity_zones"),
-        "intent": ("intents", "entity_zones"),
-        "reward": (
-            "reward_types",
-            "potions",
-            "relics",
-            "cards",
-            "entity_zones",
-        ),
-        "shop_item": (
-            "shop_categories",
-            "cards",
-            "relics",
-            "potions",
-            "card_types",
-            "rarities",
-            "target_types",
-            "entity_zones",
-        ),
-        "event_option": ("events", "event_options", "entity_zones"),
-        "rest_option": ("rest_options", "entity_zones"),
-        "bundle": ("selection_types", "entity_zones"),
-        "crystal_cell": ("crystal_item_types", "entity_zones"),
-        "crystal_tool": ("crystal_tools", "entity_zones"),
+        kind: tuple(table for _, table in columns)
+        for kind, columns in ENTITY_CATEGORICAL.items()
     }
 )
 
@@ -121,22 +84,22 @@ class EntityTransformer(nn.Module):
         self.global_embeddings = nn.ModuleDict(
             {
                 field: nn.Embedding(
-                    self._vocabulary_size(table),
+                    vocabulary.size(table),
                     config.hidden_dim,
                     padding_idx=0,
                 )
-                for field, table in GLOBAL_CATEGORICAL_VOCABS.items()
+                for field, table in GLOBAL_CATEGORICAL
             }
         )
         self.entity_embeddings = nn.ModuleDict(
             {
                 self._embedding_key(kind, field): nn.Embedding(
-                    self._vocabulary_size(table),
+                    vocabulary.size(table),
                     config.hidden_dim,
                     padding_idx=0,
                 )
-                for kind, tables in ENTITY_CATEGORICAL_VOCABS.items()
-                for field, table in zip(ENTITY_CATEGORICAL_FIELDS[kind], tables)
+                for kind, columns in ENTITY_CATEGORICAL.items()
+                for field, table in columns
                 if field != "entity_zone"
             }
         )
@@ -245,7 +208,7 @@ class EntityTransformer(nn.Module):
 
     def _project_state(self, state: TokenizedState) -> Tensor:
         result = self.state_token
-        for column, field in enumerate(GLOBAL_CATEGORICAL_FIELDS):
+        for column, (field, _) in enumerate(GLOBAL_CATEGORICAL):
             result = result + self.global_embeddings[field](
                 state.global_categorical[column]
             )
@@ -355,11 +318,6 @@ class EntityTransformer(nn.Module):
                 excluded.setdefault(child.kind, set()).add(child.index)
         embeddings["bundle"] = embeddings["bundle"] + bundle_updates
         return excluded
-
-    def _vocabulary_size(self, table: str) -> int:
-        if table == "event_options":
-            return len(self.vocabulary.event_options)
-        return self.vocabulary.size(table)
 
     @staticmethod
     def _embedding_key(kind: str, field: str) -> str:

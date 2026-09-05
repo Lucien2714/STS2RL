@@ -383,7 +383,13 @@ class GameVocabulary:
         )
 
     def size(self, table_name: str) -> int:
-        """Return the embedding table size including PAD and UNKNOWN."""
+        """Return the embedding table size including PAD and UNKNOWN.
+
+        ``event_options`` is keyed by (event, title) pairs rather than by a
+        single token, so it is resolved here instead of by every caller.
+        """
+        if normalize_data_type(table_name) == "event_options":
+            return len(self.event_options)
         return len(self.table(table_name))
 
     def event_option_index(

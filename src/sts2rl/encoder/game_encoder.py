@@ -14,7 +14,7 @@ from sts2rl.encoder.entity_encoder import (
     EncoderConfig,
     EntityTransformer,
 )
-from sts2rl.encoder.game_tokenizer import ACTION_NUMERIC_FIELDS
+from sts2rl.encoder.schema import ACTION_NUMERIC_FIELDS
 from sts2rl.encoder.map_encoder import EncodedMap, MapDAGEncoder
 from sts2rl.encoder.tokens import (
     EntityReference,
