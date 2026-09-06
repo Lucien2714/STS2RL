@@ -13,7 +13,7 @@ from sts2rl.env.constants import BATTLE_STATE_TYPES
 from sts2rl.env.game_env import GameEnv
 from sts2rl.env.mcp_client import STS2ClientError
 from sts2rl.env.reset import ResetSpec
-from sts2rl.env.rewards import BattleProgressReward, RewardModel
+from sts2rl.env.rewards import RewardModel, RunProgressReward
 from sts2rl.env.types import GameObservation, RawState
 
 
@@ -54,7 +54,7 @@ class EpisodeRunner:
             raise ValueError("max_state_refreshes must not be negative")
         self.env = env
         self.agent = agent
-        self.reward_model = reward_model or BattleProgressReward()
+        self.reward_model = reward_model or RunProgressReward()
         self.max_steps = max_steps
         self.max_state_refreshes = max_state_refreshes
         self.refresh_backoff_seconds = refresh_backoff_seconds

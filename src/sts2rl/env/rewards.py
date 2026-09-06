@@ -5,32 +5,16 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 
 from sts2rl.env.constants import (
-    BATTLE_GOLD_LOSS_PENALTY,
-    BATTLE_HP_LOSS_PENALTY,
-    BATTLE_LOSS_PENALTY,
-    BATTLE_MAX_HP_LOSS_PENALTY,
-    BATTLE_REWARD_STATE_TYPES,
-    BATTLE_STATE_TYPES,
-    BATTLE_WIN_REWARD,
-    ENEMY_DAMAGE_REWARD,
-    ENEMY_KILL_REWARD,
-    FLOOR_PROGRESS_REWARD,
-    GAME_OVER_PENALTY,
-    POTION_USE_PENALTY,
-    RUN_HP_CHANGE_REWARD,
-    UNSPENT_ENERGY_PENALTY,
+    BOSS_VICTORY_REWARD,
+    HP_CHANGE_REWARD,
+    NODE_PROGRESS_REWARD,
+    STEP_COST,
 )
-from sts2rl.env.state import (
-    battle_has_alive_enemy,
-    enemy_hp_map,
-    player_gold,
-    player_hp,
-    player_max_hp,
-)
+from sts2rl.env.state import battle_has_alive_enemy, player_hp
 
 
 class RewardModel(ABC):
-    """Interface for environment reward functions."""
+    """Score one raw environment transition."""
 
     @abstractmethod
     def compute(
@@ -39,35 +23,38 @@ class RewardModel(ABC):
         next_state: dict,
         action: dict | None = None,
     ) -> tuple[float, dict]:
-        """Return a scalar reward and structured reward details."""
+        """Return the reward for one transition and a breakdown of it."""
 
     def reset(self, raw_state: dict | None = None) -> None:
-        """Reset stateful reward context at episode boundaries."""
+        """Clear per-run bookkeeping before a new episode."""
 
     def action_error_reward(self, error: object) -> tuple[float, dict]:
-        """Return reward details for a failed action dispatch."""
-        reward = 0.0
-        return reward, {
+        """Score a rejected action, which changed nothing in the game."""
+        return 0.0, {
             "type": "action_error",
-            "error": str(error),
             "action_error": True,
-            "total": reward,
+            "error": str(error),
+            "total": 0.0,
         }
 
 
-class BattleProgressReward(RewardModel):
-    """Hand-tuned reward model for battle progress and run advancement."""
+class RunProgressReward(RewardModel):
+    """Score climbing the spire, and nothing else directly.
+
+    One point per node entered, ten for a boss, a small charge per step so
+    standing still is never free, and a small term on HP so the resource the
+    run spends has a price.  Deliberately not scored: enemy damage, kills,
+    gold, potions, and unspent energy.  Those are means, not ends, and hand
+    weighting them is how a reward model stops matching the objective.
+    """
 
     def __init__(self) -> None:
         self.reset()
 
     def reset(self, raw_state: dict | None = None) -> None:
-        """Clear battle bookkeeping and seed HP tracking from an optional state."""
-        self._last_player_hp = player_hp(raw_state) if raw_state is not None else None
-        self._battle_start_hp = None
-        self._battle_start_gold = None
-        self._battle_start_max_hp = None
-        self._battle_reward_closed = False
+        """Seed HP tracking and forget any boss the previous run was fighting."""
+        self._last_hp = player_hp(raw_state) if raw_state is not None else None
+        self._boss_pending = False
 
     def compute(
         self,
@@ -75,226 +62,59 @@ class BattleProgressReward(RewardModel):
         next_state: dict,
         action: dict | None = None,
     ) -> tuple[float, dict]:
-        """Compute reward for one raw-state transition."""
-        if prev_state.get("state_type") in BATTLE_STATE_TYPES:
-            reward, details = self._compute_battle_reward(prev_state, next_state, action)
-        else:
-            reward, details = self._compute_default_reward(prev_state, next_state)
+        """Return the reward for one transition and a breakdown of it."""
+        del action
 
-        self._last_player_hp = player_hp(next_state, self._last_player_hp)
+        nodes = max(0, _floor(next_state) - _floor(prev_state))
+        boss = self._resolve_boss(prev_state, next_state)
+
+        previous_hp = player_hp(prev_state, self._last_hp)
+        current_hp = player_hp(next_state, previous_hp)
+        hp_change = current_hp - previous_hp
+        self._last_hp = current_hp
+
+        details: dict[str, object] = {"type": "run_progress"}
+        reward = -STEP_COST
+        if nodes:
+            reward += nodes * NODE_PROGRESS_REWARD
+            details["nodes"] = nodes
+        if boss:
+            reward += BOSS_VICTORY_REWARD
+            details["boss_defeated"] = True
+        if hp_change:
+            reward += hp_change * HP_CHANGE_REWARD
+            details["hp_change"] = hp_change
+
+        details["total"] = reward
         return reward, details
 
-    def _compute_default_reward(
-        self,
-        prev_state: dict,
-        next_state: dict,
-    ) -> tuple[float, dict]:
-        """Reward non-battle floor progress and penalize HP loss."""
-        prev_hp = player_hp(prev_state)
-        next_hp = player_hp(next_state)
-        prev_floor = prev_state.get("run", {}).get("floor", 0)
-        next_floor = next_state.get("run", {}).get("floor", 0)
+    def _resolve_boss(self, prev_state: dict, next_state: dict) -> bool:
+        """Return whether this transition ended a boss fight in a victory.
 
-        reward = 0.0
-        reward += float(next_floor - prev_floor) * FLOOR_PROGRESS_REWARD
-        reward += float(next_hp - prev_hp) * RUN_HP_CHANGE_REWARD
+        A boss fight spans many transitions, so the pending flag is raised
+        while the boss is alive and consumed exactly once when it is not.
+        """
+        if prev_state.get("state_type") == "boss" and battle_has_alive_enemy(prev_state):
+            self._boss_pending = True
 
+        if not self._boss_pending:
+            return False
         if next_state.get("state_type") == "game_over":
-            reward -= GAME_OVER_PENALTY
+            self._boss_pending = False
+            return False
+        if battle_has_alive_enemy(next_state):
+            return False
 
-        return reward, {
-            "type": "default",
-            "total": reward,
-        }
+        self._boss_pending = False
+        return True
 
-    def _compute_battle_reward(
-        self,
-        prev_state: dict,
-        next_state: dict,
-        action: dict | None = None,
-    ) -> tuple[float, dict]:
-        """Reward enemy progress and battle outcomes while tracking battle starts."""
-        prev_hp = player_hp(prev_state, self._last_player_hp)
-        next_hp = player_hp(next_state, prev_hp)
-        prev_gold = player_gold(prev_state)
-        next_gold = player_gold(next_state, prev_gold)
-        prev_max_hp = player_max_hp(prev_state)
-        next_max_hp = player_max_hp(next_state, prev_max_hp)
-        prev_has_alive_enemy = battle_has_alive_enemy(prev_state)
 
-        if prev_has_alive_enemy:
-            self._battle_reward_closed = False
-
-        if self._battle_start_hp is None and prev_has_alive_enemy:
-            self._battle_start_hp = prev_hp
-        if self._battle_start_gold is None and prev_has_alive_enemy:
-            self._battle_start_gold = prev_gold
-        if self._battle_start_max_hp is None and prev_has_alive_enemy:
-            self._battle_start_max_hp = prev_max_hp
-
-        if self._battle_reward_closed and not prev_has_alive_enemy:
-            return 0.0, {
-                "type": "battle",
-                "prev_state_type": prev_state.get("state_type"),
-                "next_state_type": next_state.get("state_type"),
-                "result": None,
-                "already_resolved": True,
-                "prev_hp": prev_hp,
-                "next_hp": next_hp,
-                "prev_gold": prev_gold,
-                "next_gold": next_gold,
-                "prev_max_hp": prev_max_hp,
-                "next_max_hp": next_max_hp,
-                "total": 0.0,
-            }
-
-        step_hp_lost = max(0, prev_hp - next_hp)
-        battle_start_hp = self._battle_start_hp if self._battle_start_hp is not None else prev_hp
-        battle_start_gold = (
-            self._battle_start_gold
-            if self._battle_start_gold is not None
-            else prev_gold
-        )
-        battle_start_max_hp = (
-            self._battle_start_max_hp
-            if self._battle_start_max_hp is not None
-            else prev_max_hp
-        )
-        total_hp_lost = max(0, battle_start_hp - next_hp)
-        total_gold_lost = max(0, battle_start_gold - next_gold)
-        total_max_hp_lost = max(0, battle_start_max_hp - next_max_hp)
-
-        potion_used = bool(action and action.get("type") == "use_potion")
-        potion_penalty = -POTION_USE_PENALTY if potion_used else 0.0
-        prev_state_type = prev_state.get("state_type")
-        next_state_type = next_state.get("state_type")
-        battle_result = self._battle_result(prev_state, next_state)
-        enemy_hp_lost, enemies_killed = self._enemy_hp_progress(
-            prev_state,
-            next_state,
-            count_missing_as_dead=battle_result != "lost",
-        )
-        enemy_damage_reward = float(enemy_hp_lost) * ENEMY_DAMAGE_REWARD
-        enemy_kill_reward = float(enemies_killed) * ENEMY_KILL_REWARD
-        end_turn_energy_penalty = self._end_turn_energy_penalty(prev_state, action)
-        win_reward = BATTLE_WIN_REWARD if battle_result == "won" else 0.0
-        loss_penalty = -BATTLE_LOSS_PENALTY if battle_result == "lost" else 0.0
-        hp_penalty = -float(step_hp_lost) * BATTLE_HP_LOSS_PENALTY
-        gold_penalty = (
-            -float(total_gold_lost) * BATTLE_GOLD_LOSS_PENALTY
-            if battle_result is not None
-            else 0.0
-        )
-        max_hp_penalty = (
-            -float(total_max_hp_lost) * BATTLE_MAX_HP_LOSS_PENALTY
-            if battle_result is not None
-            else 0.0
-        )
-        reward = (
-            hp_penalty
-            + gold_penalty
-            + max_hp_penalty
-            + potion_penalty
-            + win_reward
-            + loss_penalty
-            + enemy_damage_reward
-            + enemy_kill_reward
-            + end_turn_energy_penalty
-        )
-        if battle_result is not None:
-            self._battle_start_hp = None
-            self._battle_start_gold = None
-            self._battle_start_max_hp = None
-            self._battle_reward_closed = True
-
-        return reward, {
-            "type": "battle",
-            "prev_state_type": prev_state_type,
-            "next_state_type": next_state_type,
-            "result": battle_result,
-            "prev_hp": prev_hp,
-            "next_hp": next_hp,
-            "prev_gold": prev_gold,
-            "next_gold": next_gold,
-            "prev_max_hp": prev_max_hp,
-            "next_max_hp": next_max_hp,
-            "battle_start_hp": battle_start_hp,
-            "battle_start_gold": battle_start_gold,
-            "battle_start_max_hp": battle_start_max_hp,
-            "step_hp_lost": step_hp_lost,
-            "hp_lost": total_hp_lost,
-            "gold_lost": total_gold_lost,
-            "max_hp_lost": total_max_hp_lost,
-            "hp_penalty": hp_penalty,
-            "gold_penalty": gold_penalty,
-            "max_hp_penalty": max_hp_penalty,
-            "enemy_hp_lost": enemy_hp_lost,
-            "enemies_killed": enemies_killed,
-            "enemy_damage_reward": enemy_damage_reward,
-            "enemy_kill_reward": enemy_kill_reward,
-            "end_turn_energy_penalty": end_turn_energy_penalty,
-            "potion_used": potion_used,
-            "potion_penalty": potion_penalty,
-            "win_reward": win_reward,
-            "loss_penalty": loss_penalty,
-            "total": reward,
-        }
-
-    def _battle_result(self, prev_state: dict, next_state: dict) -> str | None:
-        """Infer battle termination status from adjacent raw states."""
-        prev_state_type = prev_state.get("state_type")
-        next_state_type = next_state.get("state_type")
-        if prev_state_type not in BATTLE_STATE_TYPES:
-            return None
-        if next_state_type == "game_over":
-            return "lost"
-        if next_state_type in BATTLE_REWARD_STATE_TYPES:
-            if self._battle_start_hp is not None or battle_has_alive_enemy(prev_state):
-                return "won"
-            return None
-        if (
-            next_state_type in BATTLE_STATE_TYPES
-            and battle_has_alive_enemy(prev_state)
-            and not battle_has_alive_enemy(next_state)
-            and enemy_hp_map(prev_state)
-        ):
-            return "won"
-        return None
-
-    def _enemy_hp_progress(
-        self,
-        prev_state: dict,
-        next_state: dict,
-        count_missing_as_dead: bool,
-    ) -> tuple[int, int]:
-        """Measure enemy HP damage and kill count between two battle states."""
-        prev_enemies = enemy_hp_map(prev_state)
-        next_enemies = enemy_hp_map(next_state)
-        hp_lost = 0
-        killed = 0
-
-        for enemy_key, prev_hp in prev_enemies.items():
-            next_hp = next_enemies.get(enemy_key)
-            if next_hp is None:
-                next_hp = 0 if count_missing_as_dead else prev_hp
-
-            hp_lost += max(0, prev_hp - next_hp)
-            if prev_hp > 0 and next_hp <= 0:
-                killed += 1
-
-        return hp_lost, killed
-
-    def _end_turn_energy_penalty(self, prev_state: dict, action: dict | None) -> float:
-        """Penalize ending turn with unused player energy."""
-        if not action or action.get("type") != "end_turn":
-            return 0.0
-
-        energy = self._parse_int(prev_state.get("player", {}).get("energy", 0))
-        return -UNSPENT_ENERGY_PENALTY * float(max(0, energy))
-
-    def _parse_int(self, value: object, default: int = 0) -> int:
-        """Parse an integer-like value with a safe default."""
-        try:
-            return int(value)
-        except (TypeError, ValueError):
-            return default
+def _floor(state: dict) -> int:
+    """Return how many nodes the run has entered, or 0 when unreported."""
+    run = state.get("run")
+    if not isinstance(run, dict):
+        return 0
+    value = run.get("floor")
+    if isinstance(value, bool) or not isinstance(value, int):
+        return 0
+    return value

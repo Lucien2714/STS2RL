@@ -53,16 +53,6 @@ def player_hp(state: dict, default: int = 0) -> int:
     return player_field(state, "hp", default)
 
 
-def player_gold(state: dict, default: int = 0) -> int:
-    """Return the player's gold from a raw state dictionary."""
-    return player_field(state, "gold", default)
-
-
-def player_max_hp(state: dict, default: int = 0) -> int:
-    """Return the player's maximum HP from a raw state dictionary."""
-    return player_field(state, "max_hp", default)
-
-
 def enemy_key(enemy: dict, enemy_index: int) -> str:
     """Choose a stable enemy identifier, falling back to list position."""
     for key in ("entity_id", "id", "combat_id", "name"):

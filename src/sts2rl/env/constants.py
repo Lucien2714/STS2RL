@@ -2,23 +2,27 @@
 
 COMBAT_STATE_TYPES = {"monster", "elite", "boss"}
 BATTLE_STATE_TYPES = COMBAT_STATE_TYPES | {"hand_select"}
-BATTLE_REWARD_STATE_TYPES = {"rewards", "card_reward"}
 
-# Reward magnitudes.  These are kept within roughly one order of magnitude of
-# each other: PPO shares one trunk between the policy and the value head, and
-# an outcome term far larger than the per-step terms makes the value loss
-# dominate the shared gradient and wash out the policy signal.  Scale the whole
-# block together rather than any single entry.
-BATTLE_WIN_REWARD = 20.0
-BATTLE_LOSS_PENALTY = 15.0
-ENEMY_KILL_REWARD = 1.0
-ENEMY_DAMAGE_REWARD = 0.1
-BATTLE_HP_LOSS_PENALTY = 0.1
-BATTLE_GOLD_LOSS_PENALTY = 0.01
-BATTLE_MAX_HP_LOSS_PENALTY = 0.5
-POTION_USE_PENALTY = 0.5
-UNSPENT_ENERGY_PENALTY = 0.5
+# Reward magnitudes.
+#
+# The run is scored on the only thing it is trying to do: climb.  Everything
+# here is expressed relative to one node, so the whole block scales together by
+# changing NODE_PROGRESS_REWARD and keeping the ratios.
+#
+# A full act is roughly 16 nodes plus a boss, so an act is worth about 26 and a
+# three-act win about 80.  Returns stay monotone in progress, which is what
+# makes them easy for the critic to fit.
+NODE_PROGRESS_REWARD = 1.0
+BOSS_VICTORY_REWARD = 10.0
 
-FLOOR_PROGRESS_REWARD = 1.0
-RUN_HP_CHANGE_REWARD = 0.02
-GAME_OVER_PENALTY = 1.0
+# Standing still otherwise costs nothing: a measured run spent 400 steps
+# toggling one selection screen for exactly 0.000 reward.  One node is worth
+# 100 steps of loitering, so this never outweighs real progress.
+STEP_COST = 0.01
+
+# HP is the resource the whole run spends.  Without this, clearing a node at
+# 1 HP scores the same as clearing it untouched, and the critic has to learn
+# the difference from the deaths it causes several nodes later.  Losing a
+# third of a starting health bar costs about one node.  Set to 0.0 to score
+# progress alone.
+HP_CHANGE_REWARD = 0.03
