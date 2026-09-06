@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+import threading
 
 import torch
 from torch import Tensor, nn
@@ -64,6 +65,48 @@ class _RolloutStep:
     done: bool
 
 
+@dataclass
+class _Lane:
+    """One environment's in-flight decision and its slice of the rollout.
+
+    Every client steps its own game, so the decision awaiting an observation
+    and the reward carried across forced steps are per-environment.  The
+    rollout is kept per lane as well because GAE walks a trajectory backwards:
+    interleaving two games into one flat list would make step i-1 the temporal
+    predecessor of step i only by accident, and the advantage would propagate
+    across environments without anything failing.
+    """
+
+    pending: _PendingDecision | None = None
+    forced_action: bool = False
+    carried_reward: float = 0.0
+    steps: list[_RolloutStep] = field(default_factory=list)
+
+
+class LaneView(Agent):
+    """One environment's handle on the shared agent.
+
+    ``EpisodeRunner`` takes an ``Agent``; this binds every call to a lane so
+    the runner needs to know nothing about there being several.
+    """
+
+    def __init__(self, agent: "CandidatePPOAgent", lane: int) -> None:
+        self.agent = agent
+        self.lane = lane
+
+    def reset(self, initial_state: GameObservation) -> None:
+        self.agent.reset(initial_state, lane=self.lane)
+
+    def choose_action(self, state: GameObservation) -> GameAction:
+        return self.agent.choose_action(state, lane=self.lane)
+
+    def observe(self, transition: Transition) -> None:
+        self.agent.observe(transition, lane=self.lane)
+
+    def finish_episode(self, final_state: GameObservation, truncated: bool) -> None:
+        self.agent.finish_episode(final_state, truncated, lane=self.lane)
+
+
 class CandidatePPOAgent(Agent):
     """PPO agent trained end-to-end over structured dynamic candidates."""
 
@@ -85,23 +128,40 @@ class CandidatePPOAgent(Agent):
             self.game_encoder.parameters(), lr=self.config.learning_rate
         )
         self.training_enabled = True
-        self._pending: _PendingDecision | None = None
-        self._forced_action = False
-        self._carried_reward = 0.0
-        self._rollout: list[_RolloutStep] = []
+        self._lanes: dict[int, _Lane] = {}
+        # One agent serves every client, so the forward pass, the rollout, and
+        # the optimizer are shared mutable state.  The game is the bottleneck --
+        # each worker spends its time in HTTP, outside this lock -- so
+        # serializing the small tensor work costs almost nothing.
+        self._lock = threading.RLock()
         self.last_update: dict[str, float] = {}
         self.environment_steps = 0
         self.optimizer_updates = 0
         self._completed_update_metrics: list[dict[str, float]] = []
 
-    def reset(self, initial_state: GameObservation) -> None:
-        del initial_state
-        self._pending = None
-        self._forced_action = False
-        self._carried_reward = 0.0
+    def lane_view(self, lane: int) -> LaneView:
+        """Return an Agent bound to one environment's lane."""
+        if lane < 0:
+            raise ValueError("lane must not be negative")
+        return LaneView(self, lane)
 
-    def choose_action(self, state: GameObservation) -> GameAction:
-        if self._pending is not None:
+    def _lane(self, lane: int) -> _Lane:
+        with self._lock:
+            return self._lanes.setdefault(lane, _Lane())
+
+    def _rollout_length(self) -> int:
+        return sum(len(lane.steps) for lane in self._lanes.values())
+
+    def reset(self, initial_state: GameObservation, lane: int = 0) -> None:
+        del initial_state
+        entry = self._lane(lane)
+        entry.pending = None
+        entry.forced_action = False
+        entry.carried_reward = 0.0
+
+    def choose_action(self, state: GameObservation, lane: int = 0) -> GameAction:
+        entry = self._lane(lane)
+        if entry.pending is not None:
             raise RuntimeError(
                 "observe() must be called before choosing another action"
             )
@@ -111,11 +171,11 @@ class CandidatePPOAgent(Agent):
         # always zero and its ratio always one, so training on it only dilutes
         # the advantage statistics of genuine decisions.
         if len(candidates) == 1:
-            self._forced_action = True
+            entry.forced_action = True
             return candidates[0]
 
         decision = self.tokenizer.tokenize_decision(state, candidates)
-        with torch.no_grad():
+        with self._lock, torch.no_grad():
             output = self.game_encoder.policy_value(decision.to(self.device))
             distribution = Categorical(logits=output.logits)
             if self.training_enabled:
@@ -126,7 +186,7 @@ class CandidatePPOAgent(Agent):
 
         action_index = int(action_index_tensor.item())
         if self.training_enabled:
-            self._pending = _PendingDecision(
+            entry.pending = _PendingDecision(
                 decision=decision,
                 action_index=action_index,
                 log_probability=log_probability.detach().cpu(),
@@ -134,50 +194,60 @@ class CandidatePPOAgent(Agent):
             )
         return candidates[action_index]
 
-    def observe(self, transition: Transition) -> None:
-        forced = self._forced_action
-        self._forced_action = False
+    def observe(self, transition: Transition, lane: int = 0) -> None:
+        entry = self._lane(lane)
+        forced = entry.forced_action
+        entry.forced_action = False
         if not self.training_enabled:
             return
 
-        self.environment_steps += 1
-        if forced:
-            self._absorb_forced_transition(transition)
-        else:
-            if self._pending is None:
-                raise RuntimeError("choose_action() must be called before observe()")
-            self._rollout.append(
-                _RolloutStep(
-                    decision=self._pending.decision,
-                    next_observation=transition.next_state,
-                    action_index=self._pending.action_index,
-                    old_log_probability=self._pending.log_probability,
-                    old_value=self._pending.value,
-                    reward=float(transition.reward) + self._carried_reward,
-                    done=transition.done,
+        with self._lock:
+            self.environment_steps += 1
+            if forced:
+                self._absorb_forced_transition(transition, entry)
+            else:
+                if entry.pending is None:
+                    raise RuntimeError(
+                        "choose_action() must be called before observe()"
+                    )
+                entry.steps.append(
+                    _RolloutStep(
+                        decision=entry.pending.decision,
+                        next_observation=transition.next_state,
+                        action_index=entry.pending.action_index,
+                        old_log_probability=entry.pending.log_probability,
+                        old_value=entry.pending.value,
+                        reward=float(transition.reward) + entry.carried_reward,
+                        done=transition.done,
+                    )
                 )
-            )
-            self._carried_reward = 0.0
-            self._pending = None
-        if len(self._rollout) >= self.config.rollout_size:
+                entry.carried_reward = 0.0
+                entry.pending = None
+            ready = self._rollout_length() >= self.config.rollout_size
+        if ready:
             self.update()
 
-    def _absorb_forced_transition(self, transition: Transition) -> None:
+    def _absorb_forced_transition(self, transition: Transition, entry: _Lane) -> None:
         """Merge a forced step into the decision it followed.
 
         Forced steps are never scored, so their reward would otherwise be lost.
         Extending the preceding recorded transition keeps the return of every
         trained decision equal to the return the environment actually paid.
         """
-        if not self._rollout or self._pending is not None:
-            self._carried_reward += float(transition.reward)
+        if not entry.steps or entry.pending is not None:
+            entry.carried_reward += float(transition.reward)
             return
-        last = self._rollout[-1]
+        last = entry.steps[-1]
         last.reward += float(transition.reward)
         last.next_observation = transition.next_state
         last.done = transition.done
 
-    def finish_episode(self, final_state: GameObservation, truncated: bool) -> None:
+    def finish_episode(
+        self,
+        final_state: GameObservation,
+        truncated: bool,
+        lane: int = 0,
+    ) -> None:
         """End an episode without flushing the rollout.
 
         The rollout deliberately spans episode boundaries: episodes here are
@@ -188,12 +258,12 @@ class CandidatePPOAgent(Agent):
         episodes changes no return.  The trainer flushes before checkpointing.
         """
         del final_state, truncated
-        if self._pending is not None:
+        if self._lane(lane).pending is not None:
             raise RuntimeError("cannot finish an episode with an unobserved action")
 
     def train(self, enabled: bool = True) -> None:
         """Switch between stochastic learning and deterministic evaluation."""
-        if not enabled and self._pending is not None:
+        if not enabled and any(lane.pending for lane in self._lanes.values()):
             raise RuntimeError("cannot change mode with an unobserved action")
         self.training_enabled = enabled
         self.game_encoder.train(enabled)
@@ -237,44 +307,65 @@ class CandidatePPOAgent(Agent):
         return metrics
 
     def abort_episode(self) -> None:
-        """Discard an incomplete action and rollout without undoing prior updates."""
-        self._pending = None
-        self._forced_action = False
-        self._carried_reward = 0.0
-        self._rollout.clear()
+        """Discard incomplete actions and rollouts without undoing prior updates."""
+        with self._lock:
+            self._lanes.clear()
 
     def update(self) -> dict[str, float]:
-        """Run PPO updates over the current variable-length rollout."""
-        if not self._rollout:
-            return {}
+        """Run PPO updates over the current variable-length rollout.
 
-        advantages, returns = self._advantages_and_returns()
-        if len(advantages) > 1:
-            advantages = (advantages - advantages.mean()) / (
-                advantages.std(unbiased=False) + 1e-8
-            )
+        Each lane is one uninterrupted trajectory, so GAE is walked backwards
+        per lane and only the results are concatenated.  Doing it over the
+        concatenation instead would let one environment's advantage flow into
+        another's, which nothing would report.
+        """
+        with self._lock:
+            lanes = [self._lanes[key] for key in sorted(self._lanes)]
+            lanes = [lane for lane in lanes if lane.steps]
+            if not lanes:
+                return {}
 
-        metrics: dict[str, float] = {}
-        for _ in range(self.config.update_epochs):
-            order = torch.randperm(len(self._rollout)).tolist()
-            for start in range(0, len(order), self.config.minibatch_size):
-                metrics = self._optimize_minibatch(
-                    order[start : start + self.config.minibatch_size],
-                    advantages,
-                    returns,
+            steps: list[_RolloutStep] = []
+            advantage_chunks: list[Tensor] = []
+            return_chunks: list[Tensor] = []
+            for lane in lanes:
+                lane_advantages, lane_returns = self._advantages_and_returns(lane.steps)
+                advantage_chunks.append(lane_advantages)
+                return_chunks.append(lane_returns)
+                steps.extend(lane.steps)
+
+            advantages = torch.cat(advantage_chunks)
+            returns = torch.cat(return_chunks)
+            if len(advantages) > 1:
+                advantages = (advantages - advantages.mean()) / (
+                    advantages.std(unbiased=False) + 1e-8
                 )
 
-        self.optimizer_updates += 1
-        metrics["environment_steps"] = float(self.environment_steps)
-        metrics["optimizer_update"] = float(self.optimizer_updates)
-        self._rollout.clear()
-        self.last_update = metrics
-        self._completed_update_metrics.append(dict(metrics))
-        return metrics
+            metrics: dict[str, float] = {}
+            for _ in range(self.config.update_epochs):
+                order = torch.randperm(len(steps)).tolist()
+                for start in range(0, len(order), self.config.minibatch_size):
+                    metrics = self._optimize_minibatch(
+                        order[start : start + self.config.minibatch_size],
+                        steps,
+                        advantages,
+                        returns,
+                    )
+
+            self.optimizer_updates += 1
+            metrics["environment_steps"] = float(self.environment_steps)
+            metrics["optimizer_update"] = float(self.optimizer_updates)
+            metrics["lanes"] = float(len(lanes))
+            for lane in lanes:
+                lane.steps.clear()
+            self.last_update = metrics
+            self._completed_update_metrics.append(dict(metrics))
+            return metrics
 
     def _optimize_minibatch(
         self,
         indices: list[int],
+        steps: list[_RolloutStep],
         advantages: Tensor,
         returns: Tensor,
     ) -> dict[str, float]:
@@ -283,7 +374,7 @@ class CandidatePPOAgent(Agent):
         value_losses: list[Tensor] = []
         entropies: list[Tensor] = []
         for index in indices:
-            step = self._rollout[index]
+            step = steps[index]
             output = self.game_encoder.policy_value(step.decision.to(self.device))
             distribution = Categorical(logits=output.logits)
             action_index = torch.tensor(step.action_index, device=self.device)
@@ -325,14 +416,17 @@ class CandidatePPOAgent(Agent):
             "value_loss": float(value_loss.detach().cpu()),
             "entropy": float(entropy.detach().cpu()),
             "gradient_norm": float(gradient_norm.detach().cpu()),
-            "rollout_steps": float(len(self._rollout)),
+            "rollout_steps": float(len(steps)),
         }
 
-    def _advantages_and_returns(self) -> tuple[Tensor, Tensor]:
-        values = torch.stack([step.old_value for step in self._rollout]).to(self.device)
-        advantages = torch.zeros(len(self._rollout), device=self.device)
+    def _advantages_and_returns(
+        self, steps: list[_RolloutStep]
+    ) -> tuple[Tensor, Tensor]:
+        """Return GAE advantages and returns for one lane's trajectory."""
+        values = torch.stack([step.old_value for step in steps]).to(self.device)
+        advantages = torch.zeros(len(steps), device=self.device)
         with torch.no_grad():
-            last_step = self._rollout[-1]
+            last_step = steps[-1]
             next_value = (
                 torch.zeros((), device=self.device)
                 if last_step.done
@@ -343,8 +437,8 @@ class CandidatePPOAgent(Agent):
                 )
             )
             gae = torch.zeros((), device=self.device)
-            for index in range(len(self._rollout) - 1, -1, -1):
-                step = self._rollout[index]
+            for index in range(len(steps) - 1, -1, -1):
+                step = steps[index]
                 nonterminal = 0.0 if step.done else 1.0
                 delta = (
                     step.reward
@@ -360,11 +454,11 @@ class CandidatePPOAgent(Agent):
         return advantages, advantages + values
 
     def _require_clean_checkpoint_boundary(self, operation: str) -> None:
-        if self._pending is not None:
+        if any(lane.pending for lane in self._lanes.values()):
             raise RuntimeError(
                 f"cannot {operation} a checkpoint with an unobserved action"
             )
-        if self._rollout:
+        if self._rollout_length():
             raise RuntimeError(
                 f"cannot {operation} a checkpoint with a non-empty rollout"
             )

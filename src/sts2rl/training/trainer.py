@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import replace
+import threading
 from time import monotonic
 
 from sts2rl.agents import CandidatePPOAgent, EpisodeResult, EpisodeRunner
@@ -13,12 +14,49 @@ from sts2rl.training.config import TrainingPlan, TrainingState
 from sts2rl.training.metrics import EpisodeMetrics, TrainingMetricsWriter
 
 
+class _EpisodeGate:
+    """Let episodes run freely, and drain them when a checkpoint is due.
+
+    A checkpoint needs an empty rollout and no unobserved action, and with
+    several clients playing there is no moment when that is true by luck.  The
+    gate closes the door on new episodes and waits for the ones in flight, so
+    the boundary is created rather than hoped for.
+    """
+
+    def __init__(self) -> None:
+        self._condition = threading.Condition()
+        self._open = True
+        self._active = 0
+
+    def enter(self) -> None:
+        with self._condition:
+            while not self._open:
+                self._condition.wait()
+            self._active += 1
+
+    def leave(self) -> None:
+        with self._condition:
+            self._active -= 1
+            self._condition.notify_all()
+
+    def close_and_drain(self) -> None:
+        with self._condition:
+            self._open = False
+            while self._active:
+                self._condition.wait()
+
+    def open(self) -> None:
+        with self._condition:
+            self._open = True
+            self._condition.notify_all()
+
+
 class Trainer:
     """Run complete episodes, publish metrics, and save resumable boundaries."""
 
     def __init__(
         self,
-        runner: EpisodeRunner,
+        runner: EpisodeRunner | Sequence[EpisodeRunner],
         agent: CandidatePPOAgent,
         checkpoint_manager: CheckpointManager,
         metrics_writer: TrainingMetricsWriter,
@@ -27,7 +65,12 @@ class Trainer:
         reporter: Callable[[EpisodeMetrics], None] | None = None,
         tensorboard_log_dir: str = "tensorboard",
     ) -> None:
-        self.runner = runner
+        self.runners: tuple[EpisodeRunner, ...] = (
+            tuple(runner) if isinstance(runner, Sequence) else (runner,)
+        )
+        if not self.runners:
+            raise ValueError("at least one runner is required")
+        self.runner = self.runners[0]
         self.agent = agent
         self.checkpoint_manager = checkpoint_manager
         self.metrics_writer = metrics_writer
@@ -45,6 +88,9 @@ class Trainer:
             )
         if target == self.state.completed_episodes:
             return self.state
+
+        if len(self.runners) > 1:
+            return self._train_parallel(target)
 
         last_saved_episode: int | None = None
         try:
@@ -81,6 +127,103 @@ class Trainer:
         except Exception as exc:
             self._recover("recovery", exc)
             raise
+
+    def _train_parallel(self, target: int) -> TrainingState:
+        """Play every client at once, sharing one agent.
+
+        The game is the bottleneck -- a worker spends its time waiting on HTTP,
+        outside the agent's lock -- so threads buy close to linear throughput
+        while the tensor work stays serialized and therefore correct.
+        """
+        gate = _EpisodeGate()
+        bookkeeping = threading.Lock()
+        checkpointing = threading.Lock()
+        dispatched = self.state.completed_episodes
+        last_saved_episode: int | None = None
+        failure: list[BaseException] = []
+
+        def worker(runner: EpisodeRunner) -> None:
+            nonlocal dispatched, last_saved_episode
+            while True:
+                with bookkeeping:
+                    if failure or dispatched >= target:
+                        return
+                    # The seed is claimed at dispatch, not on completion, so
+                    # two clients never play the same seed at the same time.
+                    reset_spec = self._episode_reset_spec(dispatched)
+                    dispatched += 1
+
+                gate.enter()
+                try:
+                    started_at = monotonic()
+                    result = runner.run(reset_spec)
+                finally:
+                    gate.leave()
+
+                with bookkeeping:
+                    self._adopt_agent_counters()
+                    self.state.completed_episodes += 1
+                    self._log_pending_updates()
+                    episode_metrics = self._episode_metrics(
+                        result,
+                        duration_seconds=monotonic() - started_at,
+                        seed=None if result.reused_run else reset_spec.run_seed,
+                    )
+                    self.metrics_writer.log_episode(episode_metrics)
+                    self._log_action_errors(result)
+                    if self.reporter is not None:
+                        self.reporter(episode_metrics)
+                    completed = self.state.completed_episodes
+                    due = (
+                        completed % self.plan.training.checkpoint_every == 0
+                        or completed >= target
+                    )
+
+                if due:
+                    with checkpointing:
+                        if last_saved_episode != self.state.completed_episodes:
+                            gate.close_and_drain()
+                            try:
+                                self._save_episode_checkpoint()
+                                last_saved_episode = self.state.completed_episodes
+                            finally:
+                                gate.open()
+
+        def guarded(runner: EpisodeRunner) -> None:
+            try:
+                worker(runner)
+            except BaseException as exc:  # noqa: BLE001 - re-raised on the main thread
+                with bookkeeping:
+                    failure.append(exc)
+                # A worker that dies holding the door shut would hang the rest.
+                gate.open()
+
+        threads = [
+            threading.Thread(target=guarded, args=(runner,), daemon=True)
+            for runner in self.runners
+        ]
+        try:
+            for thread in threads:
+                thread.start()
+            for thread in threads:
+                thread.join()
+        except KeyboardInterrupt as exc:
+            failure.append(exc)
+            gate.open()
+            for thread in threads:
+                thread.join()
+
+        if failure:
+            error = failure[0]
+            kind = (
+                "interrupted" if isinstance(error, KeyboardInterrupt) else "recovery"
+            )
+            self._recover(kind, error)
+            raise error
+
+        if last_saved_episode != self.state.completed_episodes:
+            self._save_episode_checkpoint()
+        return self.state
 
     def _save_episode_checkpoint(self) -> None:
         """Flush the rollout, then save; a checkpoint needs a clean boundary.
@@ -164,13 +307,15 @@ class Trainer:
             self.state.environment_steps,
         )
 
-    def _episode_reset_spec(self) -> ResetSpec:
+    def _episode_reset_spec(self, episode_index: int | None = None) -> ResetSpec:
         """Return the reset for the next episode, seeded from the pool.
 
         Without a pool this is the configured reset unchanged, so an unseeded
         run behaves exactly as before.
         """
-        seed = self.plan.training.seed_for_episode(self.state.completed_episodes)
+        if episode_index is None:
+            episode_index = self.state.completed_episodes
+        seed = self.plan.training.seed_for_episode(episode_index)
         if seed is None:
             return self.plan.reset
         return replace(self.plan.reset, run_seed=seed)

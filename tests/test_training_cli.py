@@ -223,3 +223,29 @@ def test_resume_accepts_the_pool_it_was_saved_with(tmp_path: Path):
     resumed = cli._resumed_plan(args, SimpleNamespace(plan=saved))  # type: ignore[arg-type]
 
     assert resumed.training.training_seeds == ("AAA", "BBB")
+
+
+def test_ports_come_from_the_command_line(tmp_path: Path):
+    args = cli.create_parser().parse_args(
+        ["--run-dir", str(tmp_path / "run"), "--ports", "15526, 15527"]
+    )
+
+    plan = cli._new_plan(args)
+
+    assert plan.training.ports == (15526, 15527)
+
+
+def test_resume_refuses_to_change_the_client_set(tmp_path: Path):
+    saved = TrainingPlan(
+        training=TrainingConfig(run_dir=tmp_path / "run", ports=(15526, 15527))
+    )
+    args = cli.create_parser().parse_args(
+        [
+            "--run-dir", str(tmp_path / "run"),
+            "--resume", "latest",
+            "--ports", "15526",
+        ]
+    )
+
+    with pytest.raises(ValueError, match="--ports cannot change"):
+        cli._resumed_plan(args, SimpleNamespace(plan=saved))  # type: ignore[arg-type]

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
+import time
 
 import pytest
 
@@ -406,3 +407,124 @@ def test_a_reused_run_is_flagged_and_reports_no_seed():
     recorded = trainer.metrics_writer.episodes[0]
     assert recorded.reused_run is True
     assert recorded.seed is None
+
+
+class SlowFakeRunner(FakeRunner):
+    """A runner that overlaps with its peers and records when it was inside."""
+
+    def __init__(self, agent: FakeAgent, ledger: list, name: str, delay: float):
+        super().__init__(agent)
+        self.ledger = ledger
+        self.name = name
+        self.delay = delay
+
+    def run(self, reset_spec: object) -> EpisodeResult:
+        self.ledger.append(("enter", self.name))
+        time.sleep(self.delay)
+        self.ledger.append(("leave", self.name))
+        return super().run(reset_spec)
+
+
+def _parallel_trainer(runners, plan, state=None):
+    agent = runners[0].agent
+    return Trainer(
+        runners,  # type: ignore[arg-type]
+        agent,  # type: ignore[arg-type]
+        FakeCheckpointManager(),  # type: ignore[arg-type]
+        FakeMetricsWriter(),  # type: ignore[arg-type]
+        plan,
+        state,
+    )
+
+
+def test_several_clients_share_one_episode_target():
+    agent = FakeAgent()
+    ledger: list = []
+    runners = [
+        SlowFakeRunner(agent, ledger, "a", 0.01),
+        SlowFakeRunner(agent, ledger, "b", 0.01),
+    ]
+    trainer = _parallel_trainer(runners, _plan(total=6, checkpoint_every=6))
+
+    state = trainer.train()
+
+    assert state.completed_episodes == 6
+    assert runners[0].calls + runners[1].calls == 6
+    # Both clients contributed rather than one doing all the work.
+    assert runners[0].calls > 0 and runners[1].calls > 0
+
+
+def test_clients_actually_overlap():
+    """Threads exist to buy throughput, so episodes must run concurrently."""
+    agent = FakeAgent()
+    ledger: list = []
+    runners = [
+        SlowFakeRunner(agent, ledger, "a", 0.05),
+        SlowFakeRunner(agent, ledger, "b", 0.05),
+    ]
+    _parallel_trainer(runners, _plan(total=4, checkpoint_every=4)).train()
+
+    depth = 0
+    peak = 0
+    for kind, _ in ledger:
+        depth += 1 if kind == "enter" else -1
+        peak = max(peak, depth)
+    assert peak == 2
+
+
+def test_a_checkpoint_drains_every_client_first():
+    """A checkpoint needs an empty rollout, so no episode may be in flight."""
+    agent = FakeAgent()
+    ledger: list = []
+    runners = [
+        SlowFakeRunner(agent, ledger, "a", 0.02),
+        SlowFakeRunner(agent, ledger, "b", 0.02),
+    ]
+    trainer = _parallel_trainer(runners, _plan(total=4, checkpoint_every=2))
+    original = trainer._save_episode_checkpoint
+
+    def recording_save() -> None:
+        ledger.append(("checkpoint", "-"))
+        original()
+
+    trainer._save_episode_checkpoint = recording_save  # type: ignore[method-assign]
+    trainer.train()
+
+    depth = 0
+    for kind, _ in ledger:
+        if kind == "enter":
+            depth += 1
+        elif kind == "leave":
+            depth -= 1
+        else:
+            assert depth == 0, "a checkpoint ran while an episode was in flight"
+
+
+def test_parallel_episodes_claim_distinct_seeds():
+    agent = FakeAgent()
+    ledger: list = []
+    runners = [
+        SlowFakeRunner(agent, ledger, "a", 0.01),
+        SlowFakeRunner(agent, ledger, "b", 0.01),
+    ]
+    plan = _seeded_plan(("AAA", "BBB", "CCC"), total=6)
+    trainer = _parallel_trainer(runners, plan)
+
+    trainer.train()
+
+    seeds = [spec.run_seed for r in runners for spec in r.reset_specs]
+    assert sorted(seeds) == ["AAA", "AAA", "BBB", "BBB", "CCC", "CCC"]
+
+
+def test_a_failing_client_stops_training_without_hanging_the_others():
+    agent = FakeAgent()
+    ledger: list = []
+    healthy = SlowFakeRunner(agent, ledger, "a", 0.01)
+    broken = SlowFakeRunner(agent, ledger, "b", 0.01)
+    broken.failure = RuntimeError("client died")
+    trainer = _parallel_trainer([healthy, broken], _plan(total=20, checkpoint_every=20))
+
+    with pytest.raises(RuntimeError, match="client died"):
+        trainer.train()
+
+    assert trainer.checkpoint_manager.recoveries

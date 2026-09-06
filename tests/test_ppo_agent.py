@@ -200,8 +200,8 @@ def test_checkpoint_requires_clean_boundary_and_abort_discards_partial_work():
 
     agent.abort_episode()
 
-    assert agent._pending is None
-    assert not agent._rollout
+    assert agent._lane(0).pending is None
+    assert not agent._lane(0).steps
     assert set(agent.checkpoint_state()) == {"encoder", "optimizer"}
     assert agent.environment_steps == 1
 
@@ -223,7 +223,7 @@ def test_rollout_keeps_cpu_tokens_and_defers_next_state_tokenization():
         )
     )
 
-    step = agent._rollout[0]
+    step = agent._lane(0).steps[0]
     assert isinstance(step.decision, TokenizedDecision)
     assert len(step.decision.actions) == 3
     assert step.next_observation is next_observation
@@ -239,8 +239,8 @@ def test_terminal_and_nonterminal_bootstrap_are_distinct(done: bool):
     state = _map_state(2)
     observation = _observation(state)
     action = agent.choose_action(observation)
-    assert agent._pending is not None
-    old_value = agent._pending.value.item()
+    assert agent._lane(0).pending is not None
+    old_value = agent._lane(0).pending.value.item()
     agent.update = lambda: {}  # type: ignore[method-assign]
     next_observation = (
         _observation({"state_type": "game_over"})
@@ -257,14 +257,14 @@ def test_terminal_and_nonterminal_bootstrap_are_distinct(done: bool):
         )
     )
 
-    advantages, _ = agent._advantages_and_returns()
+    advantages, _ = agent._advantages_and_returns(agent._lane(0).steps)
     if done:
         expected = 2.0 - old_value
     else:
         with torch.no_grad():
             next_value = agent.game_encoder.value(
                 agent.tokenizer.tokenize_state(
-                    agent._rollout[0].next_observation
+                    agent._lane(0).steps[0].next_observation
                 ).to(agent.device)
             ).item()
         expected = 2.0 + agent.config.gamma * next_value - old_value
@@ -290,14 +290,14 @@ def test_finishing_an_episode_keeps_the_rollout_for_the_next_one():
         )
         agent.finish_episode(next_observation, truncated=not done)
 
-    assert len(agent._rollout) == 3
+    assert len(agent._lane(0).steps) == 3
     assert agent.last_update == {}
-    assert [step.done for step in agent._rollout] == [True, False, True]
+    assert [step.done for step in agent._lane(0).steps] == [True, False, True]
 
     agent.update()
 
     assert agent.last_update["rollout_steps"] == 3.0
-    assert not agent._rollout
+    assert not agent._lane(0).steps
 
 
 def test_a_terminal_inside_the_rollout_cuts_the_return_there():
@@ -317,8 +317,8 @@ def test_a_terminal_inside_the_rollout_cuts_the_return_there():
             )
         )
 
-    values = [float(step.old_value) for step in agent._rollout]
-    advantages, _ = agent._advantages_and_returns()
+    values = [float(step.old_value) for step in agent._lane(0).steps]
+    advantages, _ = agent._advantages_and_returns(agent._lane(0).steps)
 
     # the first step ends an episode, so its advantage must not see the second
     assert advantages[0].item() == pytest.approx(1.0 - values[0])
@@ -341,10 +341,10 @@ def test_forced_single_candidate_is_executed_without_entering_the_rollout():
     )
 
     assert action.to_dict() == {"type": "choose_map_node", "index": 0}
-    assert agent._pending is None
-    assert agent._rollout == []
+    assert agent._lane(0).pending is None
+    assert agent._lane(0).steps == []
     assert agent.environment_steps == 1
-    assert agent._carried_reward == 3.0
+    assert agent._lane(0).carried_reward == 3.0
 
 
 def test_forced_step_reward_is_folded_into_the_preceding_decision():
@@ -376,10 +376,10 @@ def test_forced_step_reward_is_folded_into_the_preceding_decision():
         )
     )
 
-    assert len(agent._rollout) == 1
-    assert agent._rollout[0].reward == pytest.approx(5.0)
-    assert agent._rollout[0].done is True
-    assert agent._rollout[0].next_observation is terminal
+    assert len(agent._lane(0).steps) == 1
+    assert agent._lane(0).steps[0].reward == pytest.approx(5.0)
+    assert agent._lane(0).steps[0].done is True
+    assert agent._lane(0).steps[0].next_observation is terminal
     assert agent.environment_steps == 2
 
 
@@ -393,5 +393,150 @@ def test_evaluation_is_deterministic_and_does_not_collect_rollouts():
     second = agent.choose_action(observation).to_dict()
 
     assert first == second
-    assert agent._pending is None
-    assert not agent._rollout
+    assert agent._lane(0).pending is None
+    assert not agent._lane(0).steps
+
+
+def _step(agent, lane: int, *, reward: float, done: bool) -> None:
+    """Run one full decision on one lane."""
+    observation = _observation(_map_state(2))
+    action = agent.choose_action(observation, lane=lane)
+    agent.observe(
+        Transition(
+            state=observation,
+            action=action,
+            reward=reward,
+            next_state=_observation(_map_state(2)),
+            done=done,
+            info={},
+        ),
+        lane=lane,
+    )
+
+
+def test_lanes_keep_their_pending_decisions_apart():
+    """Two clients decide concurrently; neither may consume the other's."""
+    agent = _agent()
+    first = _observation(_map_state(2))
+    second = _observation(_map_state(3))
+
+    agent.choose_action(first, lane=0)
+    agent.choose_action(second, lane=1)
+
+    assert agent._lane(0).pending is not None
+    assert agent._lane(1).pending is not None
+    assert agent._lane(0).pending is not agent._lane(1).pending
+
+
+def test_a_lane_still_rejects_two_decisions_without_an_observation():
+    agent = _agent()
+    agent.choose_action(_observation(_map_state(2)), lane=1)
+
+    with pytest.raises(RuntimeError, match="observe"):
+        agent.choose_action(_observation(_map_state(2)), lane=1)
+
+
+def test_the_rollout_fills_from_every_lane_together():
+    agent = _agent(rollout_size=4)
+
+    for lane in (0, 1):
+        for _ in range(2):
+            _step(agent, lane, reward=1.0, done=False)
+
+    # Four steps across two lanes reached rollout_size, so the update ran.
+    assert agent.optimizer_updates == 1
+    assert agent.last_update["lanes"] == 2.0
+    assert agent.last_update["rollout_steps"] == 4.0
+
+
+def test_advantage_never_flows_from_one_lane_into_another():
+    """The whole reason lanes exist: GAE walks a trajectory, not a list.
+
+    A lane's tail is normally mid-episode -- the rollout fills while every
+    client is still playing -- so ``done`` masking does not protect it.  The
+    backward walk would carry the next lane's trace straight into it.
+    """
+    agent = _agent()
+
+    _step(agent, 0, reward=1.0, done=False)
+    _step(agent, 0, reward=1.0, done=False)
+    # A large reward on the other lane is only visible in lane 0 if the walk
+    # ran over the concatenation instead of per lane.
+    _step(agent, 1, reward=100.0, done=False)
+
+    per_lane, _ = agent._advantages_and_returns(agent._lane(0).steps)
+    concatenated, _ = agent._advantages_and_returns(
+        agent._lane(0).steps + agent._lane(1).steps
+    )
+
+    assert float(concatenated[1]) > float(per_lane[-1]) + 10.0
+    assert len(per_lane) == 2
+
+
+def test_update_computes_the_advantage_each_lane_would_get_alone():
+    agent = _agent(rollout_size=1000)
+
+    _step(agent, 0, reward=1.0, done=False)
+    _step(agent, 1, reward=100.0, done=False)
+    expected, _ = agent._advantages_and_returns(agent._lane(0).steps)
+
+    # Recomputing after adding the loud lane must not move lane 0.
+    _step(agent, 1, reward=100.0, done=False)
+    actual, _ = agent._advantages_and_returns(agent._lane(0).steps)
+
+    assert float(actual[0]) == pytest.approx(float(expected[0]))
+
+
+def test_a_forced_step_is_absorbed_into_its_own_lane():
+    agent = _agent()
+    _step(agent, 0, reward=1.0, done=False)
+    _step(agent, 1, reward=1.0, done=False)
+
+    # Lane 1 takes a forced step worth 5.0; lane 0 must not see it.
+    agent._lane(1).forced_action = True
+    observation = _observation(_map_state(2))
+    agent.observe(
+        Transition(
+            state=observation,
+            action=agent._lane(1).steps[-1].decision.candidates[0]
+            if hasattr(agent._lane(1).steps[-1].decision, "candidates")
+            else None,
+            reward=5.0,
+            next_state=observation,
+            done=False,
+            info={},
+        ),
+        lane=1,
+    )
+
+    assert agent._lane(1).steps[-1].reward == pytest.approx(6.0)
+    assert agent._lane(0).steps[-1].reward == pytest.approx(1.0)
+
+
+def test_a_lane_view_binds_every_call_to_its_lane():
+    agent = _agent()
+    view = agent.lane_view(2)
+
+    observation = _observation(_map_state(2))
+    action = view.choose_action(observation)
+    view.observe(
+        Transition(
+            state=observation,
+            action=action,
+            reward=1.0,
+            next_state=observation,
+            done=False,
+            info={},
+        )
+    )
+
+    assert len(agent._lane(2).steps) == 1
+    assert agent._lane(0).steps == []
+
+
+def test_a_checkpoint_refuses_a_boundary_any_lane_is_mid_decision():
+    agent = _agent()
+    agent.choose_action(_observation(_map_state(2)), lane=3)
+
+    with pytest.raises(RuntimeError, match="unobserved action"):
+        agent.checkpoint_state()

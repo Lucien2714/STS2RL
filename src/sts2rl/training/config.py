@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
+from urllib.parse import urlsplit, urlunsplit
 
 import torch
 
@@ -43,6 +44,7 @@ class TrainingConfig:
     base_url: str = "http://localhost:15526/api/v1"
     timeout: float = 20.0
     action_delay_seconds: float = DEFAULT_ACTION_DELAY_SECONDS
+    ports: tuple[int, ...] = ()
     training_seeds: tuple[str, ...] = ()
     holdout_seeds: tuple[str, ...] = ()
     device: str = "cpu"
@@ -91,6 +93,15 @@ class TrainingConfig:
             torch.device(self.device)
         except (RuntimeError, TypeError) as exc:
             raise ValueError(f"invalid torch device: {self.device!r}") from exc
+        ports = tuple(self.ports)
+        object.__setattr__(self, "ports", ports)
+        if any(
+            isinstance(port, bool) or not isinstance(port, int) or not 1 <= port <= 65535
+            for port in ports
+        ):
+            raise ValueError("ports must be integers between 1 and 65535")
+        if len(set(ports)) != len(ports):
+            raise ValueError("ports must not repeat; one client per port")
         for name in ("training_seeds", "holdout_seeds"):
             seeds = tuple(getattr(self, name))
             object.__setattr__(self, name, seeds)
@@ -117,9 +128,34 @@ class TrainingConfig:
         """Return a JSON-compatible representation."""
         result = asdict(self)
         result["run_dir"] = str(self.run_dir)
+        result["ports"] = list(self.ports)
         result["training_seeds"] = list(self.training_seeds)
         result["holdout_seeds"] = list(self.holdout_seeds)
         return result
+
+    def client_base_urls(self) -> tuple[str, ...]:
+        """Return one base URL per client, in configuration order.
+
+        Clients are added as ports, so the configured ``base_url`` supplies the
+        scheme, host, and path and each port replaces its port component. With
+        no ports it is the single client, exactly as before.
+        """
+        if not self.ports:
+            return (self.base_url,)
+        parsed = urlsplit(self.base_url)
+        host = parsed.hostname or "localhost"
+        return tuple(
+            urlunsplit(
+                (
+                    parsed.scheme,
+                    f"{host}:{port}",
+                    parsed.path,
+                    parsed.query,
+                    parsed.fragment,
+                )
+            )
+            for port in self.ports
+        )
 
     def seed_for_episode(self, completed_episodes: int) -> str | None:
         """Return the seed the next episode should run, cycling the pool.

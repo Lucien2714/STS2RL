@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 from collections.abc import Callable, Sequence
+from contextlib import ExitStack
 from dataclasses import replace
 from pathlib import Path
 from typing import TypeVar
@@ -39,6 +40,13 @@ def create_parser() -> argparse.ArgumentParser:
     parser.add_argument("--resume", nargs="?", const="latest")
     parser.add_argument("--base-url")
     parser.add_argument("--timeout", type=float)
+    parser.add_argument(
+        "--ports",
+        help=(
+            "Comma-separated STS2MCP ports, one game client each, played in "
+            "parallel. Omitted uses the single client at --base-url."
+        ),
+    )
     parser.add_argument(
         "--action-delay",
         type=float,
@@ -153,19 +161,29 @@ def run_training(args: argparse.Namespace) -> int:
         tensorboard_flush_secs=plan.training.tensorboard_flush_secs,
         resume_step=resume_step,
     ) as metrics_writer:
-        with GameEnv(
-            base_url=plan.training.base_url,
-            timeout=plan.training.timeout,
-            action_delay_seconds=plan.training.action_delay_seconds,
-        ) as env:
-            runner = EpisodeRunner(
-                env,
-                agent,
-                max_steps=plan.training.max_steps_per_episode,
-                max_state_refreshes=plan.training.max_state_refreshes,
-            )
+        base_urls = plan.training.client_base_urls()
+        with ExitStack() as clients:
+            runners = [
+                EpisodeRunner(
+                    clients.enter_context(
+                        GameEnv(
+                            base_url=base_url,
+                            timeout=plan.training.timeout,
+                            action_delay_seconds=(
+                                plan.training.action_delay_seconds
+                            ),
+                        )
+                    ),
+                    # Each client gets its own lane so the agent keeps their
+                    # trajectories -- and therefore their advantages -- apart.
+                    agent.lane_view(lane),
+                    max_steps=plan.training.max_steps_per_episode,
+                    max_state_refreshes=plan.training.max_state_refreshes,
+                )
+                for lane, base_url in enumerate(base_urls)
+            ]
             trainer = Trainer(
-                runner,
+                runners,
                 agent,
                 manager,
                 metrics_writer,
@@ -202,6 +220,7 @@ def _new_plan(args: argparse.Namespace) -> TrainingPlan:
             action_delay_seconds=_or_default(
                 args.action_delay, training_defaults.action_delay_seconds
             ),
+            ports=_port_list(args.ports),
             training_seeds=_seed_list(args.seed_pool, DEFAULT_SEED_POOL),
             holdout_seeds=_seed_list(args.holdout_seeds, DEFAULT_HOLDOUT_SEEDS),
             device=_or_default(args.device, training_defaults.device),
@@ -296,6 +315,7 @@ def _resumed_plan(
         args,
         {
             "seed_pool": ",".join(saved.training.training_seeds),
+            "ports": ",".join(str(port) for port in saved.training.ports),
             "holdout_seeds": ",".join(saved.training.holdout_seeds),
             "modifiers": ",".join(saved.reset.modifiers),
         },
@@ -354,6 +374,22 @@ def _report_episode(metrics: EpisodeMetrics) -> None:
 
 def _or_default(value: T | None, default: T) -> T:
     return default if value is None else value
+
+
+def _port_list(value: object) -> tuple[int, ...]:
+    """Parse the comma-separated client ports."""
+    if value is None:
+        return ()
+    ports = []
+    for part in str(value).split(","):
+        part = part.strip()
+        if not part:
+            continue
+        try:
+            ports.append(int(part))
+        except ValueError:
+            raise ValueError(f"--ports expects numbers, got {part!r}") from None
+    return tuple(ports)
 
 
 def _seed_list(value: object, bundled: tuple[str, ...]) -> tuple[str, ...]:

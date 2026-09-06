@@ -123,3 +123,39 @@ def test_seed_pools_survive_a_serialization_round_trip():
     assert restored.training.training_seeds == ("A", "B")
     assert restored.training.holdout_seeds == ("C",)
     assert restored.reset.modifiers == ("MIDAS",)
+
+
+def test_one_client_per_port_keeps_the_configured_url():
+    assert TrainingConfig().client_base_urls() == (
+        "http://localhost:15526/api/v1",
+    )
+
+
+def test_ports_replace_only_the_port_component():
+    config = TrainingConfig(
+        base_url="http://127.0.0.1:15526/api/v1", ports=(15527, 15528)
+    )
+
+    assert config.client_base_urls() == (
+        "http://127.0.0.1:15527/api/v1",
+        "http://127.0.0.1:15528/api/v1",
+    )
+
+
+def test_a_repeated_port_is_rejected():
+    """Two clients on one port would be one game played by two lanes."""
+    with pytest.raises(ValueError, match="must not repeat"):
+        TrainingConfig(ports=(15526, 15526))
+
+
+def test_an_out_of_range_port_is_rejected():
+    with pytest.raises(ValueError, match="between 1 and 65535"):
+        TrainingConfig(ports=(0,))
+
+
+def test_ports_survive_a_serialization_round_trip():
+    plan = TrainingPlan(training=TrainingConfig(ports=(15526, 15527)))
+
+    restored = TrainingPlan.from_dict(json.loads(json.dumps(plan.to_dict())))
+
+    assert restored.training.ports == (15526, 15527)
