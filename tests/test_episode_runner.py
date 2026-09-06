@@ -58,7 +58,7 @@ def _deck(count=10):
                     "rarity": "Basic",
                     "cost": "1",
                     "quantity": count,
-                    "upgrade_level": 0,
+                    "current_upgrade_level": 0,
                 }
             ],
         },

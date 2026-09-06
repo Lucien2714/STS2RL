@@ -441,7 +441,7 @@ def _player_detail(cards, **deck_changes):
         "count": sum(c.get("quantity", 1) for c in cards),
         "unique_count": len(cards),
         "upgraded_count": sum(
-            c.get("quantity", 1) for c in cards if c.get("upgrade_level")
+            c.get("quantity", 1) for c in cards if c.get("current_upgrade_level")
         ),
         "cards": cards,
     }
@@ -459,7 +459,7 @@ def _deck_card(**changes):
         "star_cost": None,
         "description": "Deal 6 damage.",
         "is_upgraded": False,
-        "upgrade_level": 0,
+        "current_upgrade_level": 0,
         "max_upgrade_level": 1,
         "is_upgradable": True,
         "enchantment": None,
@@ -481,7 +481,8 @@ def test_master_deck_becomes_deck_zone_rows_with_reported_quantities(
                 _deck_card(),
                 _deck_card(
                     id="BASH", name="Bash", cost="2", quantity=1,
-                    upgrade_level=1, is_upgraded=True, is_upgradable=False,
+                    current_upgrade_level=2, is_upgraded=True,
+                    is_upgradable=False,
                 ),
             ]
         ),
@@ -502,13 +503,15 @@ def test_master_deck_becomes_deck_zone_rows_with_reported_quantities(
     assert sorted(cards.numeric[deck_rows, count].tolist()) == pytest.approx(
         sorted([math.log1p(5), math.log1p(1)])
     )
-    assert sorted(cards.numeric[deck_rows, level].tolist()) == [0.0, 1.0]
+    # a level beyond 1 is only expressible through current_upgrade_level,
+    # so this fails if the tokenizer falls back to the is_upgraded flag
+    assert sorted(cards.numeric[deck_rows, level].tolist()) == [0.0, 2.0]
 
 
 def test_deck_totals_reach_the_global_features(tokenizer: GameTokenizer):
     observation = GameObservation(
         {"state_type": "map", "player": _base_player()},
-        _player_detail([_deck_card(quantity=7, upgrade_level=1)]),
+        _player_detail([_deck_card(quantity=7, current_upgrade_level=1)]),
     )
 
     tokenized = tokenizer.tokenize_state(observation)
@@ -623,4 +626,85 @@ def test_statuses_resolve_through_the_suffixed_ids_the_api_sends(
     assert UNKNOWN_INDEX not in powers.categorical[:, pid].tolist()
     assert intents.categorical[0, iid].item() == vocabulary.lookup(
         "intents", "DEBUFF_STRONG"
+    )
+
+
+def _pile_card(**changes):
+    """A pile card as the API now sends it: a plain shared Card Object."""
+    card = {
+        "id": "DEFEND_IRONCLAD",
+        "name": "Defend",
+        "type": "Skill",
+        "rarity": "Basic",
+        "cost": "1",
+        "star_cost": None,
+        "description": "Gain 5 Block.",
+        "is_upgraded": False,
+        "current_upgrade_level": 0,
+        "max_upgrade_level": 1,
+        "is_upgradable": True,
+        "enchantment": None,
+        "affliction": None,
+    }
+    card.update(changes)
+    return card
+
+
+def test_pile_cards_resolve_by_id_now_that_the_api_sends_one(
+    tokenizer: GameTokenizer,
+    vocabulary: GameVocabulary,
+):
+    """Defend and Strike share a name across characters; only the id is exact."""
+    state = {
+        "state_type": "monster",
+        "player": _base_player(draw_pile=[_pile_card(), _pile_card()]),
+        "battle": {"enemies": []},
+    }
+
+    tokenized = tokenizer.tokenize_state(GameObservation(state))
+    cards = tokenized.entities["card"]
+    ident = _column(ENTITY_CATEGORICAL_FIELDS["card"], "card_id")
+    zone = _column(ENTITY_CATEGORICAL_FIELDS["card"], "card_zone")
+    rarity = _column(ENTITY_CATEGORICAL_FIELDS["card"], "rarity")
+    draw = cards.categorical[:, zone] == vocabulary.lookup("card_zones", "draw")
+
+    assert draw.sum().item() == 1
+    assert cards.categorical[draw, ident].tolist() == [
+        vocabulary.lookup("cards", "DEFEND_IRONCLAD")
+    ]
+    assert cards.categorical[draw, rarity].tolist() == [
+        vocabulary.lookup("rarities", "Basic")
+    ]
+
+
+def test_pile_grouping_separates_upgraded_and_enchanted_copies(
+    tokenizer: GameTokenizer,
+    vocabulary: GameVocabulary,
+):
+    state = {
+        "state_type": "monster",
+        "player": _base_player(
+            draw_pile=[
+                _pile_card(),
+                _pile_card(),
+                _pile_card(
+                    is_upgraded=True,
+                    current_upgrade_level=1,
+                    description="Gain 8 Block.",
+                ),
+                _pile_card(enchantment={"id": "ADROIT", "name": "Adroit"}),
+            ]
+        ),
+        "battle": {"enemies": []},
+    }
+
+    tokenized = tokenizer.tokenize_state(GameObservation(state))
+    cards = tokenized.entities["card"]
+    zone = _column(ENTITY_CATEGORICAL_FIELDS["card"], "card_zone")
+    count = _column(ENTITY_NUMERIC_FIELDS["card"], "copy_count")
+    draw = cards.categorical[:, zone] == vocabulary.lookup("card_zones", "draw")
+
+    assert draw.sum().item() == 3
+    assert sorted(cards.numeric[draw, count].tolist()) == pytest.approx(
+        sorted([math.log1p(2), math.log1p(1), math.log1p(1)])
     )

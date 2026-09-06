@@ -92,6 +92,7 @@ class FakeMetricsWriter:
         self.episodes: list[EpisodeMetrics] = []
         self.updates: list[dict[str, float]] = []
         self.events: list[tuple[str, int]] = []
+        self.event_payloads: list[tuple[str, dict[str, object]]] = []
         self.flush_count = 0
 
     def log_episode(self, metrics: EpisodeMetrics) -> None:
@@ -106,8 +107,8 @@ class FakeMetricsWriter:
         payload: dict[str, object],
         global_step: int,
     ) -> None:
-        del payload
         self.events.append((event_type, global_step))
+        self.event_payloads.append((event_type, payload))
 
     def flush(self) -> None:
         self.flush_count += 1
@@ -123,15 +124,23 @@ def _plan(total: int = 3, checkpoint_every: int = 2) -> TrainingPlan:
     )
 
 
-def _result(steps: int, *, action_error: bool) -> EpisodeResult:
+def _result(
+    steps: int,
+    *,
+    action_error: bool,
+    error: str = "rejected",
+) -> EpisodeResult:
     observation = GameObservation({"state_type": "map", "run": {"floor": 4}})
+    info: dict[str, object] = {"action_error": action_error}
+    if action_error:
+        info["error"] = error
     transition = Transition(
         state=observation,
         action=GameAction("proceed"),
         reward=1.0,
         next_state=observation,
         done=False,
-        info={"action_error": action_error},
+        info=info,
     )
     return EpisodeResult(
         initial_state=observation.raw_state,
@@ -251,3 +260,49 @@ def test_trainer_rejects_target_below_restored_progress():
 
     with pytest.raises(ValueError, match="below"):
         trainer.train()
+
+def _payloads(writer: FakeMetricsWriter, event_type: str) -> list[dict[str, object]]:
+    return [payload for name, payload in writer.event_payloads if name == event_type]
+
+
+def test_rejected_actions_are_logged_with_their_messages():
+    """A count alone cannot diagnose a rejection after the run has moved on."""
+    agent = FakeAgent()
+    runner = FakeRunner(agent, steps=2)
+    writer = FakeMetricsWriter()
+    trainer = Trainer(
+        runner,
+        agent,
+        FakeCheckpointManager(),
+        writer,
+        _plan(total=1),
+    )
+
+    trainer.train()
+
+    events = _payloads(writer, "action_errors")
+    assert len(events) == 1
+    rejections = events[0]["rejections"]
+    assert len(rejections) == 1
+    assert rejections[0]["error"] == "rejected"
+    assert rejections[0]["count"] == 2
+    assert rejections[0]["action"] == {"type": "proceed"}
+    assert rejections[0]["state_type"] == "map"
+
+
+def test_no_action_error_event_when_every_action_was_accepted():
+    agent = FakeAgent()
+    runner = FakeRunner(agent, steps=2)
+    runner.calls = 1  # _result only flags errors on the first call
+    writer = FakeMetricsWriter()
+    trainer = Trainer(
+        runner,
+        agent,
+        FakeCheckpointManager(),
+        writer,
+        _plan(total=1),
+    )
+
+    trainer.train()
+
+    assert _payloads(writer, "action_errors") == []

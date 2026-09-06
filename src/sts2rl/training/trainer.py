@@ -57,6 +57,7 @@ class Trainer:
                     duration_seconds=monotonic() - started_at,
                 )
                 self.metrics_writer.log_episode(episode_metrics)
+                self._log_action_errors(result)
                 if self.reporter is not None:
                     self.reporter(episode_metrics)
 
@@ -114,6 +115,41 @@ class Trainer:
     def _log_pending_updates(self) -> None:
         for metrics in self.agent.drain_update_metrics():
             self.metrics_writer.log_ppo_update(metrics)
+
+    def _log_action_errors(self, result: EpisodeResult) -> None:
+        """Record what the API rejected, not just how many times.
+
+        Episode metrics only carry a count, which is not enough to diagnose a
+        rejection after the fact. Distinct messages are logged, capped so a
+        pathological episode cannot flood the log.
+        """
+        rejected: dict[str, dict[str, object]] = {}
+        for transition in result.transitions:
+            if not transition.info.get("action_error"):
+                continue
+            message = str(transition.info.get("error"))
+            rejected.setdefault(
+                message,
+                {
+                    "count": 0,
+                    "action": transition.action.to_dict(),
+                    "state_type": transition.state.raw_state.get("state_type"),
+                },
+            )
+            rejected[message]["count"] += 1  # type: ignore[operator]
+        if not rejected:
+            return
+        self.metrics_writer.log_event(
+            "action_errors",
+            {
+                "episode": self.state.completed_episodes,
+                "rejections": [
+                    {"error": message, **detail}
+                    for message, detail in list(rejected.items())[:10]
+                ],
+            },
+            self.state.environment_steps,
+        )
 
     def _adopt_agent_counters(self) -> None:
         """Copy the agent's counters, which are the authority while training."""

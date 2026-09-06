@@ -1290,13 +1290,12 @@ def _cost_feature(value: object) -> NumericFeature:
 def _upgrade_feature(card: Mapping[str, object]) -> NumericFeature:
     """Prefer an exact upgrade level; fall back to the upgraded flag.
 
-    Deck cards report ``upgrade_level``; hand and selection cards report only
-    ``is_upgraded``; pile cards report neither.
+    ``current_upgrade_level`` is the one spelling the API uses across every
+    card context, but a few screens still report only ``is_upgraded``.
     """
-    for key in ("upgrade_level", "current_upgrade_level"):
-        level = card.get(key)
-        if level is not None:
-            return linear_feature(level)
+    level = card.get("current_upgrade_level")
+    if level is not None:
+        return linear_feature(level)
     return _bool_feature(card.get("is_upgraded"))
 
 
@@ -1306,10 +1305,13 @@ def _attachment_id(card: Mapping[str, object], key: str) -> str | None:
     return _text(attachment.get("id") or attachment.get("name"))
 
 
-def _has_attachment(card: Mapping[str, object], key: str) -> bool | None:
-    """Return whether a card carries an attachment, or None when unreported."""
-    if key not in card:
-        return None
+def _has_attachment(card: Mapping[str, object], key: str) -> bool:
+    """Return whether a card carries an enchantment or affliction.
+
+    Every card context reports these, so both an explicit null and an omitted
+    key mean the card carries none — the API drops null fields on some builds
+    and sends them on others.
+    """
     return isinstance(card.get(key), dict)
 
 
@@ -1359,8 +1361,9 @@ def _selected_indices(selection: Mapping[str, object]) -> set[int]:
 def _card_signature(card: Mapping[str, object]) -> tuple[object, ...]:
     """Group observationally identical pile cards.
 
-    Pile cards carry only name, cost, star cost, and description, so the
-    description is what separates an upgraded copy from its base version.
+    Mirrors how the deck endpoint groups its own entries: two copies merge only
+    when identity, upgrade level, enchantment, affliction, cost, and rules text
+    all match.
     """
     return (
         _identity(card),
@@ -1372,6 +1375,8 @@ def _card_signature(card: Mapping[str, object]) -> tuple[object, ...]:
         _text(card.get("description")),
         card.get("is_upgraded"),
         card.get("current_upgrade_level"),
+        _attachment_id(card, "enchantment"),
+        _attachment_id(card, "affliction"),
     )
 
 

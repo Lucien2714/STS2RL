@@ -40,6 +40,11 @@ def create_parser() -> argparse.ArgumentParser:
     parser.add_argument("--run-seed")
     parser.add_argument("--start-run-option", choices=("confirm", "embark"))
     parser.add_argument("--allow-active-run", action="store_true", default=None)
+    parser.add_argument(
+        "--ascension",
+        type=int,
+        help="Ascension level to start runs at; omitted leaves the menu as-is.",
+    )
     parser.add_argument("--max-steps", type=int)
     parser.add_argument("--max-state-refreshes", type=int)
     parser.add_argument("--hidden-dim", type=int)
@@ -211,6 +216,7 @@ def _new_plan(args: argparse.Namespace) -> TrainingPlan:
                 if args.allow_active_run is None
                 else args.allow_active_run
             ),
+            ascension=_or_default(args.ascension, reset_defaults.ascension),
         ),
     )
 
@@ -244,6 +250,7 @@ def _resumed_plan(
             "run_seed": saved.reset.run_seed,
             "start_run_option": saved.reset.start_run_option,
             "allow_active_run": saved.reset.allow_active_run,
+            "ascension": saved.reset.ascension,
         },
     )
     if (
