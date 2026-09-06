@@ -6,11 +6,10 @@ from abc import ABC, abstractmethod
 
 from sts2rl.env.constants import (
     BOSS_VICTORY_REWARD,
-    HP_CHANGE_REWARD,
     NODE_PROGRESS_REWARD,
     STEP_COST,
 )
-from sts2rl.env.state import battle_has_alive_enemy, player_hp
+from sts2rl.env.state import battle_has_alive_enemy
 
 
 class RewardModel(ABC):
@@ -39,21 +38,27 @@ class RewardModel(ABC):
 
 
 class RunProgressReward(RewardModel):
-    """Score climbing the spire, and nothing else directly.
+    """Score climbing the spire, and nothing else.
 
-    One point per node entered, ten for a boss, a small charge per step so
-    standing still is never free, and a small term on HP so the resource the
-    run spends has a price.  Deliberately not scored: enemy damage, kills,
-    gold, potions, and unspent energy.  Those are means, not ends, and hand
-    weighting them is how a reward model stops matching the objective.
+    One point per node entered, ten for a boss, and a small charge per step so
+    standing still is never free.  Deliberately not scored: HP, enemy damage,
+    kills, gold, potions, and unspent energy.  Those are means, not ends, and
+    hand weighting them is how a reward model stops matching the objective.
+
+    HP was scored here once, and it taught exactly the wrong lesson: healing
+    paid immediately, so the agent rested at every rest site instead of
+    upgrading a card, because upgrading pays nothing this step.  HP still
+    matters -- running out ends the run and with it the progress -- but it
+    matters *terminally*, and pricing a terminal consideration per step is how
+    reward hacking starts.
     """
 
     def __init__(self) -> None:
         self.reset()
 
     def reset(self, raw_state: dict | None = None) -> None:
-        """Seed HP tracking and forget any boss the previous run was fighting."""
-        self._last_hp = player_hp(raw_state) if raw_state is not None else None
+        """Forget any boss the previous run was fighting."""
+        del raw_state
         self._boss_pending = False
 
     def compute(
@@ -68,11 +73,6 @@ class RunProgressReward(RewardModel):
         nodes = max(0, _floor(next_state) - _floor(prev_state))
         boss = self._resolve_boss(prev_state, next_state)
 
-        previous_hp = player_hp(prev_state, self._last_hp)
-        current_hp = player_hp(next_state, previous_hp)
-        hp_change = current_hp - previous_hp
-        self._last_hp = current_hp
-
         details: dict[str, object] = {"type": "run_progress"}
         reward = -STEP_COST
         if nodes:
@@ -81,9 +81,6 @@ class RunProgressReward(RewardModel):
         if boss:
             reward += BOSS_VICTORY_REWARD
             details["boss_defeated"] = True
-        if hp_change:
-            reward += hp_change * HP_CHANGE_REWARD
-            details["hp_change"] = hp_change
 
         details["total"] = reward
         return reward, details

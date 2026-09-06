@@ -6,7 +6,6 @@ import pytest
 
 from sts2rl.env.constants import (
     BOSS_VICTORY_REWARD,
-    HP_CHANGE_REWARD,
     NODE_PROGRESS_REWARD,
     STEP_COST,
 )
@@ -94,32 +93,52 @@ def test_dying_to_a_boss_pays_nothing_and_clears_the_pending_fight():
     )
 
     assert "boss_defeated" not in details
-    assert reward < 0
+    assert reward == pytest.approx(-STEP_COST)
     assert model._boss_pending is False
 
 
-def test_hp_is_priced_in_both_directions():
+def test_healing_pays_nothing():
+    """Scoring HP taught resting at every rest site instead of upgrading.
+
+    Healing paid immediately and upgrading paid nothing, so the agent took the
+    heal every time.  HP still matters -- running out ends the run -- but it
+    matters terminally, and pricing it per step is what made it farmable.
+    """
     model = RunProgressReward()
-    model.reset(_screen("map", hp=70))
+    model.reset(_screen("rest_site", hp=40))
 
-    lost, details = model.compute(_screen("map", hp=70), _screen("map", hp=58))
-    healed, _ = model.compute(_screen("rest_site", hp=58), _screen("rest_site", hp=70))
-
-    assert details["hp_change"] == -12
-    assert lost == pytest.approx(-12 * HP_CHANGE_REWARD - STEP_COST)
-    assert healed == pytest.approx(12 * HP_CHANGE_REWARD - STEP_COST)
-
-
-def test_progress_outweighs_the_hp_a_fight_normally_costs():
-    """Clearing a node must stay worth it after a typical amount of damage."""
-    model = RunProgressReward()
-    model.reset(_screen("map", hp=70))
-
-    reward, _ = model.compute(
-        _screen("map", floor=5, hp=70), _screen("map", floor=6, hp=55)
+    reward, details = model.compute(
+        _screen("rest_site", hp=40), _screen("rest_site", hp=70)
     )
 
-    assert reward > 0
+    assert "hp_change" not in details
+    assert reward == pytest.approx(-STEP_COST)
+
+
+def test_taking_damage_costs_nothing_directly():
+    model = RunProgressReward()
+    model.reset(_battle(hp=70))
+
+    reward, details = model.compute(_battle(hp=70), _battle(hp=45))
+
+    assert "hp_change" not in details
+    assert reward == pytest.approx(-STEP_COST)
+
+
+def test_a_node_cleared_at_one_hp_scores_the_same_as_one_cleared_untouched():
+    """Deliberate: the difference shows up as a shorter run, not a smaller step."""
+    model = RunProgressReward()
+    model.reset(_screen("map", hp=80))
+    bloodied, _ = model.compute(
+        _screen("map", floor=5, hp=80), _screen("map", floor=6, hp=1)
+    )
+
+    model.reset(_screen("map", hp=80))
+    untouched, _ = model.compute(
+        _screen("map", floor=5, hp=80), _screen("map", floor=6, hp=80)
+    )
+
+    assert bloodied == pytest.approx(untouched)
 
 
 def test_loitering_is_never_free():

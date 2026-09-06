@@ -19,10 +19,3 @@ BOSS_VICTORY_REWARD = 10.0
 # toggling one selection screen for exactly 0.000 reward.  One node is worth
 # 100 steps of loitering, so this never outweighs real progress.
 STEP_COST = 0.01
-
-# HP is the resource the whole run spends.  Without this, clearing a node at
-# 1 HP scores the same as clearing it untouched, and the critic has to learn
-# the difference from the deaths it causes several nodes later.  Losing a
-# third of a starting health bar costs about one node.  Set to 0.0 to score
-# progress alone.
-HP_CHANGE_REWARD = 0.03
