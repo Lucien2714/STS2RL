@@ -27,6 +27,19 @@ GameCharacter = {0: "IRONCLAD", 1: "SILENT", 2: "REGENT", 3: "NECROBINDER", 4: "
 # not followed by a pause.
 DEFAULT_ACTION_DELAY_SECONDS = 0.1
 
+# Retry a dropped connection, but only for reads.
+#
+# Several game clients on one machine drop TCP connections under load: two
+# long runs died on a GET with WinError 10061 and 10054, tens of episodes
+# apart.  A read is idempotent, so replaying it is free.  An action is not:
+# the connection can drop *after* the game applied it, and replaying would
+# play the card twice.  A failed action therefore still surfaces, where
+# GameEnv.step already turns it into an action_error the episode recovers
+# from.
+RETRYABLE_METHODS = frozenset({"GET"})
+DEFAULT_MAX_RETRIES = 3
+DEFAULT_RETRY_BACKOFF_SECONDS = 0.5
+
 
 def _state_of(data: Any) -> Optional[dict[str, Any]]:
     """Return the game state an action response carries, if it carries one."""
@@ -75,13 +88,21 @@ class STS2Client:
         timeout: float = 10.0,
         session: requests.Session | None = None,
         action_delay_seconds: float = DEFAULT_ACTION_DELAY_SECONDS,
+        max_retries: int = DEFAULT_MAX_RETRIES,
+        retry_backoff_seconds: float = DEFAULT_RETRY_BACKOFF_SECONDS,
     ) -> None:
         if action_delay_seconds < 0:
             raise ValueError("action_delay_seconds must not be negative")
+        if max_retries < 0:
+            raise ValueError("max_retries must not be negative")
+        if retry_backoff_seconds < 0:
+            raise ValueError("retry_backoff_seconds must not be negative")
         self.base_url = base_url.rstrip("/")
         self.mode = mode
         self.timeout = timeout
         self.action_delay_seconds = action_delay_seconds
+        self.max_retries = max_retries
+        self.retry_backoff_seconds = retry_backoff_seconds
         self._owns_session = session is None
         self.session = session if session is not None else requests.Session()
 
@@ -117,19 +138,7 @@ class STS2Client:
         params: Optional[dict[str, Any]] = None,
         json_body: Optional[dict[str, Any]] = None,
     ) -> Any:
-        try:
-            response = self.session.request(
-                method=method,
-                url=self._url(endpoint),
-                params=params,
-                json=json_body,
-                timeout=self.timeout,
-            )
-        except requests.RequestException as exc:
-            raise STS2ClientError(
-                f"Request failed: method={method} endpoint={endpoint} "
-                f"params={params} body={json_body} error={exc}"
-            ) from exc
+        response = self._send(method, endpoint, params, json_body)
 
         try:
             data = response.json()
@@ -152,6 +161,48 @@ class STS2Client:
             )
 
         return data
+
+    def _send(
+        self,
+        method: str,
+        endpoint: str,
+        params: Optional[dict[str, Any]],
+        json_body: Optional[dict[str, Any]],
+    ) -> requests.Response:
+        """Send one request, retrying a dropped connection on reads only."""
+        attempt = 0
+        while True:
+            try:
+                return self.session.request(
+                    method=method,
+                    url=self._url(endpoint),
+                    params=params,
+                    json=json_body,
+                    timeout=self.timeout,
+                )
+            except requests.RequestException as exc:
+                if self._should_retry(method, exc, attempt):
+                    time.sleep(self.retry_backoff_seconds * (2**attempt))
+                    attempt += 1
+                    continue
+                raise STS2ClientError(
+                    f"Request failed: method={method} endpoint={endpoint} "
+                    f"params={params} body={json_body} error={exc}"
+                ) from exc
+
+    def _should_retry(
+        self,
+        method: str,
+        exc: requests.RequestException,
+        attempt: int,
+    ) -> bool:
+        """Return whether replaying this request is both safe and useful."""
+        if method not in RETRYABLE_METHODS or attempt >= self.max_retries:
+            return False
+        # Only transport failures: the request never produced a response, so
+        # nothing about the game changed.  An HTTP error is a real answer and
+        # is not retried.
+        return isinstance(exc, (requests.ConnectionError, requests.Timeout))
 
     def _get(self, endpoint: str, params: Optional[dict[str, Any]] = None) -> Any:
         """Send a GET request to an API endpoint."""

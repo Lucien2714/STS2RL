@@ -1,4 +1,5 @@
 import pytest
+import requests
 
 from sts2rl.env import mcp_client
 from sts2rl.env.mcp_client import STS2Client, STS2ClientError
@@ -160,3 +161,72 @@ def test_a_zero_delay_skips_the_call_entirely(monkeypatch):
 def test_a_negative_delay_is_rejected():
     with pytest.raises(ValueError, match="action_delay_seconds"):
         STS2Client(action_delay_seconds=-0.1)
+
+
+class FlakySession(FakeSession):
+    """A session that drops the connection a fixed number of times first."""
+
+    def __init__(self, failures: int, response=None, error=None):
+        super().__init__(response)
+        self.remaining = failures
+        self.error = error or requests.ConnectionError("connection reset")
+        self.attempts = 0
+
+    def request(self, **kwargs):
+        self.attempts += 1
+        if self.remaining:
+            self.remaining -= 1
+            raise self.error
+        return super().request(**kwargs)
+
+
+def test_a_dropped_read_is_retried(monkeypatch):
+    """Four clients on one machine drop connections; a read replays for free."""
+    monkeypatch.setattr(mcp_client.time, "sleep", lambda _: None)
+    session = FlakySession(failures=2)
+    client = STS2Client(session=session)
+
+    state = client.get_state()
+
+    assert state == {"state_type": "menu"}
+    assert session.attempts == 3
+
+
+def test_a_read_that_never_recovers_still_fails(monkeypatch):
+    monkeypatch.setattr(mcp_client.time, "sleep", lambda _: None)
+    session = FlakySession(failures=99)
+    client = STS2Client(session=session, max_retries=2)
+
+    with pytest.raises(STS2ClientError, match="Request failed"):
+        client.get_state()
+
+    assert session.attempts == 3
+
+
+def test_a_dropped_action_is_never_replayed(monkeypatch):
+    """The game may have applied it before the socket died; replaying it twice
+    would play the card twice, so an action surfaces instead."""
+    monkeypatch.setattr(mcp_client.time, "sleep", lambda _: None)
+    session = FlakySession(failures=1)
+    client = STS2Client(session=session)
+
+    with pytest.raises(STS2ClientError, match="Request failed"):
+        client.play_card(0)
+
+    assert session.attempts == 1
+
+
+def test_an_http_error_is_a_real_answer_and_is_not_retried(monkeypatch):
+    monkeypatch.setattr(mcp_client.time, "sleep", lambda _: None)
+    session = FakeSession(FakeResponse({"error": "nope"}, status_code=500))
+    client = STS2Client(session=session)
+
+    with pytest.raises(STS2ClientError, match="HTTP 500"):
+        client.get_state()
+
+    assert len(session.requests) == 1
+
+
+def test_a_negative_retry_count_is_rejected():
+    with pytest.raises(ValueError, match="max_retries"):
+        STS2Client(max_retries=-1)

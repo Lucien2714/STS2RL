@@ -7,7 +7,11 @@ from pathlib import Path
 
 from tensorboard.backend.event_processing.event_accumulator import EventAccumulator
 
+import pytest
+
 from sts2rl.training import EpisodeMetrics, TrainingMetricsWriter
+from sts2rl.training import metrics as metrics_module
+from sts2rl.training.metrics import MetricsError
 
 
 class FakeSummaryWriter:
@@ -142,3 +146,20 @@ def _capture_options(
 ) -> FakeSummaryWriter:
     writer.options = options
     return writer
+
+
+def test_a_locked_metrics_file_says_what_to_do(tmp_path, monkeypatch):
+    """Windows reports only "access is denied" when another process holds it."""
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    (run_dir / "metrics.jsonl").write_text(
+        '{"type": "episode", "global_step": 1}\n', encoding="utf-8"
+    )
+    monkeypatch.setattr(
+        metrics_module.os,
+        "replace",
+        lambda *_: (_ for _ in ()).throw(PermissionError("access is denied")),
+    )
+
+    with pytest.raises(MetricsError, match="holding that file open"):
+        TrainingMetricsWriter(run_dir, tensorboard_enabled=False, resume_step=1)

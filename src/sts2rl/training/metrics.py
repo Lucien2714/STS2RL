@@ -247,6 +247,17 @@ class TrainingMetricsWriter:
                 target.flush()
                 os.fsync(target.fileno())
             os.replace(temporary_path, self.jsonl_path)
+        except PermissionError as exc:
+            temporary_path.unlink(missing_ok=True)
+            # Windows refuses to replace a file another process still has
+            # open, and says only "access is denied".  A tail, an editor, or
+            # TensorBoard is enough, and the raw error sends you looking in
+            # the wrong place.
+            raise MetricsError(
+                f"failed to resume metrics from {self.jsonl_path}: {exc}. "
+                "Another process is probably holding that file open -- close "
+                "anything tailing or viewing it and resume again."
+            ) from exc
         except (OSError, ValueError, json.JSONDecodeError) as exc:
             temporary_path.unlink(missing_ok=True)
             raise MetricsError(
