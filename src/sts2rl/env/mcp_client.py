@@ -7,6 +7,7 @@ https://github.com/Gennadiyev/STS2MCP/blob/main/docs/raw-full.md
 
 from __future__ import annotations
 
+import time
 from typing import Any, Literal, Optional
 
 import requests
@@ -16,6 +17,15 @@ GameMode = Literal["singleplayer", "multiplayer"]
 ResponseFormat = Literal["json", "markdown"]
 WikiItemType = Literal["all", "card", "relic"]
 GameCharacter = {0: "IRONCLAD", 1: "SILENT", 2: "REGENT", 3: "NECROBINDER", 4: "DEFECT"}
+
+# Pause after every accepted action POST.
+#
+# The mod settles the game before it captures the state it returns, so this is
+# not what makes that state correct.  It paces the *next* request instead: an
+# action sent while the game is still resolving the previous one is the case
+# the settle logic does not cover.  A rejected action changed nothing, so it is
+# not followed by a pause.
+DEFAULT_ACTION_DELAY_SECONDS = 0.1
 
 
 def _state_of(data: Any) -> Optional[dict[str, Any]]:
@@ -64,10 +74,14 @@ class STS2Client:
         mode: GameMode = "singleplayer",
         timeout: float = 10.0,
         session: requests.Session | None = None,
+        action_delay_seconds: float = DEFAULT_ACTION_DELAY_SECONDS,
     ) -> None:
+        if action_delay_seconds < 0:
+            raise ValueError("action_delay_seconds must not be negative")
         self.base_url = base_url.rstrip("/")
         self.mode = mode
         self.timeout = timeout
+        self.action_delay_seconds = action_delay_seconds
         self._owns_session = session is None
         self.session = session if session is not None else requests.Session()
 
@@ -160,7 +174,10 @@ class STS2Client:
         """
         body = {"action": action}
         body.update(kwargs)
-        return self._post(self._game_endpoint(), body)
+        result = self._post(self._game_endpoint(), body)
+        if self.action_delay_seconds:
+            time.sleep(self.action_delay_seconds)
+        return result
 
     # -------------------------
     # GET endpoints

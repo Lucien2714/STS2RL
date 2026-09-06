@@ -107,3 +107,56 @@ def test_errors_without_a_state_carry_none():
         STS2Client(session=session).get_state()
 
     assert caught.value.state is None
+
+
+def test_accepted_actions_pause_before_the_next_request(monkeypatch):
+    """The next action must not reach a game still resolving the last one."""
+    slept: list[float] = []
+    monkeypatch.setattr(mcp_client.time, "sleep", slept.append)
+    client = STS2Client(session=FakeSession(), action_delay_seconds=0.1)
+
+    client.play_card(0)
+    client.end_turn()
+
+    assert slept == [0.1, 0.1]
+
+
+def test_reading_state_does_not_pause(monkeypatch):
+    """Only actions change the game, so only actions are worth waiting on."""
+    slept: list[float] = []
+    monkeypatch.setattr(mcp_client.time, "sleep", slept.append)
+    client = STS2Client(session=FakeSession(), action_delay_seconds=0.1)
+
+    client.get_state()
+
+    assert slept == []
+
+
+def test_rejected_actions_do_not_pause(monkeypatch):
+    """A rejected action changed nothing, so there is nothing to settle."""
+    slept: list[float] = []
+    monkeypatch.setattr(mcp_client.time, "sleep", slept.append)
+    session = FakeSession(
+        FakeResponse({"status": "error", "error": "no", "state": {"state_type": "map"}})
+    )
+    client = STS2Client(session=session, action_delay_seconds=0.1)
+
+    with pytest.raises(STS2ClientError):
+        client.play_card(0)
+
+    assert slept == []
+
+
+def test_a_zero_delay_skips_the_call_entirely(monkeypatch):
+    slept: list[float] = []
+    monkeypatch.setattr(mcp_client.time, "sleep", slept.append)
+    client = STS2Client(session=FakeSession(), action_delay_seconds=0.0)
+
+    client.end_turn()
+
+    assert slept == []
+
+
+def test_a_negative_delay_is_rejected():
+    with pytest.raises(ValueError, match="action_delay_seconds"):
+        STS2Client(action_delay_seconds=-0.1)

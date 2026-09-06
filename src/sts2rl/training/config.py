@@ -10,7 +10,7 @@ import torch
 
 from sts2rl.agents import PPOConfig
 from sts2rl.encoder import EncoderConfig
-from sts2rl.env import ResetSpec
+from sts2rl.env import DEFAULT_ACTION_DELAY_SECONDS, ResetSpec
 
 
 @dataclass(frozen=True)
@@ -23,6 +23,7 @@ class TrainingConfig:
     max_state_refreshes: int = 3
     base_url: str = "http://localhost:15526/api/v1"
     timeout: float = 20.0
+    action_delay_seconds: float = DEFAULT_ACTION_DELAY_SECONDS
     device: str = "cpu"
     torch_seed: int = 0
     run_dir: Path = Path("runs/default")
@@ -49,6 +50,12 @@ class TrainingConfig:
             raise TypeError("timeout must be a number")
         if self.timeout <= 0:
             raise ValueError("timeout must be positive")
+        if isinstance(self.action_delay_seconds, bool) or not isinstance(
+            self.action_delay_seconds, (int, float)
+        ):
+            raise TypeError("action_delay_seconds must be a number")
+        if self.action_delay_seconds < 0:
+            raise ValueError("action_delay_seconds must not be negative")
         if isinstance(self.torch_seed, bool) or not isinstance(self.torch_seed, int):
             raise ValueError("torch_seed must be an integer")
         if not isinstance(self.base_url, str):

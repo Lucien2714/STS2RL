@@ -125,3 +125,25 @@ def test_main_maps_keyboard_interrupt_to_exit_130(
     monkeypatch.setattr(cli, "run_training", interrupt)
 
     assert cli.main(["--run-dir", str(tmp_path / "run")]) == 130
+
+
+def test_action_delay_is_configurable_on_a_new_plan(tmp_path: Path):
+    args = cli.create_parser().parse_args(
+        ["--run-dir", str(tmp_path / "run"), "--action-delay", "0.25"]
+    )
+
+    plan = cli._new_plan(args)
+
+    assert plan.training.action_delay_seconds == 0.25
+
+
+def test_action_delay_can_be_disabled_on_resume(tmp_path: Path):
+    """Zero is a real setting, so it must survive _or_default."""
+    saved = TrainingPlan(training=TrainingConfig(run_dir=tmp_path / "run"))
+    args = cli.create_parser().parse_args(
+        ["--run-dir", str(tmp_path / "run"), "--resume", "latest", "--action-delay", "0"]
+    )
+
+    resumed = cli._resumed_plan(args, SimpleNamespace(plan=saved))  # type: ignore[arg-type]
+
+    assert resumed.training.action_delay_seconds == 0.0

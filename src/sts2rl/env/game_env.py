@@ -4,7 +4,11 @@ from __future__ import annotations
 
 from sts2rl.actions.dispatcher import ActionDispatcher
 from sts2rl.actions.game_action import GameAction
-from sts2rl.env.mcp_client import STS2Client, STS2ClientError
+from sts2rl.env.mcp_client import (
+    DEFAULT_ACTION_DELAY_SECONDS,
+    STS2Client,
+    STS2ClientError,
+)
 from sts2rl.env.reset import ResetController, ResetSpec
 from sts2rl.env.state import extract_raw_state, response_state as _response_state
 from sts2rl.env.types import EnvStep, RawState
@@ -18,6 +22,7 @@ class GameEnv:
         base_url: str = "http://localhost:15526/api/v1",
         timeout: float = 20.0,
         client: STS2Client | None = None,
+        action_delay_seconds: float = DEFAULT_ACTION_DELAY_SECONDS,
     ) -> None:
         self._owns_client = client is None
         self.client = (
@@ -27,6 +32,7 @@ class GameEnv:
                 base_url=base_url,
                 mode="singleplayer",
                 timeout=timeout,
+                action_delay_seconds=action_delay_seconds,
             )
         )
         self.action_dispatcher = ActionDispatcher(self.client)

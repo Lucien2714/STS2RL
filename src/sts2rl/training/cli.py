@@ -33,6 +33,11 @@ def create_parser() -> argparse.ArgumentParser:
     parser.add_argument("--resume", nargs="?", const="latest")
     parser.add_argument("--base-url")
     parser.add_argument("--timeout", type=float)
+    parser.add_argument(
+        "--action-delay",
+        type=float,
+        help="Seconds to pause after each accepted action (0 disables).",
+    )
     parser.add_argument("--device")
     parser.add_argument("--torch-seed", type=int)
     parser.add_argument("--character", type=int)
@@ -124,6 +129,7 @@ def run_training(args: argparse.Namespace) -> int:
         with GameEnv(
             base_url=plan.training.base_url,
             timeout=plan.training.timeout,
+            action_delay_seconds=plan.training.action_delay_seconds,
         ) as env:
             runner = EpisodeRunner(
                 env,
@@ -166,6 +172,9 @@ def _new_plan(args: argparse.Namespace) -> TrainingPlan:
             ),
             base_url=_or_default(args.base_url, training_defaults.base_url),
             timeout=_or_default(args.timeout, training_defaults.timeout),
+            action_delay_seconds=_or_default(
+                args.action_delay, training_defaults.action_delay_seconds
+            ),
             device=_or_default(args.device, training_defaults.device),
             torch_seed=_or_default(args.torch_seed, training_defaults.torch_seed),
             run_dir=args.run_dir,
@@ -266,6 +275,9 @@ def _resumed_plan(
         ),
         base_url=_or_default(args.base_url, saved.training.base_url),
         timeout=_or_default(args.timeout, saved.training.timeout),
+        action_delay_seconds=_or_default(
+            args.action_delay, saved.training.action_delay_seconds
+        ),
         device=_or_default(args.device, saved.training.device),
         run_dir=args.run_dir,
         tensorboard_flush_secs=_or_default(
