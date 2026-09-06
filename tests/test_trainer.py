@@ -28,6 +28,10 @@ class FakeAgent:
     def abort_episode(self) -> None:
         self.abort_count += 1
 
+    def update(self) -> dict[str, float]:
+        self.flush_count = getattr(self, "flush_count", 0) + 1
+        return {}
+
 
 class FakeRunner:
     def __init__(

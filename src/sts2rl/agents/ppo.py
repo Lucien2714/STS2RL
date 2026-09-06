@@ -159,9 +159,7 @@ class CandidatePPOAgent(Agent):
             )
             self._carried_reward = 0.0
             self._pending = None
-        if self._rollout and (
-            len(self._rollout) >= self.config.rollout_size or self._rollout[-1].done
-        ):
+        if len(self._rollout) >= self.config.rollout_size:
             self.update()
 
     def _absorb_forced_transition(self, transition: Transition) -> None:
@@ -180,11 +178,18 @@ class CandidatePPOAgent(Agent):
         last.done = transition.done
 
     def finish_episode(self, final_state: GameObservation, truncated: bool) -> None:
+        """End an episode without flushing the rollout.
+
+        The rollout deliberately spans episode boundaries: episodes here are
+        far shorter than ``rollout_size``, and updating on the dozen
+        transitions one episode happens to produce makes both the advantage
+        normalization and the gradient almost pure noise.  GAE already zeroes
+        the bootstrap and the trace at every terminal, so accumulating across
+        episodes changes no return.  The trainer flushes before checkpointing.
+        """
         del final_state, truncated
         if self._pending is not None:
             raise RuntimeError("cannot finish an episode with an unobserved action")
-        if self.training_enabled and self._rollout:
-            self.update()
 
     def train(self, enabled: bool = True) -> None:
         """Switch between stochastic learning and deterministic evaluation."""

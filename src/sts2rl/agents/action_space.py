@@ -105,7 +105,7 @@ class LegalActionProvider:
         prompt = self._mapping(state.get("hand_select"))
         actions = [
             GameAction("combat_select_card", card_index=index)
-            for index in self._indices(prompt.get("cards"))
+            for index in self._selectable_indices(prompt)
         ]
         if prompt.get("can_confirm") is True:
             actions.append(GameAction("combat_confirm_selection"))
@@ -174,12 +174,7 @@ class LegalActionProvider:
             for index in [self._index(item)]
             if index is not None
         ]
-        if shop.get("can_proceed") is True or (
-            not actions and self._records(shop.get("items"))
-        ):
-            # An open shop the player cannot afford anything in reports
-            # can_proceed false while still accepting proceed, which would
-            # otherwise strand the run.  Verified against the live API.
+        if shop.get("can_proceed") is True:
             actions.append(GameAction("proceed"))
         actions.extend(self._discard_potion_actions(state))
         return actions
@@ -198,7 +193,7 @@ class LegalActionProvider:
         selection = self._mapping(state.get("card_select"))
         actions = [
             GameAction("select_card", index=index)
-            for index in self._indices(selection.get("cards"))
+            for index in self._selectable_indices(selection)
         ]
         if selection.get("can_confirm") is True:
             actions.append(GameAction("confirm_selection"))
@@ -208,15 +203,46 @@ class LegalActionProvider:
 
     def _bundle_select_actions(self, state: RawState) -> list[GameAction]:
         selection = self._mapping(state.get("bundle_select"))
-        actions = [
-            GameAction("select_bundle", index=index)
-            for index in self._indices(selection.get("bundles"))
-        ]
+        # Opening a preview replaces picking: the API rejects select_bundle
+        # with "a bundle preview is already open - confirm or cancel it first".
+        actions = (
+            []
+            if selection.get("preview_showing") is True
+            else [
+                GameAction("select_bundle", index=index)
+                for index in self._indices(selection.get("bundles"))
+            ]
+        )
         if selection.get("can_confirm") is True:
             actions.append(GameAction("confirm_bundle_selection"))
         if selection.get("can_cancel") is True:
             actions.append(GameAction("cancel_bundle_selection"))
         return actions
+
+    def _selectable_indices(self, prompt: RawState) -> list[int]:
+        """Return the card indices a selection prompt will still accept.
+
+        The screen reports ``is_selected`` per card plus ``selected_count`` and
+        ``max_select``.  Re-picking a selected card and picking past the
+        maximum are both rejected, and an agent that cannot see the difference
+        wastes most of its steps toggling the same cards.
+        """
+        cards = self._records(prompt.get("cards"))
+        selected_count = self._integer(prompt.get("selected_count"))
+        max_select = self._integer(prompt.get("max_select"))
+        if (
+            selected_count is not None
+            and max_select is not None
+            and selected_count >= max_select
+        ):
+            return []
+        return [
+            index
+            for card in cards
+            if card.get("is_selected") is not True
+            for index in [self._index(card)]
+            if index is not None
+        ]
 
     def _relic_select_actions(self, state: RawState) -> list[GameAction]:
         selection = self._mapping(state.get("relic_select"))

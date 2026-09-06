@@ -79,6 +79,15 @@ class Trainer:
             raise
 
     def _save_episode_checkpoint(self) -> None:
+        """Flush the rollout, then save; a checkpoint needs a clean boundary.
+
+        The agent accumulates across episodes, so this is the one place that
+        forces a possibly-short update — every ``checkpoint_every`` episodes
+        rather than every episode.
+        """
+        self.agent.update()
+        self._adopt_agent_counters()
+        self._log_pending_updates()
         self.metrics_writer.flush()
         self.checkpoint_manager.save_episode(
             self.agent,

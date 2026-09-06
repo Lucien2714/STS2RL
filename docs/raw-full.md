@@ -497,6 +497,9 @@ Appears when a card effect prompts "Select a card to exhaust/discard/upgrade". *
   "hand_select": {
     "mode": "simple_select",     // "simple_select" or "upgrade_select"
     "prompt": "Select a card to Exhaust.",
+    "selected_count": 1,         // How many cards are picked so far
+    "min_select": 2,             // Fewest the prompt accepts, null if unknown
+    "max_select": 2,             // Most the prompt accepts, null if unknown
     "cards": [
       {
         "index": 0,
@@ -507,6 +510,7 @@ Appears when a card effect prompts "Select a card to exhaust/discard/upgrade". *
         "star_cost": null,       // Regent star cost as string, null if N/A
         "description": "Deal 6 damage.",
         "is_upgraded": false,
+        "is_selected": false,    // true once picked via combat_select_card
         "keywords": [ /* Keyword Objects */ ]
       }
     ],
@@ -744,13 +748,20 @@ Shop inventory is auto-opened when state is queried.
         "can_afford": true
       }
     ],
-    "can_proceed": true,
+    "can_proceed": true,       // Whether `proceed` will work now — see note below
+    "inventory_open": true,    // Whether the shopkeeper's inventory overlay is open
     "error": "..."             // Only present if inventory isn't ready; retry in a moment
   },
   "run": { ... },
   "player": { ... }
 }
 ```
+
+**`can_proceed` answers "will `proceed` work right now?", not "is the proceed button enabled?"**
+
+Reading shop state auto-opens the shopkeeper's inventory, and the game disables the proceed button while that overlay is open (`NMerchantRoom.OpenInventory` calls `_proceedButton.Disable()`, re-enabling it only when `InventoryClosed` fires). The raw button flag is therefore false on essentially every shop read. The `proceed` action closes the inventory first, so an open inventory does not block leaving — `can_proceed` reports `true` in that case. Use `inventory_open` if you need the raw overlay state.
+
+The same applies to `fake_merchant`.
 
 ### `fake_merchant` — Fake Merchant Event
 
@@ -777,7 +788,8 @@ A relic-only shop disguised as an event. Uses `shop_purchase` and `proceed` acti
           "keywords": [ /* Keyword Objects */ ]
         }
       ],
-      "can_proceed": true
+      "can_proceed": true,     // Same semantics as the regular shop — see `shop` above
+      "inventory_open": true
     },
     // After fight:
     // "started_fight": true,
@@ -828,6 +840,9 @@ Covers deck transforms, upgrades, removals, and choose-a-card effects. Appears o
   "card_select": {
     "screen_type": "transform",  // transform, upgrade, select, simple_select, choose
     "prompt": "Choose 2 cards to Transform.",
+    "selected_count": 1,         // How many cards are picked so far
+    "min_select": 2,             // Fewest the screen accepts, null if unknown
+    "max_select": 2,             // Most the screen accepts, null if unknown
     "cards": [
       {
         "index": 0,
@@ -839,6 +854,7 @@ Covers deck transforms, upgrades, removals, and choose-a-card effects. Appears o
         "description": "Deal 6 damage.",
         "rarity": "Common",
         "is_upgraded": false,
+        "is_selected": false,    // true once picked via select_card
         "keywords": [ /* Keyword Objects */ ]
       }
     ],
@@ -846,7 +862,8 @@ Covers deck transforms, upgrades, removals, and choose-a-card effects. Appears o
     "can_confirm": false,        // true when confirm button is available
     "can_cancel": true           // true when close/cancel button is available
 
-    // For "choose" type: picking is immediate (no confirm needed).
+    // For "choose" type: picking is immediate (no confirm needed), so
+    // min_select/max_select are 1 and selected_count is always 0.
     // can_skip indicates if a skip button exists.
   },
   "run": { ... },

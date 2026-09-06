@@ -94,7 +94,7 @@ def test_ppo_defaults_match_long_horizon_run_config():
 
 def test_training_samples_only_current_candidates_and_updates_encoder_on_terminal():
     torch.manual_seed(30)
-    agent = _agent(rollout_size=8)
+    agent = _agent(rollout_size=1)
     state = _map_state(2)
     observation = _observation(state)
     before = agent.game_encoder.entity_encoder.state_token.detach().clone()
@@ -127,7 +127,7 @@ def test_training_samples_only_current_candidates_and_updates_encoder_on_termina
 
 def test_update_metrics_are_drained_once():
     torch.manual_seed(36)
-    agent = _agent(rollout_size=8)
+    agent = _agent(rollout_size=1)
     observation = _observation(_map_state(2))
     action = agent.choose_action(observation)
     agent.observe(
@@ -150,7 +150,7 @@ def test_update_metrics_are_drained_once():
 
 def test_agent_checkpoint_round_trip_restores_logits_and_optimizer():
     torch.manual_seed(37)
-    agent = _agent(rollout_size=8)
+    agent = _agent(rollout_size=1)
     observation = _observation(_map_state(2))
     action = agent.choose_action(observation)
     agent.observe(
@@ -168,7 +168,7 @@ def test_agent_checkpoint_round_trip_restores_logits_and_optimizer():
         expected = agent.game_encoder.policy_value(decision).logits.clone()
     checkpoint = agent.checkpoint_state()
 
-    restored = _agent(rollout_size=8)
+    restored = _agent(rollout_size=1)
     restored.load_checkpoint_state(checkpoint)
     with torch.no_grad():
         actual = restored.game_encoder.policy_value(decision).logits
@@ -271,26 +271,57 @@ def test_terminal_and_nonterminal_bootstrap_are_distinct(done: bool):
     assert advantages[0].item() == pytest.approx(expected)
 
 
-def test_truncated_finish_updates_nonterminal_rollout():
+def test_finishing_an_episode_keeps_the_rollout_for_the_next_one():
+    """Episodes are far shorter than a rollout, so they must accumulate."""
     torch.manual_seed(33)
     agent = _agent(rollout_size=20)
-    observation = _observation(_map_state(2))
-    action = agent.choose_action(observation)
-    next_observation = _observation(_map_state(2))
-    agent.observe(
-        Transition(
-            state=observation,
-            action=action,
-            reward=0.5,
-            next_state=next_observation,
-            done=False,
+    for done in (True, False, True):
+        observation = _observation(_map_state(2))
+        action = agent.choose_action(observation)
+        next_observation = _observation(_map_state(2))
+        agent.observe(
+            Transition(
+                state=observation,
+                action=action,
+                reward=0.5,
+                next_state=next_observation,
+                done=done,
+            )
         )
-    )
+        agent.finish_episode(next_observation, truncated=not done)
 
-    agent.finish_episode(next_observation, truncated=True)
+    assert len(agent._rollout) == 3
+    assert agent.last_update == {}
+    assert [step.done for step in agent._rollout] == [True, False, True]
 
-    assert agent.last_update["rollout_steps"] == 1.0
+    agent.update()
+
+    assert agent.last_update["rollout_steps"] == 3.0
     assert not agent._rollout
+
+
+def test_a_terminal_inside_the_rollout_cuts_the_return_there():
+    """Accumulating across episodes is only safe if GAE stops at a terminal."""
+    torch.manual_seed(44)
+    agent = _agent(rollout_size=20)
+    for done in (True, False):
+        observation = _observation(_map_state(2))
+        action = agent.choose_action(observation)
+        agent.observe(
+            Transition(
+                state=observation,
+                action=action,
+                reward=1.0,
+                next_state=_observation(_map_state(2)),
+                done=done,
+            )
+        )
+
+    values = [float(step.old_value) for step in agent._rollout]
+    advantages, _ = agent._advantages_and_returns()
+
+    # the first step ends an episode, so its advantage must not see the second
+    assert advantages[0].item() == pytest.approx(1.0 - values[0])
 
 
 def test_forced_single_candidate_is_executed_without_entering_the_rollout():

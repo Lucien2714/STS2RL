@@ -253,55 +253,32 @@ def test_non_automatable_states_raise_explicitly(state_type):
         LegalActionProvider().require_candidates({"state_type": state_type})
 
 
-def test_an_unaffordable_open_shop_can_still_be_left():
-    """can_proceed is false there, but the live API accepts proceed anyway."""
-    state = {
+def test_shop_proceed_follows_can_proceed_now_that_it_means_what_it_says():
+    """The mod used to report false while the inventory overlay was open."""
+    unaffordable = {
         "state_type": "shop",
         "player": {"gold": 28, "potions": []},
         "shop": {
-            "can_proceed": False,
+            "can_proceed": True,
+            "inventory_open": True,
             "items": [
                 {"index": 0, "category": "card", "price": 149,
                  "is_stocked": True, "can_afford": False},
-                {"index": 1, "category": "relic", "price": 150,
-                 "is_stocked": False, "can_afford": False},
             ],
         },
     }
 
-    actions = LegalActionProvider().candidates(state)
+    assert [a.to_dict() for a in LegalActionProvider().candidates(unaffordable)] == [
+        {"type": "proceed"}
+    ]
 
-    assert [a.to_dict() for a in actions] == [{"type": "proceed"}]
-
-
-def test_an_affordable_shop_does_not_advertise_proceed_without_the_flag():
-    state = {
-        "state_type": "shop",
-        "player": {"gold": 500, "potions": []},
-        "shop": {
-            "can_proceed": False,
-            "items": [
-                {"index": 0, "category": "card", "price": 50,
-                 "is_stocked": True, "can_afford": True},
-            ],
-        },
-    }
-
-    actions = [a.to_dict() for a in LegalActionProvider().candidates(state)]
-
-    assert {"type": "shop_purchase", "index": 0} in actions
-    assert {"type": "proceed"} not in actions
-
-
-def test_a_shop_that_has_not_loaded_its_inventory_offers_nothing():
-    """No items means the screen is still opening, not that it is a dead end."""
-    state = {
+    not_ready = {
         "state_type": "shop",
         "player": {"gold": 28, "potions": []},
         "shop": {"can_proceed": False, "items": [], "error": "inventory not ready"},
     }
 
-    assert LegalActionProvider().candidates(state) == ()
+    assert LegalActionProvider().candidates(not_ready) == ()
 
 
 def test_an_opening_treasure_chest_is_not_skipped_by_a_proceed_fallback():
@@ -311,3 +288,108 @@ def test_an_opening_treasure_chest_is_not_skipped_by_a_proceed_fallback():
     }
 
     assert LegalActionProvider().candidates(state) == ()
+
+
+def test_a_selected_card_is_not_offered_again():
+    """Re-picking a selected card is rejected and wastes the step."""
+    state = {
+        "state_type": "card_select",
+        "card_select": {
+            "screen_type": "transform",
+            "selected_count": 1,
+            "min_select": 2,
+            "max_select": 2,
+            "cards": [
+                {"index": 0, "id": "STRIKE_IRONCLAD", "is_selected": True},
+                {"index": 1, "id": "DEFEND_IRONCLAD", "is_selected": False},
+            ],
+            "can_confirm": False,
+            "can_cancel": True,
+        },
+    }
+
+    actions = [a.to_dict() for a in LegalActionProvider().candidates(state)]
+
+    assert {"type": "select_card", "index": 1} in actions
+    assert {"type": "select_card", "index": 0} not in actions
+
+
+def test_no_further_picks_once_the_maximum_is_selected():
+    state = {
+        "state_type": "card_select",
+        "card_select": {
+            "screen_type": "transform",
+            "selected_count": 2,
+            "min_select": 2,
+            "max_select": 2,
+            "cards": [
+                {"index": 0, "id": "STRIKE_IRONCLAD", "is_selected": True},
+                {"index": 1, "id": "DEFEND_IRONCLAD", "is_selected": True},
+                {"index": 2, "id": "BASH", "is_selected": False},
+            ],
+            "can_confirm": True,
+            "can_cancel": True,
+        },
+    }
+
+    actions = [a.to_dict() for a in LegalActionProvider().candidates(state)]
+
+    assert actions == [{"type": "confirm_selection"}, {"type": "cancel_selection"}]
+
+
+def test_hand_selection_also_skips_already_picked_cards():
+    state = {
+        "state_type": "hand_select",
+        "hand_select": {
+            "mode": "simple_select",
+            "selected_count": 1,
+            "min_select": 2,
+            "max_select": 2,
+            "cards": [
+                {"index": 0, "id": "STRIKE_IRONCLAD", "is_selected": True},
+                {"index": 1, "id": "DEFEND_IRONCLAD", "is_selected": False},
+            ],
+            "can_confirm": False,
+        },
+    }
+
+    actions = [a.to_dict() for a in LegalActionProvider().candidates(state)]
+
+    assert actions == [{"type": "combat_select_card", "card_index": 1}]
+
+
+def test_selection_without_the_new_fields_still_offers_every_card():
+    """Older builds report neither is_selected nor the counts."""
+    state = {
+        "state_type": "card_select",
+        "card_select": {
+            "screen_type": "transform",
+            "cards": [{"index": 0}, {"index": 1}],
+            "can_cancel": True,
+        },
+    }
+
+    actions = [a.to_dict() for a in LegalActionProvider().candidates(state)]
+
+    assert {"type": "select_card", "index": 0} in actions
+    assert {"type": "select_card", "index": 1} in actions
+
+
+def test_an_open_bundle_preview_offers_only_confirm_and_cancel():
+    """select_bundle is rejected while a preview is open."""
+    state = {
+        "state_type": "bundle_select",
+        "bundle_select": {
+            "bundles": [{"index": 0}, {"index": 1}],
+            "preview_showing": True,
+            "can_confirm": True,
+            "can_cancel": True,
+        },
+    }
+
+    actions = [a.to_dict() for a in LegalActionProvider().candidates(state)]
+
+    assert actions == [
+        {"type": "confirm_bundle_selection"},
+        {"type": "cancel_bundle_selection"},
+    ]
