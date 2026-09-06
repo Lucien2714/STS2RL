@@ -478,7 +478,12 @@ class GameTokenizer:
                 self.vocabulary.lookup("card_zones", zone),
                 self.vocabulary.lookup("entity_zones", zone),
                 self.vocabulary.lookup("target_types", _text(card.get("target_type"))),
-                self.vocabulary.lookup("enchantments", _attachment_id(card, "enchantment")),
+                self.vocabulary.lookup(
+                    "enchantments", _attachment_id(card, "enchantment")
+                ),
+                self.vocabulary.lookup(
+                    "afflictions", _attachment_id(card, "affliction")
+                ),
                 self.vocabulary.lookup("selection_types", selection_type),
             ],
             [
@@ -487,7 +492,6 @@ class GameTokenizer:
                 _upgrade_feature(card),
                 linear_feature(card.get("max_upgrade_level")),
                 _bool_feature(card.get("is_upgradable")),
-                _bool_feature(_has_attachment(card, "affliction")),
                 signed_log_feature(copy_count),
                 linear_feature(position),
                 _bool_feature(card.get("can_play")),
@@ -1303,16 +1307,6 @@ def _attachment_id(card: Mapping[str, object], key: str) -> str | None:
     """Return an enchantment or affliction identifier attached to a card."""
     attachment = _mapping(card.get(key))
     return _text(attachment.get("id") or attachment.get("name"))
-
-
-def _has_attachment(card: Mapping[str, object], key: str) -> bool:
-    """Return whether a card carries an enchantment or affliction.
-
-    Every card context reports these, so both an explicit null and an omitted
-    key mean the card carries none — the API drops null fields on some builds
-    and sends them on others.
-    """
-    return isinstance(card.get(key), dict)
 
 
 def _coordinate_ratio(value: object, size: object) -> NumericFeature:

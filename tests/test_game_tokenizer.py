@@ -535,7 +535,7 @@ def test_enchantment_and_affliction_are_distinguished_from_absence(
                     id="BASH",
                     quantity=1,
                     enchantment={"id": "ADROIT", "name": "Adroit"},
-                    affliction={"id": "SOMETHING", "name": "Something"},
+                    affliction={"id": "HEXED", "name": "Hexed"},
                 ),
             ]
         ),
@@ -545,13 +545,15 @@ def test_enchantment_and_affliction_are_distinguished_from_absence(
     cards = tokenized.entities["card"]
     zone = _column(ENTITY_CATEGORICAL_FIELDS["card"], "card_zone")
     ench = _column(ENTITY_CATEGORICAL_FIELDS["card"], "enchantment_id")
-    afflicted = _column(ENTITY_NUMERIC_FIELDS["card"], "is_afflicted")
+    affl = _column(ENTITY_CATEGORICAL_FIELDS["card"], "affliction_id")
     deck_rows = cards.categorical[:, zone] == vocabulary.lookup("card_zones", "deck")
 
     assert sorted(cards.categorical[deck_rows, ench].tolist()) == sorted(
         [PAD_INDEX, vocabulary.lookup("enchantments", "ADROIT")]
     )
-    assert sorted(cards.numeric[deck_rows, afflicted].tolist()) == [0.0, 1.0]
+    assert sorted(cards.categorical[deck_rows, affl].tolist()) == sorted(
+        [PAD_INDEX, vocabulary.lookup("afflictions", "HEXED")]
+    )
 
 
 def test_a_missing_deck_leaves_deck_columns_masked(tokenizer: GameTokenizer):

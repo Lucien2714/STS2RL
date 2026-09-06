@@ -1283,7 +1283,7 @@
     "name": "The Merchant???",
     "type": "Shared",
     "act": null,
-    "description": "A suspicious merchant offers 9 fake relics at 42–58 gold each. Throwing a [gold]Foul Potion[/gold] starts a fight against The Merchant??? (165 HP). Winning rewards [gold]Fake Merchant's Rug[/gold] plus all unsold relics.",
+    "description": "A suspicious merchant offers 6 fake relics (drawn from a pool of 9) at 42–58 gold each. Throwing a [gold]Foul Potion[/gold] starts a fight against The Merchant??? (165 HP). Winning rewards [gold]The Merchant's Rug???[/gold] plus all unsold relics.",
     "preconditions": [
       "Act 2+",
       "Single player only",
@@ -1883,15 +1883,18 @@
     "relics": [
       "ARCANE_SCROLL",
       "BOOMING_CONCH",
+      "FISHING_ROD",
       "GOLDEN_PEARL",
+      "KALEIDOSCOPE",
       "LEAD_PAPERWEIGHT",
       "LOST_COFFER",
+      "MASSIVE_SCROLL",
       "NEOWS_TORMENT",
       "NEW_LEAF",
-      "PRECISE_SCISSORS",
       "PHIAL_HOLSTER",
+      "PRECISE_SCISSORS",
+      "SCROLL_BOXES",
       "WINGED_BOOTS",
-      "MASSIVE_SCROLL",
       "LAVA_ROCK",
       "NEOWS_TALISMAN",
       "NUTRITIOUS_OYSTER",
@@ -1902,10 +1905,10 @@
       "HEFTY_TABLET",
       "LARGE_CAPSULE",
       "LEAFY_POULTICE",
-      "PRECARIOUS_SHEARS",
-      "SILVER_CRUCIBLE",
       "NEOWS_BONES",
-      "SCROLL_BOXES"
+      "PRECARIOUS_SHEARS",
+      "SILKEN_TRESS",
+      "SILVER_CRUCIBLE"
     ]
   },
   {
@@ -4005,11 +4008,11 @@
       "YUMMY_COOKIE",
       "BIIIG_HUG",
       "STORYBOOK",
-      "SEAL_OF_GOLD",
       "TOASTY_MITTENS",
       "GOLDEN_COMPASS",
       "PUMPKIN_CANDLE",
-      "TOY_BOX"
+      "TOY_BOX",
+      "SEAL_OF_GOLD"
     ]
   },
   {
@@ -4228,7 +4231,7 @@
         }
       ]
     },
-    "image_url": "/static/images/monsters/architect.webp"
+    "image_url": "/static/images/monsters/architect.png"
   },
   {
     "id": "THE_FUTURE_OF_POTIONS",
@@ -4761,7 +4764,7 @@
         {
           "order": "1-0r",
           "speaker": "ancient",
-          "text": "143. 143 times you’ve been here."
+          "text": "{Visits}. {Visits} {Visits:plural:time|times} you’ve been here."
         },
         {
           "order": "2-0r",
@@ -4981,6 +4984,14 @@
       }
     ],
     "pages": [
+      {
+        "id": "EXTRA_UNLOCK_CAGE",
+        "description": "You hear [green]Repy[/green] let out a sigh of relief as you pull out the spare key from your pocket.\n\n“You really had me going there”."
+      },
+      {
+        "id": "EXTRA_UNLOCK_CHEST",
+        "description": "As [green]Repy[/green] walks away, you use your spare key to open the chest."
+      },
       {
         "id": "INITIAL",
         "description": "An academic is trapped in a [purple]hanging cage[/purple] next to a [gold]treasure chest[/gold].\n\nThe academic is muttering about [sine][orange]“One-Time-Use Keys”[/orange][/sine] while furiously writing something.\n\nLooks like you can unlock the [purple]cage[/purple] or the [gold]chest[/gold].",

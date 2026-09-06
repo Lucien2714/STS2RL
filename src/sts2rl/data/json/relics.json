@@ -89,7 +89,7 @@
     "name_variants": null,
     "notes": null,
     "rarity_key": "Event",
-    "compendium_order": 257
+    "compendium_order": 260
   },
   {
     "id": "ARCANE_SCROLL",
@@ -309,7 +309,7 @@
     "name_variants": null,
     "notes": null,
     "rarity_key": "Event",
-    "compendium_order": 258
+    "compendium_order": 261
   },
   {
     "id": "BIIIG_HUG",
@@ -341,7 +341,7 @@
     "name_variants": null,
     "notes": null,
     "rarity_key": "Event",
-    "compendium_order": 259
+    "compendium_order": 262
   },
   {
     "id": "BLACK_BLOOD",
@@ -429,7 +429,7 @@
     "name_variants": null,
     "notes": null,
     "rarity_key": "Event",
-    "compendium_order": 260
+    "compendium_order": 263
   },
   {
     "id": "BLOOD_SOAKED_ROSE",
@@ -481,7 +481,7 @@
     "name_variants": null,
     "notes": null,
     "rarity_key": "Event",
-    "compendium_order": 261
+    "compendium_order": 264
   },
   {
     "id": "BOOK_REPAIR_KNIFE",
@@ -546,8 +546,8 @@
   {
     "id": "BOOMING_CONCH",
     "name": "Booming Conch",
-    "description": "At the start of [gold]Elite[/gold] combats, draw [blue]2[/blue] additional cards.",
-    "description_raw": "At the start of [gold]Elite[/gold] combats, draw [blue]{Cards}[/blue] additional {Cards:plural:card|cards}.",
+    "description": "At the start of [gold]Elite[/gold] combats, draw [blue]2[/blue] additional cards and gain [energy:1].",
+    "description_raw": "At the start of [gold]Elite[/gold] combats, draw [blue]{Cards}[/blue] additional {Cards:plural:card|cards} and gain {Energy:energyIcons()}.",
     "flavor": "[red]Details for this relic will be revealed in the future...[/red]",
     "rarity": "Ancient Relic",
     "pool": "shared",
@@ -614,8 +614,8 @@
   {
     "id": "BRILLIANT_SCARF",
     "name": "Brilliant Scarf",
-    "description": "The [blue]5th[/blue] card you play each turn is free.",
-    "description_raw": "The [blue]5th[/blue] card you play each turn is free.",
+    "description": "The [blue]5th[/blue] card you play from your hand each turn is free.",
+    "description_raw": "The [blue]5th[/blue] card you play from your hand each turn is free.",
     "flavor": "[red]Details for this relic will be revealed in the future...[/red]",
     "rarity": "Ancient Relic",
     "pool": "shared",
@@ -717,7 +717,7 @@
     "name_variants": null,
     "notes": null,
     "rarity_key": "Event",
-    "compendium_order": 262
+    "compendium_order": 265
   },
   {
     "id": "CALLING_BELL",
@@ -905,7 +905,7 @@
     "name_variants": null,
     "notes": null,
     "rarity_key": "None",
-    "compendium_order": 292
+    "compendium_order": 295
   },
   {
     "id": "CLAWS",
@@ -1005,7 +1005,7 @@
     "name_variants": null,
     "notes": null,
     "rarity_key": "Event",
-    "compendium_order": 263
+    "compendium_order": 266
   },
   {
     "id": "DATA_DISK",
@@ -1041,7 +1041,7 @@
     "name_variants": null,
     "notes": null,
     "rarity_key": "Event",
-    "compendium_order": 264
+    "compendium_order": 267
   },
   {
     "id": "DELICATE_FROND",
@@ -1217,7 +1217,7 @@
     "name_variants": null,
     "notes": null,
     "rarity_key": "Event",
-    "compendium_order": 265
+    "compendium_order": 268
   },
   {
     "id": "DRIFTWOOD",
@@ -1297,7 +1297,7 @@
     "name_variants": null,
     "notes": null,
     "rarity_key": "Event",
-    "compendium_order": 266
+    "compendium_order": 269
   },
   {
     "id": "EMOTION_CHIP",
@@ -1412,6 +1412,22 @@
     "compendium_order": 184
   },
   {
+    "id": "FISHING_ROD",
+    "name": "Fishing Rod",
+    "description": "Every [blue]3[/blue] normal combats, [gold]Upgrade[/gold] a random card in your [gold]Deck[/gold].",
+    "description_raw": "Every {Combats:plural:normal combat|[blue]{}[/blue] normal combats}, [gold]Upgrade[/gold] a random card in your [gold]Deck[/gold].",
+    "flavor": "[red]Details for this relic will be revealed in the future...[/red]",
+    "rarity": "Ancient Relic",
+    "pool": "shared",
+    "merchant_price": null,
+    "image_url": "/static/images/relics/fishing_rod.webp",
+    "image_variants": null,
+    "name_variants": null,
+    "notes": null,
+    "rarity_key": "Ancient",
+    "compendium_order": 185
+  },
+  {
     "id": "FORGOTTEN_SOUL",
     "name": "Forgotten Soul",
     "description": "Whenever you [gold]Exhaust[/gold] a card, deal [blue]1[/blue] damage to a random enemy.",
@@ -1425,7 +1441,7 @@
     "name_variants": null,
     "notes": null,
     "rarity_key": "Event",
-    "compendium_order": 267
+    "compendium_order": 270
   },
   {
     "id": "FRAGRANT_MUSHROOM",
@@ -1441,7 +1457,7 @@
     "name_variants": null,
     "notes": null,
     "rarity_key": "Event",
-    "compendium_order": 268
+    "compendium_order": 271
   },
   {
     "id": "FRESNEL_LENS",
@@ -1457,7 +1473,7 @@
     "name_variants": null,
     "notes": null,
     "rarity_key": "Event",
-    "compendium_order": 269
+    "compendium_order": 272
   },
   {
     "id": "FROZEN_EGG",
@@ -1513,7 +1529,7 @@
     "name_variants": null,
     "notes": null,
     "rarity_key": "Ancient",
-    "compendium_order": 185
+    "compendium_order": 186
   },
   {
     "id": "GALACTIC_DUST",
@@ -1629,7 +1645,7 @@
     "name_variants": null,
     "notes": null,
     "rarity_key": "Ancient",
-    "compendium_order": 186
+    "compendium_order": 187
   },
   {
     "id": "GLITTER",
@@ -1645,7 +1661,7 @@
     "name_variants": null,
     "notes": null,
     "rarity_key": "Ancient",
-    "compendium_order": 187
+    "compendium_order": 188
   },
   {
     "id": "GNARLED_HAMMER",
@@ -1701,7 +1717,7 @@
     "name_variants": null,
     "notes": null,
     "rarity_key": "Ancient",
-    "compendium_order": 188
+    "compendium_order": 189
   },
   {
     "id": "GOLDEN_PEARL",
@@ -1717,7 +1733,7 @@
     "name_variants": null,
     "notes": null,
     "rarity_key": "Ancient",
-    "compendium_order": 189
+    "compendium_order": 190
   },
   {
     "id": "GORGET",
@@ -1773,7 +1789,7 @@
     "name_variants": null,
     "notes": null,
     "rarity_key": "Event",
-    "compendium_order": 270
+    "compendium_order": 273
   },
   {
     "id": "HAPPY_FLOWER",
@@ -1813,7 +1829,7 @@
     "name_variants": null,
     "notes": null,
     "rarity_key": "Event",
-    "compendium_order": 271
+    "compendium_order": 274
   },
   {
     "id": "HEFTY_TABLET",
@@ -1829,7 +1845,7 @@
     "name_variants": null,
     "notes": null,
     "rarity_key": "Ancient",
-    "compendium_order": 190
+    "compendium_order": 191
   },
   {
     "id": "HELICAL_DART",
@@ -1865,7 +1881,7 @@
     "name_variants": null,
     "notes": null,
     "rarity_key": "Event",
-    "compendium_order": 272
+    "compendium_order": 275
   },
   {
     "id": "HORN_CLEAT",
@@ -1910,8 +1926,8 @@
   {
     "id": "INFUSED_CORE",
     "name": "Infused Core",
-    "description": "At the start of each combat, [gold]Channel[/gold] [blue]3[/blue] [gold]Lightning[/gold].",
-    "description_raw": "At the start of each combat, [gold]Channel[/gold] [blue]{Lightning}[/blue] [gold]Lightning[/gold].",
+    "description": "At the start of each combat, [gold]Channel[/gold] [blue]3[/blue] [gold]Lightning[/gold]. [gold]Lightning[/gold] deals [blue]1[/blue] additional damage.",
+    "description_raw": "At the start of each combat, [gold]Channel[/gold] [blue]{Lightning}[/blue] [gold]Lightning[/gold]. [gold]Lightning[/gold] deals [blue]{ExtraDamage}[/blue] additional damage.",
     "flavor": "[red]Details for this relic will be revealed in the future...[/red]",
     "rarity": "Starter Relic",
     "pool": "defect",
@@ -1957,7 +1973,7 @@
     "name_variants": null,
     "notes": null,
     "rarity_key": "Ancient",
-    "compendium_order": 191
+    "compendium_order": 192
   },
   {
     "id": "IVORY_TILE",
@@ -1982,8 +1998,8 @@
   {
     "id": "JEWELED_MASK",
     "name": "Jeweled Mask",
-    "description": "At the start of combat put a random Power from your [gold]Draw Pile[/gold] into your [gold]Hand[/gold], it's free to play.",
-    "description_raw": "At the start of combat put a random Power from your [gold]Draw Pile[/gold] into your [gold]Hand[/gold], it's free to play.",
+    "description": "At the start of each combat, put a random Power from your [gold]Draw Pile[/gold] into your [gold]Hand[/gold]. It's free to play this combat.",
+    "description_raw": "At the start of each combat, put a random Power from your [gold]Draw Pile[/gold] into your [gold]Hand[/gold]. It's free to play this combat.",
     "flavor": "[red]Details for this relic will be revealed in the future...[/red]",
     "rarity": "Ancient Relic",
     "pool": "shared",
@@ -1993,7 +2009,7 @@
     "name_variants": null,
     "notes": null,
     "rarity_key": "Ancient",
-    "compendium_order": 192
+    "compendium_order": 193
   },
   {
     "id": "JEWELRY_BOX",
@@ -2009,7 +2025,7 @@
     "name_variants": null,
     "notes": null,
     "rarity_key": "Ancient",
-    "compendium_order": 193
+    "compendium_order": 194
   },
   {
     "id": "JOSS_PAPER",
@@ -2050,6 +2066,22 @@
     "notes": null,
     "rarity_key": "Common",
     "compendium_order": 24
+  },
+  {
+    "id": "KALEIDOSCOPE",
+    "name": "Kaleidoscope",
+    "description": "Upon pickup, obtain [blue]2[/blue] card rewards from other characters.",
+    "description_raw": "Upon pickup, obtain [blue]{Cards}[/blue] {Cards:plural:card reward|card rewards} from other characters.",
+    "flavor": "[red]Details for this relic will be revealed in the future...[/red]",
+    "rarity": "Ancient Relic",
+    "pool": "shared",
+    "merchant_price": null,
+    "image_url": "/static/images/relics/kaleidoscope.webp",
+    "image_variants": null,
+    "name_variants": null,
+    "notes": null,
+    "rarity_key": "Ancient",
+    "compendium_order": 195
   },
   {
     "id": "KIFUDA",
@@ -2145,7 +2177,7 @@
     "name_variants": null,
     "notes": null,
     "rarity_key": "Ancient",
-    "compendium_order": 194
+    "compendium_order": 196
   },
   {
     "id": "LASTING_CANDY",
@@ -2201,7 +2233,7 @@
     "name_variants": null,
     "notes": null,
     "rarity_key": "Ancient",
-    "compendium_order": 195
+    "compendium_order": 197
   },
   {
     "id": "LEAD_PAPERWEIGHT",
@@ -2217,7 +2249,7 @@
     "name_variants": null,
     "notes": null,
     "rarity_key": "Ancient",
-    "compendium_order": 196
+    "compendium_order": 198
   },
   {
     "id": "LEAFY_POULTICE",
@@ -2233,7 +2265,7 @@
     "name_variants": null,
     "notes": null,
     "rarity_key": "Ancient",
-    "compendium_order": 197
+    "compendium_order": 199
   },
   {
     "id": "LEES_WAFFLE",
@@ -2273,7 +2305,7 @@
     "name_variants": null,
     "notes": null,
     "rarity_key": "Event",
-    "compendium_order": 273
+    "compendium_order": 276
   },
   {
     "id": "LETTER_OPENER",
@@ -2335,7 +2367,7 @@
       "Both variants are functionally identical — same +31 Max HP effect — and the choice is permanent for a given save file. Use the toggle above to preview the one your save shows."
     ],
     "rarity_key": "Ancient",
-    "compendium_order": 198
+    "compendium_order": 200
   },
   {
     "id": "LORDS_PARASOL",
@@ -2351,7 +2383,7 @@
     "name_variants": null,
     "notes": null,
     "rarity_key": "Ancient",
-    "compendium_order": 199
+    "compendium_order": 201
   },
   {
     "id": "LOST_COFFER",
@@ -2367,13 +2399,13 @@
     "name_variants": null,
     "notes": null,
     "rarity_key": "Ancient",
-    "compendium_order": 200
+    "compendium_order": 202
   },
   {
     "id": "LOST_WISP",
     "name": "Lost Wisp",
-    "description": "Whenever you play a [gold]Power[/gold], deal [blue]8[/blue] damage to ALL enemies.",
-    "description_raw": "Whenever you play a [gold]Power[/gold], deal [blue]{Damage}[/blue] damage to ALL enemies.",
+    "description": "Whenever you play a Power, deal [blue]8[/blue] damage to ALL enemies.",
+    "description_raw": "Whenever you play a Power, deal [blue]{Damage}[/blue] damage to ALL enemies.",
     "flavor": "[red]Details for this relic will be revealed in the future...[/red]",
     "rarity": "Event Relic",
     "pool": "shared",
@@ -2383,7 +2415,7 @@
     "name_variants": null,
     "notes": null,
     "rarity_key": "Event",
-    "compendium_order": 274
+    "compendium_order": 277
   },
   {
     "id": "LUCKY_FYSH",
@@ -2459,7 +2491,7 @@
     "name_variants": null,
     "notes": null,
     "rarity_key": "Event",
-    "compendium_order": 275
+    "compendium_order": 278
   },
   {
     "id": "MASSIVE_SCROLL",
@@ -2475,7 +2507,7 @@
     "name_variants": null,
     "notes": null,
     "rarity_key": "Ancient",
-    "compendium_order": 201
+    "compendium_order": 203
   },
   {
     "id": "MAW_BANK",
@@ -2491,7 +2523,7 @@
     "name_variants": null,
     "notes": null,
     "rarity_key": "Event",
-    "compendium_order": 276
+    "compendium_order": 279
   },
   {
     "id": "MEAL_TICKET",
@@ -2527,7 +2559,7 @@
     "name_variants": null,
     "notes": null,
     "rarity_key": "Ancient",
-    "compendium_order": 202
+    "compendium_order": 204
   },
   {
     "id": "MEAT_ON_THE_BONE",
@@ -2703,7 +2735,7 @@
     "name_variants": null,
     "notes": null,
     "rarity_key": "Event",
-    "compendium_order": 277
+    "compendium_order": 280
   },
   {
     "id": "MUMMIFIED_HAND",
@@ -2739,7 +2771,7 @@
     "name_variants": null,
     "notes": null,
     "rarity_key": "Ancient",
-    "compendium_order": 203
+    "compendium_order": 205
   },
   {
     "id": "MYSTIC_LIGHTER",
@@ -2775,7 +2807,7 @@
     "name_variants": null,
     "notes": null,
     "rarity_key": "Ancient",
-    "compendium_order": 204
+    "compendium_order": 206
   },
   {
     "id": "NEOWS_TALISMAN",
@@ -2791,7 +2823,7 @@
     "name_variants": null,
     "notes": null,
     "rarity_key": "Ancient",
-    "compendium_order": 205
+    "compendium_order": 207
   },
   {
     "id": "NEOWS_TORMENT",
@@ -2807,7 +2839,7 @@
     "name_variants": null,
     "notes": null,
     "rarity_key": "Ancient",
-    "compendium_order": 206
+    "compendium_order": 208
   },
   {
     "id": "NEW_LEAF",
@@ -2823,7 +2855,7 @@
     "name_variants": null,
     "notes": null,
     "rarity_key": "Ancient",
-    "compendium_order": 207
+    "compendium_order": 209
   },
   {
     "id": "NINJA_SCROLL",
@@ -2879,7 +2911,7 @@
     "name_variants": null,
     "notes": null,
     "rarity_key": "Ancient",
-    "compendium_order": 208
+    "compendium_order": 210
   },
   {
     "id": "NUTRITIOUS_SOUP",
@@ -2895,7 +2927,7 @@
     "name_variants": null,
     "notes": null,
     "rarity_key": "Ancient",
-    "compendium_order": 209
+    "compendium_order": 211
   },
   {
     "id": "ODDLY_SMOOTH_STONE",
@@ -2991,7 +3023,7 @@
     "name_variants": null,
     "notes": null,
     "rarity_key": "Event",
-    "compendium_order": 278
+    "compendium_order": 281
   },
   {
     "id": "ORNAMENTAL_FAN",
@@ -3047,7 +3079,7 @@
     "name_variants": null,
     "notes": null,
     "rarity_key": "Ancient",
-    "compendium_order": 210
+    "compendium_order": 212
   },
   {
     "id": "PAELS_CLAW",
@@ -3063,7 +3095,7 @@
     "name_variants": null,
     "notes": null,
     "rarity_key": "Ancient",
-    "compendium_order": 211
+    "compendium_order": 213
   },
   {
     "id": "PAELS_EYE",
@@ -3079,7 +3111,7 @@
     "name_variants": null,
     "notes": null,
     "rarity_key": "Ancient",
-    "compendium_order": 212
+    "compendium_order": 214
   },
   {
     "id": "PAELS_FLESH",
@@ -3095,7 +3127,7 @@
     "name_variants": null,
     "notes": null,
     "rarity_key": "Ancient",
-    "compendium_order": 213
+    "compendium_order": 215
   },
   {
     "id": "PAELS_GROWTH",
@@ -3111,7 +3143,7 @@
     "name_variants": null,
     "notes": null,
     "rarity_key": "Ancient",
-    "compendium_order": 214
+    "compendium_order": 216
   },
   {
     "id": "PAELS_HORN",
@@ -3127,7 +3159,7 @@
     "name_variants": null,
     "notes": null,
     "rarity_key": "Ancient",
-    "compendium_order": 215
+    "compendium_order": 217
   },
   {
     "id": "PAELS_LEGION",
@@ -3143,7 +3175,7 @@
     "name_variants": null,
     "notes": null,
     "rarity_key": "Ancient",
-    "compendium_order": 216
+    "compendium_order": 218
   },
   {
     "id": "PAELS_TEARS",
@@ -3159,7 +3191,7 @@
     "name_variants": null,
     "notes": null,
     "rarity_key": "Ancient",
-    "compendium_order": 217
+    "compendium_order": 219
   },
   {
     "id": "PAELS_TOOTH",
@@ -3175,7 +3207,7 @@
     "name_variants": null,
     "notes": null,
     "rarity_key": "Ancient",
-    "compendium_order": 218
+    "compendium_order": 220
   },
   {
     "id": "PAELS_WING",
@@ -3191,7 +3223,7 @@
     "name_variants": null,
     "notes": null,
     "rarity_key": "Ancient",
-    "compendium_order": 219
+    "compendium_order": 221
   },
   {
     "id": "PANDORAS_BOX",
@@ -3207,7 +3239,7 @@
     "name_variants": null,
     "notes": null,
     "rarity_key": "Ancient",
-    "compendium_order": 220
+    "compendium_order": 222
   },
   {
     "id": "PANTOGRAPH",
@@ -3403,7 +3435,7 @@
     "name_variants": null,
     "notes": null,
     "rarity_key": "Ancient",
-    "compendium_order": 221
+    "compendium_order": 223
   },
   {
     "id": "PHILOSOPHERS_STONE",
@@ -3419,7 +3451,7 @@
     "name_variants": null,
     "notes": null,
     "rarity_key": "Ancient",
-    "compendium_order": 222
+    "compendium_order": 224
   },
   {
     "id": "PHYLACTERY_UNBOUND",
@@ -3491,7 +3523,7 @@
     "name_variants": null,
     "notes": null,
     "rarity_key": "Event",
-    "compendium_order": 279
+    "compendium_order": 282
   },
   {
     "id": "POMANDER",
@@ -3507,7 +3539,7 @@
     "name_variants": null,
     "notes": null,
     "rarity_key": "Ancient",
-    "compendium_order": 223
+    "compendium_order": 225
   },
   {
     "id": "POTION_BELT",
@@ -3583,7 +3615,7 @@
     "name_variants": null,
     "notes": null,
     "rarity_key": "Ancient",
-    "compendium_order": 224
+    "compendium_order": 226
   },
   {
     "id": "PRECISE_SCISSORS",
@@ -3599,7 +3631,7 @@
     "name_variants": null,
     "notes": null,
     "rarity_key": "Ancient",
-    "compendium_order": 225
+    "compendium_order": 227
   },
   {
     "id": "PRESERVED_FOG",
@@ -3615,7 +3647,7 @@
     "name_variants": null,
     "notes": null,
     "rarity_key": "Ancient",
-    "compendium_order": 226
+    "compendium_order": 228
   },
   {
     "id": "PRISMATIC_GEM",
@@ -3631,13 +3663,13 @@
     "name_variants": null,
     "notes": null,
     "rarity_key": "Ancient",
-    "compendium_order": 227
+    "compendium_order": 229
   },
   {
     "id": "PUMPKIN_CANDLE",
     "name": "Pumpkin Candle",
-    "description": "Gain [energy:1] at the start of each turn. Extinguishes at the start of [gold]Act[/gold] [blue]3[/blue].",
-    "description_raw": "Gain {Energy:energyIcons()} at the start of each turn. Extinguishes at the start of [gold]Act[/gold] [blue]3[/blue].",
+    "description": "Gain [energy:1] at the start of each turn. Extinguishes after [blue]5[/blue] combats. Can be [gold]Kindled[/gold] at [gold]Rest Sites[/gold].",
+    "description_raw": "Gain {Energy:energyIcons()} at the start of each turn. Extinguishes after [blue]{CombatCount}[/blue] combats. Can be [gold]Kindled[/gold] at [gold]Rest Sites[/gold].",
     "flavor": "[red]Details for this relic will be revealed in the future...[/red]",
     "rarity": "Ancient Relic",
     "pool": "shared",
@@ -3647,7 +3679,7 @@
     "name_variants": null,
     "notes": null,
     "rarity_key": "Ancient",
-    "compendium_order": 228
+    "compendium_order": 230
   },
   {
     "id": "PUNCH_DAGGER",
@@ -3683,7 +3715,7 @@
     "name_variants": null,
     "notes": null,
     "rarity_key": "Ancient",
-    "compendium_order": 229
+    "compendium_order": 231
   },
   {
     "id": "RAINBOW_RING",
@@ -3911,7 +3943,7 @@
     "name_variants": null,
     "notes": null,
     "rarity_key": "Event",
-    "compendium_order": 280
+    "compendium_order": 283
   },
   {
     "id": "ROYAL_STAMP",
@@ -3987,7 +4019,7 @@
     "name_variants": null,
     "notes": null,
     "rarity_key": "Ancient",
-    "compendium_order": 230
+    "compendium_order": 232
   },
   {
     "id": "SAI",
@@ -4003,7 +4035,7 @@
     "name_variants": null,
     "notes": null,
     "rarity_key": "Ancient",
-    "compendium_order": 231
+    "compendium_order": 233
   },
   {
     "id": "SAND_CASTLE",
@@ -4019,7 +4051,7 @@
     "name_variants": null,
     "notes": null,
     "rarity_key": "Ancient",
-    "compendium_order": 232
+    "compendium_order": 234
   },
   {
     "id": "SCREAMING_FLAGON",
@@ -4044,8 +4076,8 @@
   {
     "id": "SCROLL_BOXES",
     "name": "Scroll Boxes",
-    "description": "Upon pickup, lose all [gold]Gold[/gold] and choose [blue]1[/blue] of [blue]2[/blue] packs of cards to add to your [gold]Deck[/gold].",
-    "description_raw": "Upon pickup, lose all [gold]Gold[/gold] and choose [blue]1[/blue] of [blue]2[/blue] packs of cards to add to your [gold]Deck[/gold].",
+    "description": "Upon pickup, choose [blue]1[/blue] of [blue]2[/blue] packs of cards to add to your [gold]Deck[/gold].",
+    "description_raw": "Upon pickup, choose [blue]1[/blue] of [blue]2[/blue] packs of cards to add to your [gold]Deck[/gold].",
     "flavor": "[red]Details for this relic will be revealed in the future...[/red]",
     "rarity": "Ancient Relic",
     "pool": "shared",
@@ -4055,7 +4087,7 @@
     "name_variants": null,
     "notes": null,
     "rarity_key": "Ancient",
-    "compendium_order": 233
+    "compendium_order": 235
   },
   {
     "id": "SEA_GLASS",
@@ -4077,7 +4109,7 @@
     },
     "notes": null,
     "rarity_key": "Ancient",
-    "compendium_order": 234
+    "compendium_order": 236
   },
   {
     "id": "SEAL_OF_GOLD",
@@ -4093,7 +4125,7 @@
     "name_variants": null,
     "notes": null,
     "rarity_key": "Ancient",
-    "compendium_order": 235
+    "compendium_order": 237
   },
   {
     "id": "SELF_FORMING_CLAY",
@@ -4129,7 +4161,7 @@
     "name_variants": null,
     "notes": null,
     "rarity_key": "Ancient",
-    "compendium_order": 236
+    "compendium_order": 238
   },
   {
     "id": "SHOVEL",
@@ -4185,7 +4217,23 @@
     "name_variants": null,
     "notes": null,
     "rarity_key": "Ancient",
-    "compendium_order": 237
+    "compendium_order": 239
+  },
+  {
+    "id": "SILKEN_TRESS",
+    "name": "Silken Tress",
+    "description": "Upon pickup, lose all [gold]Gold[/gold]. [gold]Enchant[/gold] all cards in the first card reward with [purple]Glam[/purple].",
+    "description_raw": "Upon pickup, lose all [gold]Gold[/gold]. [gold]Enchant[/gold] all cards in the first card reward with [purple]Glam[/purple].",
+    "flavor": "[red]Details for this relic will be revealed in the future...[/red]",
+    "rarity": "Ancient Relic",
+    "pool": "shared",
+    "merchant_price": null,
+    "image_url": "/static/images/relics/silken_tress.webp",
+    "image_variants": null,
+    "name_variants": null,
+    "notes": null,
+    "rarity_key": "Ancient",
+    "compendium_order": 240
   },
   {
     "id": "SILVER_CRUCIBLE",
@@ -4201,7 +4249,7 @@
     "name_variants": null,
     "notes": null,
     "rarity_key": "Ancient",
-    "compendium_order": 238
+    "compendium_order": 241
   },
   {
     "id": "SLING_OF_COURAGE",
@@ -4237,7 +4285,7 @@
     "name_variants": null,
     "notes": null,
     "rarity_key": "Ancient",
-    "compendium_order": 239
+    "compendium_order": 242
   },
   {
     "id": "SNECKO_EYE",
@@ -4253,7 +4301,7 @@
     "name_variants": null,
     "notes": null,
     "rarity_key": "Ancient",
-    "compendium_order": 240
+    "compendium_order": 243
   },
   {
     "id": "FAKE_SNECKO_EYE",
@@ -4273,7 +4321,7 @@
     "name_variants": null,
     "notes": null,
     "rarity_key": "Event",
-    "compendium_order": 281
+    "compendium_order": 284
   },
   {
     "id": "SNECKO_SKULL",
@@ -4309,7 +4357,7 @@
     "name_variants": null,
     "notes": null,
     "rarity_key": "Ancient",
-    "compendium_order": 241
+    "compendium_order": 244
   },
   {
     "id": "SPARKLING_ROUGE",
@@ -4345,7 +4393,7 @@
     "name_variants": null,
     "notes": null,
     "rarity_key": "Ancient",
-    "compendium_order": 242
+    "compendium_order": 245
   },
   {
     "id": "STONE_CALENDAR",
@@ -4401,7 +4449,7 @@
     "name_variants": null,
     "notes": null,
     "rarity_key": "Ancient",
-    "compendium_order": 243
+    "compendium_order": 246
   },
   {
     "id": "STORYBOOK",
@@ -4417,7 +4465,7 @@
     "name_variants": null,
     "notes": null,
     "rarity_key": "Ancient",
-    "compendium_order": 244
+    "compendium_order": 247
   },
   {
     "id": "STRAWBERRY",
@@ -4477,7 +4525,7 @@
     "name_variants": null,
     "notes": null,
     "rarity_key": "Event",
-    "compendium_order": 282
+    "compendium_order": 285
   },
   {
     "id": "STURDY_CLAMP",
@@ -4513,7 +4561,7 @@
     "name_variants": null,
     "notes": null,
     "rarity_key": "Event",
-    "compendium_order": 283
+    "compendium_order": 286
   },
   {
     "id": "SWORD_OF_STONE",
@@ -4529,7 +4577,7 @@
     "name_variants": null,
     "notes": null,
     "rarity_key": "Event",
-    "compendium_order": 284
+    "compendium_order": 287
   },
   {
     "id": "SYMBIOTIC_VIRUS",
@@ -4565,7 +4613,7 @@
     "name_variants": null,
     "notes": null,
     "rarity_key": "Ancient",
-    "compendium_order": 245
+    "compendium_order": 248
   },
   {
     "id": "TEA_OF_DISCOURTESY",
@@ -4581,7 +4629,7 @@
     "name_variants": null,
     "notes": null,
     "rarity_key": "Event",
-    "compendium_order": 285
+    "compendium_order": 288
   },
   {
     "id": "THE_ABACUS",
@@ -4617,7 +4665,7 @@
     "name_variants": null,
     "notes": null,
     "rarity_key": "Event",
-    "compendium_order": 286
+    "compendium_order": 289
   },
   {
     "id": "CHOSEN_CHEESE",
@@ -4633,7 +4681,7 @@
     "name_variants": null,
     "notes": null,
     "rarity_key": "Event",
-    "compendium_order": 287
+    "compendium_order": 290
   },
   {
     "id": "THE_COURIER",
@@ -4665,7 +4713,7 @@
     "name_variants": null,
     "notes": null,
     "rarity_key": "Event",
-    "compendium_order": 288
+    "compendium_order": 291
   },
   {
     "id": "THROWING_AXE",
@@ -4681,7 +4729,7 @@
     "name_variants": null,
     "notes": null,
     "rarity_key": "Ancient",
-    "compendium_order": 246
+    "compendium_order": 249
   },
   {
     "id": "TINGSHA",
@@ -4737,7 +4785,7 @@
     "name_variants": null,
     "notes": null,
     "rarity_key": "Ancient",
-    "compendium_order": 247
+    "compendium_order": 250
   },
   {
     "id": "TOOLBOX",
@@ -4773,7 +4821,7 @@
     "name_variants": null,
     "notes": null,
     "rarity_key": "Ancient",
-    "compendium_order": 248
+    "compendium_order": 251
   },
   {
     "id": "TOUGH_BANDAGES",
@@ -4833,7 +4881,7 @@
       "All wax relics melt after 12 total combats, then Toy Box is used up."
     ],
     "rarity_key": "Ancient",
-    "compendium_order": 249
+    "compendium_order": 252
   },
   {
     "id": "TRI_BOOMERANG",
@@ -4849,7 +4897,7 @@
     "name_variants": null,
     "notes": null,
     "rarity_key": "Ancient",
-    "compendium_order": 250
+    "compendium_order": 253
   },
   {
     "id": "TUNGSTEN_ROD",
@@ -5025,7 +5073,7 @@
     "name_variants": null,
     "notes": null,
     "rarity_key": "Ancient",
-    "compendium_order": 251
+    "compendium_order": 254
   },
   {
     "id": "VENERABLE_TEA_SET",
@@ -5065,7 +5113,7 @@
     "name_variants": null,
     "notes": null,
     "rarity_key": "Event",
-    "compendium_order": 289
+    "compendium_order": 292
   },
   {
     "id": "VERY_HOT_COCOA",
@@ -5081,7 +5129,7 @@
     "name_variants": null,
     "notes": null,
     "rarity_key": "Ancient",
-    "compendium_order": 252
+    "compendium_order": 255
   },
   {
     "id": "VEXING_PUZZLEBOX",
@@ -5137,7 +5185,7 @@
     "name_variants": null,
     "notes": null,
     "rarity_key": "Ancient",
-    "compendium_order": 253
+    "compendium_order": 256
   },
   {
     "id": "WAR_PAINT",
@@ -5193,7 +5241,7 @@
     "name_variants": null,
     "notes": null,
     "rarity_key": "Ancient",
-    "compendium_order": 254
+    "compendium_order": 257
   },
   {
     "id": "WHITE_BEAST_STATUE",
@@ -5269,7 +5317,7 @@
     "name_variants": null,
     "notes": null,
     "rarity_key": "Ancient",
-    "compendium_order": 255
+    "compendium_order": 258
   },
   {
     "id": "WONGO_CUSTOMER_APPRECIATION_BADGE",
@@ -5285,7 +5333,7 @@
     "name_variants": null,
     "notes": null,
     "rarity_key": "Event",
-    "compendium_order": 290
+    "compendium_order": 293
   },
   {
     "id": "WONGOS_MYSTERY_TICKET",
@@ -5301,7 +5349,7 @@
     "name_variants": null,
     "notes": null,
     "rarity_key": "Event",
-    "compendium_order": 291
+    "compendium_order": 294
   },
   {
     "id": "YUMMY_COOKIE",
@@ -5323,6 +5371,6 @@
     "name_variants": null,
     "notes": null,
     "rarity_key": "Ancient",
-    "compendium_order": 256
+    "compendium_order": 259
   }
 ]

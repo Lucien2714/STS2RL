@@ -333,7 +333,7 @@
     "id": "CONSUMING_SHADOW",
     "name": "Consuming Shadow",
     "description": "At the end of your turn, [gold]Evoke[/gold] your [blue]2[/blue] leftmost Orbs.",
-    "description_raw": "At the end of your turn, [gold]Evoke[/gold] your {Amount:plural:|[blue]{}[/blue]} leftmost {Amount:plural:Orb|Orbs}.",
+    "description_raw": "At the end of your turn, [gold]Evoke[/gold] your {Amount:plural:|[blue]{}[/blue] }leftmost {Amount:plural:Orb|Orbs}.",
     "type": "Buff",
     "stack_type": "Counter",
     "allow_negative": null,
@@ -630,16 +630,6 @@
     "image_url": "/static/images/powers/draw_cards_next_turn_power.webp"
   },
   {
-    "id": "DRUM_OF_BATTLE",
-    "name": "Drum of Battle",
-    "description": "At the start of your turn, [gold]Exhaust[/gold] the top [blue]2[/blue] cards of your [gold]Draw Pile[/gold].",
-    "description_raw": "At the start of your turn, [gold]Exhaust[/gold] the top {Amount:plural:card|[blue]{}[/blue] cards} of your [gold]Draw Pile[/gold].",
-    "type": "Buff",
-    "stack_type": "Counter",
-    "allow_negative": null,
-    "image_url": "/static/images/powers/drum_of_battle_power.webp"
-  },
-  {
     "id": "DUPLICATION",
     "name": "Duplication",
     "description": "Your next [blue]2[/blue] cards are played an extra time.",
@@ -792,7 +782,7 @@
   {
     "id": "FLANKING",
     "name": "Flanking",
-    "description": "Other allies deal [blue]2x[/blue] more attack damage to this enemy this turn.",
+    "description": "Other allies deal [blue]2x[/blue] the attack damage to this enemy this turn.",
     "description_raw": null,
     "type": "Debuff",
     "stack_type": "Counter",
@@ -950,16 +940,6 @@
     "image_url": "/static/images/powers/gigantification_power.webp"
   },
   {
-    "id": "GRASP",
-    "name": "Grasp",
-    "description": "Whenever you play a card, lose [energy:1].",
-    "description_raw": "Whenever you play a card, lose {Amount:energyIcons()}.",
-    "type": "Buff",
-    "stack_type": "Single",
-    "allow_negative": null,
-    "image_url": "/static/images/powers/grasp_power.webp"
-  },
-  {
     "id": "GRAVITY",
     "name": "Gravity",
     "description": "Whenever you play a card this turn, deal [blue]2[/blue] damage to ALL enemies.",
@@ -1012,8 +992,8 @@
   {
     "id": "HARD_TO_KILL",
     "name": "Hard to Kill",
-    "description": "Reduce all damage taken and HP lost by [gold]this creature[/gold] to [blue]9[/blue].",
-    "description_raw": "Reduce all damage taken and HP lost by [gold]{OwnerName}[/gold] to [blue]9[/blue].",
+    "description": "Reduce all damage taken and HP lost by [gold]this creature[/gold] to [blue][Amount][/blue].",
+    "description_raw": "Reduce all damage taken and HP lost by [gold]{OwnerName}[/gold] to [blue]{Amount}[/blue].",
     "type": "Buff",
     "stack_type": "Counter",
     "allow_negative": null,
@@ -1102,8 +1082,8 @@
   {
     "id": "HIGH_VOLTAGE",
     "name": "High Voltage",
-    "description": "At the start of [gold]this creature's[/gold] turn, it gains [blue][Amount][/blue] [gold]Strength[/gold].",
-    "description_raw": "At the start of [gold]{OwnerName}'s[/gold] turn, it gains [blue]{Amount}[/blue] [gold]Strength[/gold].",
+    "description": "At the end of [gold]this creature's[/gold] turn, it gains [blue][Amount][/blue] [gold]Strength[/gold].",
+    "description_raw": "At the end of [gold]{OwnerName}'s[/gold] turn, it gains [blue]{Amount}[/blue] [gold]Strength[/gold].",
     "type": "Buff",
     "stack_type": "Counter",
     "allow_negative": null,
@@ -1118,16 +1098,6 @@
     "stack_type": "Counter",
     "allow_negative": null,
     "image_url": "/static/images/powers/hotfix_power.webp"
-  },
-  {
-    "id": "HUNGER",
-    "name": "Hunger",
-    "description": "Whenever you play an Attack or Skill, it is [gold]Exhausted[/gold].",
-    "description_raw": null,
-    "type": "Buff",
-    "stack_type": "Single",
-    "allow_negative": null,
-    "image_url": "/static/images/powers/hunger_power.webp"
   },
   {
     "id": "ILLUSION",
@@ -1222,7 +1192,7 @@
   {
     "id": "JUGGERNAUT",
     "name": "Juggernaut",
-    "description": "Whenever you gain [gold]Block[/gold], deal [blue]5[/blue] damage to a random enemy.",
+    "description": "Whenever you gain [gold]Block[/gold], deal [blue]6[/blue] damage to a random enemy.",
     "description_raw": null,
     "type": "Buff",
     "stack_type": "Counter",
@@ -1572,7 +1542,7 @@
   {
     "id": "PARRY",
     "name": "Parry",
-    "description": "Whenever you play [gold]Sovereign Blade[/gold], gain [blue]8[/blue] [gold]Block[/gold].",
+    "description": "[gold]Sovereign Blade[/gold] now gains [gold]Block[/gold].",
     "description_raw": null,
     "type": "Buff",
     "stack_type": "Counter",
@@ -1732,8 +1702,8 @@
   {
     "id": "REAPER_FORM",
     "name": "Reaper Form",
-    "description": "Whenever Attacks deal damage, they also apply [blue]2[/blue] times that much [gold]Doom[/gold].",
-    "description_raw": "Whenever Attacks deal damage, they also apply {Amount:plural:|[blue]{}[/blue] times }that much [gold]Doom[/gold].",
+    "description": "Whenever Attacks deal damage, apply [blue]2[/blue] times that much [gold]Doom[/gold].",
+    "description_raw": "Whenever Attacks deal damage, apply {Amount:plural:|[blue]{}[/blue] times }that much [gold]Doom[/gold].",
     "type": "Buff",
     "stack_type": "Counter",
     "allow_negative": null,
@@ -1858,16 +1828,6 @@
     "stack_type": "Counter",
     "allow_negative": null,
     "image_url": "/static/images/powers/sandpit_power.webp"
-  },
-  {
-    "id": "SCRUTINY",
-    "name": "Scrutiny",
-    "description": "You cannot draw additional cards during your turn.",
-    "description_raw": null,
-    "type": "Buff",
-    "stack_type": "Single",
-    "allow_negative": null,
-    "image_url": "/static/images/powers/scrutiny_power.webp"
   },
   {
     "id": "SEEKING_EDGE",
@@ -2292,7 +2252,7 @@
   {
     "id": "SWORD_SAGE",
     "name": "Sword Sage",
-    "description": "[gold]Sovereign Blade[/gold] now hits [blue]1[/blue] additional time.",
+    "description": "[gold]Sovereign Blade[/gold] gains [gold]Replay[/gold] [blue]1[/blue].",
     "description_raw": null,
     "type": "Buff",
     "stack_type": "Counter",
@@ -2318,6 +2278,16 @@
     "stack_type": "Counter",
     "allow_negative": null,
     "image_url": "/static/images/powers/tag_team_power.webp"
+  },
+  {
+    "id": "TAINTED",
+    "name": "Tainted",
+    "description": "Take additional damage from Attacks this turn.",
+    "description_raw": null,
+    "type": "Debuff",
+    "stack_type": "Counter",
+    "allow_negative": null,
+    "image_url": "/static/images/powers/tainted_power.webp"
   },
   {
     "id": "TANGLED",
@@ -2352,8 +2322,8 @@
   {
     "id": "TERRITORIAL",
     "name": "Territorial",
-    "description": "At the end of its turn, gains [blue]1[/blue] [gold]Strength[/gold].",
-    "description_raw": null,
+    "description": "At the end of [gold]this creature's[/gold] turn, it gains [blue][Amount][/blue] [gold]Strength[/gold].",
+    "description_raw": "At the end of [gold]{OwnerName}'s[/gold] turn, it gains [blue]{Amount}[/blue] [gold]Strength[/gold].",
     "type": "Buff",
     "stack_type": "Counter",
     "allow_negative": null,
@@ -2522,8 +2492,8 @@
   {
     "id": "VITAL_SPARK",
     "name": "Vital Spark",
-    "description": "The first time [gold]this creature[/gold] takes Attack damage each turn, the attacker gains [energy:1].",
-    "description_raw": "The first time [gold]{OwnerName}[/gold] takes Attack damage each turn, the attacker gains {Energy:energyIcons()}.",
+    "description": "ALL [gold]Skills[/gold] are [gold]Tainted[/gold] [blue]2[/blue].",
+    "description_raw": null,
     "type": "Buff",
     "stack_type": "Counter",
     "allow_negative": null,
@@ -2578,6 +2548,16 @@
     "stack_type": "Counter",
     "allow_negative": null,
     "image_url": "/static/images/powers/well_laid_plans_power.webp"
+  },
+  {
+    "id": "WITHERING_PRESENCE",
+    "name": "Withering Presence",
+    "description": "Every [blue]6[/blue] cards you play, add a [gold]Wither[/gold] to your [gold]Hand[/gold].",
+    "description_raw": null,
+    "type": "Buff",
+    "stack_type": "Counter",
+    "allow_negative": null,
+    "image_url": "/static/images/powers/withering_presence_power.webp"
   },
   {
     "id": "WRAITH_FORM",

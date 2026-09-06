@@ -80,6 +80,7 @@ ENTITY_CATEGORICAL: Mapping[str, tuple[tuple[str, str], ...]] = MappingProxyType
             ("entity_zone", "entity_zones"),
             ("target_type", "target_types"),
             ("enchantment_id", "enchantments"),
+            ("affliction_id", "afflictions"),
             ("selection_type", "selection_types"),
         ),
         "relic": (
@@ -166,7 +167,6 @@ ENTITY_NUMERIC_FIELDS: Mapping[str, tuple[str, ...]] = MappingProxyType(
             "upgrade_level",
             "max_upgrade_level",
             "is_upgradable",
-            "is_afflicted",
             "copy_count",
             "position",
             "can_play",

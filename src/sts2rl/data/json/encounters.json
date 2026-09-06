@@ -1,7 +1,22 @@
 [
   {
+    "id": "AEONGLASS_BOSS",
+    "name": "Aeonglass",
+    "room_type": "Boss",
+    "is_weak": false,
+    "act": "Act 3 - Glory",
+    "tags": null,
+    "monsters": [
+      {
+        "id": "AEONGLASS",
+        "name": "Aeonglass"
+      }
+    ],
+    "loss_text": "[gold]Aeonglass[/gold] didn't take kindly to [b]The Adventurer[/b]'s disturbance."
+  },
+  {
     "id": "AXEBOTS_NORMAL",
-    "name": "Bot Buddies",
+    "name": "Axebot",
     "room_type": "Monster",
     "is_weak": false,
     "act": "Act 3 - Glory",
@@ -12,7 +27,7 @@
         "name": "Axebot"
       }
     ],
-    "loss_text": "[b]The Adventurer[/b] was dismembered by some [gold]Bot Buddies[/gold]."
+    "loss_text": "[b]The Adventurer[/b] was dismembered by an [gold]Axebot[/gold]."
   },
   {
     "id": "BATTLEWORN_DUMMY_EVENT_ENCOUNTER",
@@ -294,21 +309,6 @@
     "loss_text": "[b]The Adventurer[/b] was smashed to pieces by [gold]Devoted Sculptor[/gold]."
   },
   {
-    "id": "DOORMAKER_BOSS",
-    "name": "The Doormaker",
-    "room_type": "Boss",
-    "is_weak": false,
-    "act": "Act 3 - Glory",
-    "tags": null,
-    "monsters": [
-      {
-        "id": "DOORMAKER",
-        "name": "Doormaker"
-      }
-    ],
-    "loss_text": "[gold]The Doormaker[/gold] didn't take kindly to [b]The Adventurer[/b]'s disturbance."
-  },
-  {
     "id": "ENTOMANCER_ELITE",
     "name": "Entomancer",
     "room_type": "Elite",
@@ -423,7 +423,7 @@
     "monsters": [
       {
         "id": "EYE_WITH_TEETH",
-        "name": "Eye With Teeth"
+        "name": "Eye with Teeth"
       },
       {
         "id": "FOGMOG",
@@ -653,7 +653,7 @@
   },
   {
     "id": "LIVING_FOG_NORMAL",
-    "name": "Evil Gas",
+    "name": "Living Fog",
     "room_type": "Monster",
     "is_weak": false,
     "act": "Act 1 - Underdocks",
@@ -668,7 +668,7 @@
         "name": "Living Fog"
       }
     ],
-    "loss_text": "[b]The Adventurer[/b] couldn't bear the stench of some [gold]Evil Gas[/gold]."
+    "loss_text": "[b]The Adventurer[/b] couldn't bear the stench of some [gold]Living Fog[/gold]."
   },
   {
     "id": "LOUSE_PROGENITOR_NORMAL",
@@ -1386,6 +1386,10 @@
     "act": "Act 2 - Hive",
     "tags": null,
     "monsters": [
+      {
+        "id": "PARAFRIGHT",
+        "name": "Parafright"
+      },
       {
         "id": "THE_OBSCURA",
         "name": "The Obscura"

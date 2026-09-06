@@ -8,7 +8,7 @@
     "card_type": null,
     "applicable_to": null,
     "is_stackable": false,
-    "image_url": "/static/images/enchantments/adroit.webp"
+    "image_url": "/static/images/enchantments/adroit.png"
   },
   {
     "id": "CLONE",
@@ -19,7 +19,7 @@
     "card_type": null,
     "applicable_to": null,
     "is_stackable": false,
-    "image_url": "/static/images/enchantments/clone.webp"
+    "image_url": "/static/images/enchantments/clone.png"
   },
   {
     "id": "CORRUPTED",
@@ -30,7 +30,7 @@
     "card_type": "Attack",
     "applicable_to": null,
     "is_stackable": false,
-    "image_url": "/static/images/enchantments/corrupted.webp"
+    "image_url": "/static/images/enchantments/corrupted.png"
   },
   {
     "id": "GLAM",
@@ -41,7 +41,7 @@
     "card_type": null,
     "applicable_to": null,
     "is_stackable": false,
-    "image_url": "/static/images/enchantments/glam.webp"
+    "image_url": "/static/images/enchantments/glam.png"
   },
   {
     "id": "GOOPY",
@@ -52,7 +52,7 @@
     "card_type": null,
     "applicable_to": "Defend cards",
     "is_stackable": false,
-    "image_url": "/static/images/enchantments/goopy.webp"
+    "image_url": "/static/images/enchantments/goopy.png"
   },
   {
     "id": "IMBUED",
@@ -63,18 +63,18 @@
     "card_type": "Skill",
     "applicable_to": null,
     "is_stackable": false,
-    "image_url": "/static/images/enchantments/imbued.webp"
+    "image_url": "/static/images/enchantments/imbued.png"
   },
   {
     "id": "INKY",
     "name": "Inky",
-    "description": "This card deals [blue]2[/blue] additional damage and applies [blue]1[/blue] [gold]Weak[/gold].",
+    "description": "This card deals [blue]1[/blue] additional damage and applies [blue]1[/blue] [gold]Weak[/gold].",
     "description_raw": "This card deals [blue]{Damage}[/blue] additional damage and applies [blue]{WeakPower}[/blue] [gold]Weak[/gold].",
-    "extra_card_text": "Apply [blue]1[/blue] [gold]Weak[/gold] to ALL enemies.",
+    "extra_card_text": "Apply [blue]1[/blue] [gold]Weak[/gold].",
     "card_type": null,
     "applicable_to": null,
     "is_stackable": false,
-    "image_url": "/static/images/enchantments/inky.webp"
+    "image_url": "/static/images/enchantments/inky.png"
   },
   {
     "id": "INSTINCT",
@@ -85,7 +85,7 @@
     "card_type": "Attack",
     "applicable_to": null,
     "is_stackable": false,
-    "image_url": "/static/images/enchantments/instinct.webp"
+    "image_url": "/static/images/enchantments/instinct.png"
   },
   {
     "id": "MOMENTUM",
@@ -96,7 +96,7 @@
     "card_type": "Attack",
     "applicable_to": null,
     "is_stackable": false,
-    "image_url": "/static/images/enchantments/momentum.webp"
+    "image_url": "/static/images/enchantments/momentum.png"
   },
   {
     "id": "NIMBLE",
@@ -107,7 +107,7 @@
     "card_type": null,
     "applicable_to": "cards that gain Block",
     "is_stackable": false,
-    "image_url": "/static/images/enchantments/nimble.webp"
+    "image_url": "/static/images/enchantments/nimble.png"
   },
   {
     "id": "PERFECT_FIT",
@@ -118,7 +118,7 @@
     "card_type": null,
     "applicable_to": null,
     "is_stackable": false,
-    "image_url": "/static/images/enchantments/perfect_fit.webp"
+    "image_url": "/static/images/enchantments/perfect_fit.png"
   },
   {
     "id": "ROYALLY_APPROVED",
@@ -129,7 +129,7 @@
     "card_type": "Attack, Skill",
     "applicable_to": null,
     "is_stackable": false,
-    "image_url": "/static/images/enchantments/royally_approved.webp"
+    "image_url": "/static/images/enchantments/royally_approved.png"
   },
   {
     "id": "SHARP",
@@ -140,7 +140,7 @@
     "card_type": "Attack",
     "applicable_to": null,
     "is_stackable": false,
-    "image_url": "/static/images/enchantments/sharp.webp"
+    "image_url": "/static/images/enchantments/sharp.png"
   },
   {
     "id": "SLITHER",
@@ -151,7 +151,7 @@
     "card_type": null,
     "applicable_to": null,
     "is_stackable": false,
-    "image_url": "/static/images/enchantments/slither.webp"
+    "image_url": "/static/images/enchantments/slither.png"
   },
   {
     "id": "SLUMBERING_ESSENCE",
@@ -162,7 +162,7 @@
     "card_type": null,
     "applicable_to": null,
     "is_stackable": false,
-    "image_url": "/static/images/enchantments/slumbering_essence.webp"
+    "image_url": "/static/images/enchantments/slumbering_essence.png"
   },
   {
     "id": "SOULS_POWER",
@@ -171,9 +171,9 @@
     "description_raw": null,
     "extra_card_text": null,
     "card_type": null,
-    "applicable_to": "cards with Exhaust",
+    "applicable_to": null,
     "is_stackable": false,
-    "image_url": "/static/images/enchantments/souls_power.webp"
+    "image_url": "/static/images/enchantments/souls_power.png"
   },
   {
     "id": "SOWN",
@@ -184,7 +184,7 @@
     "card_type": null,
     "applicable_to": null,
     "is_stackable": false,
-    "image_url": "/static/images/enchantments/sown.webp"
+    "image_url": "/static/images/enchantments/sown.png"
   },
   {
     "id": "SPIRAL",
@@ -193,9 +193,9 @@
     "description_raw": null,
     "extra_card_text": null,
     "card_type": null,
-    "applicable_to": "Basic Strike, Defend cards",
+    "applicable_to": "Basic Strike or Defend cards",
     "is_stackable": false,
-    "image_url": "/static/images/enchantments/spiral.webp"
+    "image_url": "/static/images/enchantments/spiral.png"
   },
   {
     "id": "STEADY",
@@ -206,7 +206,7 @@
     "card_type": null,
     "applicable_to": null,
     "is_stackable": false,
-    "image_url": "/static/images/enchantments/steady.webp"
+    "image_url": "/static/images/enchantments/steady.png"
   },
   {
     "id": "SWIFT",
@@ -217,18 +217,18 @@
     "card_type": null,
     "applicable_to": null,
     "is_stackable": false,
-    "image_url": "/static/images/enchantments/swift.webp"
+    "image_url": "/static/images/enchantments/swift.png"
   },
   {
     "id": "TEZCATARAS_EMBER",
     "name": "Tezcatara's Ember",
-    "description": "Costs [blue]0[/blue] and gains [gold]Eternal[/gold].",
-    "description_raw": null,
+    "description": "Costs [blue]0[/blue], deals [blue]3[/blue] additional damage, and gains [gold]Eternal[/gold].",
+    "description_raw": "Costs [blue]0[/blue], deals [blue]{Damage}[/blue] additional damage, and gains [gold]Eternal[/gold].",
     "extra_card_text": null,
     "card_type": null,
     "applicable_to": null,
     "is_stackable": false,
-    "image_url": "/static/images/enchantments/tezcataras_ember.webp"
+    "image_url": "/static/images/enchantments/tezcataras_ember.png"
   },
   {
     "id": "VIGOROUS",
@@ -239,6 +239,6 @@
     "card_type": "Attack",
     "applicable_to": null,
     "is_stackable": false,
-    "image_url": "/static/images/enchantments/vigorous.webp"
+    "image_url": "/static/images/enchantments/vigorous.png"
   }
 ]

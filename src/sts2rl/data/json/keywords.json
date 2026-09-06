@@ -20,11 +20,6 @@
     "description": "Start each combat with this card in your [gold]Hand[/gold]."
   },
   {
-    "id": "PERIOD",
-    "name": "Period",
-    "description": ""
-  },
-  {
     "id": "RETAIN",
     "name": "Retain",
     "description": "Retained cards are not discarded at the end of turn."

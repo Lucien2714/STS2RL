@@ -28,7 +28,9 @@ GameEnv raw state + /player deck
 
 The boundary is deliberately split into deterministic and trainable work:
 
-- `GameVocabulary` assigns stable categorical indices.
+- `GameVocabulary` assigns stable categorical indices from the bundled JSON
+  tables, which are generated upstream by
+  [spire-codex](https://github.com/ptrlrd/spire-codex) from the game itself.
 - `numeric.py` parses and normalizes scalar values.
 - `GameTokenizer` organizes state, map, and action values without trainable
   parameters.

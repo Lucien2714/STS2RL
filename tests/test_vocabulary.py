@@ -6,6 +6,7 @@ from dataclasses import replace
 import json
 from types import MappingProxyType
 
+from sts2rl.data import DEFAULT_DATA_DIR
 from sts2rl.encoder import (
     GameVocabulary,
     PAD_INDEX,
@@ -24,7 +25,12 @@ def test_bundled_vocabulary_reserves_special_indices_and_normalizes_ids():
     assert vocabulary.lookup("cards", "  abrasive  ") == abrasive_index
     assert abrasive_index >= 2
     assert vocabulary.table("cards").token(abrasive_index) == "ABRASIVE"
-    assert vocabulary.size("cards") == 578
+    # tracks the bundled data rather than a magic number, so refreshing the
+    # tables from upstream does not require editing this assertion
+    bundled_cards = json.loads(
+        (DEFAULT_DATA_DIR / "cards.json").read_text(encoding="utf-8")
+    )
+    assert vocabulary.size("cards") == len(bundled_cards) + 2
     assert vocabulary.lookup("power", "STRENGTH") >= 2
     assert vocabulary.lookup("monster", "ARCHITECT") >= 2
     assert vocabulary.lookup("intent", "ATTACK") >= 2

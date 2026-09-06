@@ -1,110 +1,8 @@
 [
   {
-    "id": "DEPRECATED_ACT",
-    "name": "Deprecated Act",
-    "num_rooms": 0,
-    "bosses": [],
-    "ancients": [],
-    "events": [],
-    "encounters": []
-  },
-  {
-    "id": "GLORY",
-    "name": "Glory",
-    "num_rooms": 13,
-    "bosses": [
-      "QUEEN_BOSS",
-      "TEST_SUBJECT_BOSS",
-      "DOORMAKER_BOSS"
-    ],
-    "ancients": [
-      "NONUPEIPE",
-      "TANX",
-      "VAKUU"
-    ],
-    "events": [
-      "BATTLEWORN_DUMMY",
-      "GRAVE_OF_THE_FORGOTTEN",
-      "HUNGRY_FOR_MUSHROOMS",
-      "REFLECTIONS",
-      "ROUND_TEA_PARTY",
-      "TRIAL",
-      "TINKER_TIME"
-    ],
-    "encounters": [
-      "AXEBOTS_NORMAL",
-      "CONSTRUCT_MENAGERIE_NORMAL",
-      "DEVOTED_SCULPTOR_WEAK",
-      "DOORMAKER_BOSS",
-      "FABRICATOR_NORMAL",
-      "FROG_KNIGHT_NORMAL",
-      "GLOBE_HEAD_NORMAL",
-      "KNIGHTS_ELITE",
-      "MECHA_KNIGHT_ELITE",
-      "OWL_MAGISTRATE_NORMAL",
-      "QUEEN_BOSS",
-      "SCROLLS_OF_BITING_NORMAL",
-      "SCROLLS_OF_BITING_WEAK",
-      "SLIMED_BERSERKER_NORMAL",
-      "SOUL_NEXUS_ELITE",
-      "TEST_SUBJECT_BOSS",
-      "THE_LOST_AND_FORGOTTEN_NORMAL",
-      "TURRET_OPERATOR_WEAK"
-    ]
-  },
-  {
-    "id": "HIVE",
-    "name": "Hive",
-    "num_rooms": 14,
-    "bosses": [
-      "THE_INSATIABLE_BOSS",
-      "KNOWLEDGE_DEMON_BOSS",
-      "KAISER_CRAB_BOSS"
-    ],
-    "ancients": [
-      "OROBAS",
-      "PAEL",
-      "TEZCATARA",
-      "OROBAS"
-    ],
-    "events": [
-      "AMALGAMATOR",
-      "BUGSLAYER",
-      "COLORFUL_PHILOSOPHERS",
-      "COLOSSAL_FLOWER",
-      "FIELD_OF_MAN_SIZED_HOLES",
-      "INFESTED_AUTOMATON",
-      "LOST_WISP",
-      "SPIRIT_GRAFTER",
-      "THE_LANTERN_KEY",
-      "ZEN_WEAVER"
-    ],
-    "encounters": [
-      "BOWLBUGS_NORMAL",
-      "BOWLBUGS_WEAK",
-      "CHOMPERS_NORMAL",
-      "DECIMILLIPEDE_ELITE",
-      "ENTOMANCER_ELITE",
-      "EXOSKELETONS_NORMAL",
-      "EXOSKELETONS_WEAK",
-      "HUNTER_KILLER_NORMAL",
-      "KAISER_CRAB_BOSS",
-      "INFESTED_PRISMS_ELITE",
-      "KNOWLEDGE_DEMON_BOSS",
-      "LOUSE_PROGENITOR_NORMAL",
-      "MYTES_NORMAL",
-      "OVICOPTER_NORMAL",
-      "SLUMBERING_BEETLE_NORMAL",
-      "SPINY_TOAD_NORMAL",
-      "THE_INSATIABLE_BOSS",
-      "THE_OBSCURA_NORMAL",
-      "THIEVING_HOPPER_WEAK",
-      "TUNNELER_WEAK"
-    ]
-  },
-  {
     "id": "OVERGROWTH",
     "name": "Overgrowth",
+    "index": 0,
     "num_rooms": 15,
     "bosses": [
       "VANTOM_BOSS",
@@ -112,7 +10,6 @@
       "THE_KIN_BOSS"
     ],
     "ancients": [
-      "NEOW",
       "NEOW"
     ],
     "events": [
@@ -158,6 +55,7 @@
   {
     "id": "UNDERDOCKS",
     "name": "Underdocks",
+    "index": 0,
     "num_rooms": 15,
     "bosses": [
       "WATERFALL_GIANT_BOSS",
@@ -165,7 +63,6 @@
       "LAGAVULIN_MATRIARCH_BOSS"
     ],
     "ancients": [
-      "NEOW",
       "NEOW"
     ],
     "events": [
@@ -201,6 +98,101 @@
       "TOADPOLES_WEAK",
       "TWO_TAILED_RATS_NORMAL",
       "WATERFALL_GIANT_BOSS"
+    ]
+  },
+  {
+    "id": "HIVE",
+    "name": "Hive",
+    "index": 1,
+    "num_rooms": 14,
+    "bosses": [
+      "THE_INSATIABLE_BOSS",
+      "KNOWLEDGE_DEMON_BOSS",
+      "KAISER_CRAB_BOSS"
+    ],
+    "ancients": [
+      "OROBAS",
+      "PAEL",
+      "TEZCATARA"
+    ],
+    "events": [
+      "AMALGAMATOR",
+      "BUGSLAYER",
+      "COLORFUL_PHILOSOPHERS",
+      "COLOSSAL_FLOWER",
+      "FIELD_OF_MAN_SIZED_HOLES",
+      "INFESTED_AUTOMATON",
+      "LOST_WISP",
+      "SPIRIT_GRAFTER",
+      "THE_LANTERN_KEY",
+      "ZEN_WEAVER"
+    ],
+    "encounters": [
+      "BOWLBUGS_NORMAL",
+      "BOWLBUGS_WEAK",
+      "CHOMPERS_NORMAL",
+      "DECIMILLIPEDE_ELITE",
+      "ENTOMANCER_ELITE",
+      "EXOSKELETONS_NORMAL",
+      "EXOSKELETONS_WEAK",
+      "HUNTER_KILLER_NORMAL",
+      "KAISER_CRAB_BOSS",
+      "INFESTED_PRISMS_ELITE",
+      "KNOWLEDGE_DEMON_BOSS",
+      "LOUSE_PROGENITOR_NORMAL",
+      "MYTES_NORMAL",
+      "OVICOPTER_NORMAL",
+      "SLUMBERING_BEETLE_NORMAL",
+      "SPINY_TOAD_NORMAL",
+      "THE_INSATIABLE_BOSS",
+      "THE_OBSCURA_NORMAL",
+      "THIEVING_HOPPER_WEAK",
+      "TUNNELER_WEAK"
+    ]
+  },
+  {
+    "id": "GLORY",
+    "name": "Glory",
+    "index": 2,
+    "num_rooms": 13,
+    "bosses": [
+      "QUEEN_BOSS",
+      "TEST_SUBJECT_BOSS",
+      "AEONGLASS_BOSS"
+    ],
+    "ancients": [
+      "NONUPEIPE",
+      "TANX",
+      "VAKUU"
+    ],
+    "events": [
+      "BATTLEWORN_DUMMY",
+      "GRAVE_OF_THE_FORGOTTEN",
+      "HUNGRY_FOR_MUSHROOMS",
+      "REFLECTIONS",
+      "ROUND_TEA_PARTY",
+      "TRIAL",
+      "TINKER_TIME"
+    ],
+    "encounters": [
+      "AXEBOTS_NORMAL",
+      "CONSTRUCT_MENAGERIE_NORMAL",
+      "DEVOTED_SCULPTOR_WEAK",
+      "AEONGLASS_BOSS",
+      "FABRICATOR_NORMAL",
+      "FROG_KNIGHT_NORMAL",
+      "GLOBE_HEAD_NORMAL",
+      "KNIGHTS_ELITE",
+      "MECHA_KNIGHT_ELITE",
+      "OWL_MAGISTRATE_NORMAL",
+      "QUEEN_BOSS",
+      "SCROLLS_OF_BITING_NORMAL",
+      "SCROLLS_OF_BITING_WEAK",
+      "SLIMED_BERSERKER_NORMAL",
+      "SOUL_NEXUS_ELITE",
+      "TEST_SUBJECT_BOSS",
+      "THE_LOST_AND_FORGOTTEN_NORMAL",
+      "TURRET_OPERATOR_WEAK"
     ]
   }
 ]
