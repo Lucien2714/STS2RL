@@ -547,3 +547,179 @@ def test_reset_stops_at_the_end_of_the_ascension_range():
 
     assert client.level == 0
     assert not any(name.startswith("ascension") for name, _ in client.calls)
+
+
+class CustomRunClient:
+    """A custom-run screen whose modifier tickboxes remember their state."""
+
+    MUTUALLY_EXCLUSIVE = frozenset({"DRAFT", "SEALED_DECK"})
+
+    def __init__(self, ticked=(), offers_selected=True):
+        self.calls = []
+        self.ticked = set(ticked)
+        self.offers_selected = offers_selected
+        self.started_with_seed = "<not started>"
+        self.screen = "main"
+
+    def get_state(self):
+        if self.screen == "main":
+            return {
+                "state_type": "menu",
+                "menu_screen": "main",
+                "options": [{"name": "singleplayer", "enabled": True}],
+            }
+        if self.screen == "singleplayer":
+            return {
+                "state_type": "menu",
+                "menu_screen": "singleplayer",
+                "options": ["standard", "custom", "back"],
+            }
+        if self.screen == "run":
+            return {"state_type": "map", "run": {"floor": 0}}
+        return self._custom_run()
+
+    def _custom_run(self):
+        state = {
+            "state_type": "menu",
+            "menu_screen": "custom_run",
+            "characters": [{"id": "IRONCLAD", "selected": True}],
+            "options": [
+                {"name": "IRONCLAD", "enabled": True},
+                {"name": "modifier_DRAFT", "enabled": True},
+                {"name": "modifier_SEALED_DECK", "enabled": True},
+                {"name": "modifier_MIDAS", "enabled": True},
+                {"name": "confirm", "enabled": True},
+            ],
+        }
+        if self.offers_selected:
+            state["selected"] = {
+                "character": "IRONCLAD",
+                "modifiers": sorted(self.ticked),
+            }
+        return state
+
+    def menu_select(self, option, seed=None):
+        self.calls.append((option, seed))
+        if option == "singleplayer":
+            self.screen = "singleplayer"
+        elif option == "custom":
+            self.screen = "custom_run"
+        elif option.startswith("modifier_"):
+            key = option.removeprefix("modifier_")
+            if key in self.ticked:
+                self.ticked.discard(key)
+            else:
+                self.ticked.add(key)
+                # Enabling one of a mutually exclusive pair disables the other.
+                self.ticked -= self.MUTUALLY_EXCLUSIVE - {key}
+            return {"status": "ok", "modifiers": sorted(self.ticked)}
+        elif option == "confirm":
+            self.started_with_seed = seed
+            self.screen = "run"
+        else:
+            raise AssertionError(f"unexpected menu option {option}")
+        return {"state": self.get_state()}
+
+
+def _custom_controller(client):
+    return ResetController(client, ActionDispatcher(client))
+
+
+def test_custom_run_turns_off_modifiers_a_human_left_ticked():
+    """The screen remembers tickboxes, so reset must reconcile, not assume."""
+    client = CustomRunClient(ticked={"DRAFT", "MIDAS"})
+
+    state = _custom_controller(client).reset(
+        ResetSpec(game_mode="custom", run_seed="ABC123")
+    )
+
+    assert client.ticked == set()
+    assert state["state_type"] == "map"
+    assert client.started_with_seed == "ABC123"
+
+
+def test_custom_run_reaches_a_requested_modifier_set():
+    client = CustomRunClient(ticked={"DRAFT"})
+
+    _custom_controller(client).reset(
+        ResetSpec(game_mode="custom", modifiers=("MIDAS",))
+    )
+
+    assert client.ticked == {"MIDAS"}
+
+
+def test_custom_run_follows_a_mutually_exclusive_toggle():
+    """Enabling SEALED_DECK disables DRAFT, so the wanted set still lands."""
+    client = CustomRunClient(ticked={"DRAFT", "MIDAS"})
+
+    _custom_controller(client).reset(
+        ResetSpec(game_mode="custom", modifiers=("SEALED_DECK", "MIDAS"))
+    )
+
+    assert client.ticked == {"SEALED_DECK", "MIDAS"}
+
+
+def test_an_already_correct_modifier_set_is_not_touched():
+    client = CustomRunClient(ticked={"MIDAS"})
+
+    _custom_controller(client).reset(
+        ResetSpec(game_mode="custom", modifiers=("MIDAS",))
+    )
+
+    assert [call for call in client.calls if call[0].startswith("modifier_")] == []
+
+
+def test_a_screen_reporting_no_selection_is_left_alone():
+    """Without an authoritative set, toggling would guess at the rules."""
+    client = CustomRunClient(ticked={"DRAFT"}, offers_selected=False)
+
+    state = _custom_controller(client).reset(ResetSpec(game_mode="custom"))
+
+    assert state["state_type"] == "map"
+    assert client.ticked == {"DRAFT"}
+
+
+def test_modifiers_that_never_settle_fail_loudly():
+    client = CustomRunClient(ticked={"DRAFT"})
+    controller = ResetController(
+        client, ActionDispatcher(client), max_modifier_steps=1
+    )
+
+    with pytest.raises(STS2ClientError, match="modifiers"):
+        controller.reset(ResetSpec(game_mode="custom", modifiers=("MIDAS",)))
+
+
+def test_an_unoffered_modifier_is_rejected():
+    client = CustomRunClient()
+
+    with pytest.raises(STS2ClientError, match="FLIGHT"):
+        _custom_controller(client).reset(
+            ResetSpec(game_mode="custom", modifiers=("FLIGHT",))
+        )
+
+
+def test_modifiers_outside_custom_mode_are_rejected():
+    with pytest.raises(ValueError, match="custom-run screen"):
+        ResetSpec(game_mode="standard", modifiers=("MIDAS",))
+
+
+def test_reusing_an_active_run_is_recorded():
+    """A reused run ignores the requested seed, so it must not pass silently."""
+    client = CustomRunClient()
+    client.screen = "run"
+    controller = _custom_controller(client)
+
+    controller.reset(
+        ResetSpec(game_mode="custom", run_seed="AAA", allow_active_run=True)
+    )
+
+    assert controller.reused_active_run is True
+
+
+def test_a_reset_that_started_its_own_run_is_not_flagged():
+    client = CustomRunClient()
+
+    controller = _custom_controller(client)
+    controller.reset(ResetSpec(game_mode="custom", run_seed="AAA"))
+
+    assert controller.reused_active_run is False

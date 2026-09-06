@@ -13,6 +13,25 @@ from sts2rl.encoder import EncoderConfig
 from sts2rl.env import DEFAULT_ACTION_DELAY_SECONDS, ResetSpec
 
 
+# Fixed run seeds, cycled one per episode.
+#
+# A fresh random run every episode puts map layout, card rewards, shops, and
+# the enemy sequence into the return, where the critic can only ever predict
+# their average -- everything seed-specific lands in the advantage as noise,
+# and "mean return over the last N episodes" mixes policy improvement with
+# draw luck.  A fixed pool makes that number comparable across checkpoints.
+#
+# A pool, not one seed: a single seed is memorized as an action sequence.  The
+# holdout seeds are never trained on, so evaluating on them is what separates
+# "learned to climb" from "learned these twelve maps".
+DEFAULT_SEED_POOL = (
+    "7NKRVDBV", "TJWVA3B8", "GJ677ZKE", "DDY7BHHQ",
+    "7PFC7NZR", "CSJ92XBT", "SQFNH36F", "ZU9GBB22",
+    "7AU6U593", "PST6BSQ9", "KFGBG4ZP", "6T76XVK2",
+)
+DEFAULT_HOLDOUT_SEEDS = ("QXVE762C", "YDZERTWD", "ZTTJDGJF")
+
+
 @dataclass(frozen=True)
 class TrainingConfig:
     """Operational settings that do not define model tensor shapes."""
@@ -24,6 +43,8 @@ class TrainingConfig:
     base_url: str = "http://localhost:15526/api/v1"
     timeout: float = 20.0
     action_delay_seconds: float = DEFAULT_ACTION_DELAY_SECONDS
+    training_seeds: tuple[str, ...] = ()
+    holdout_seeds: tuple[str, ...] = ()
     device: str = "cpu"
     torch_seed: int = 0
     run_dir: Path = Path("runs/default")
@@ -70,6 +91,19 @@ class TrainingConfig:
             torch.device(self.device)
         except (RuntimeError, TypeError) as exc:
             raise ValueError(f"invalid torch device: {self.device!r}") from exc
+        for name in ("training_seeds", "holdout_seeds"):
+            seeds = tuple(getattr(self, name))
+            object.__setattr__(self, name, seeds)
+            if any(not isinstance(seed, str) or not seed for seed in seeds):
+                raise ValueError(f"{name} must be non-empty strings")
+            if len(set(seeds)) != len(seeds):
+                raise ValueError(f"{name} must not repeat a seed")
+        overlap = set(self.training_seeds) & set(self.holdout_seeds)
+        if overlap:
+            raise ValueError(
+                "holdout seeds must never be trained on; both pools list "
+                f"{sorted(overlap)}"
+            )
         object.__setattr__(self, "run_dir", Path(self.run_dir))
 
     def validate_runtime_device(self) -> torch.device:
@@ -83,7 +117,20 @@ class TrainingConfig:
         """Return a JSON-compatible representation."""
         result = asdict(self)
         result["run_dir"] = str(self.run_dir)
+        result["training_seeds"] = list(self.training_seeds)
+        result["holdout_seeds"] = list(self.holdout_seeds)
         return result
+
+    def seed_for_episode(self, completed_episodes: int) -> str | None:
+        """Return the seed the next episode should run, cycling the pool.
+
+        The cursor is derived from the episode counter rather than stored, so
+        a resumed run continues the cycle instead of restarting it -- which
+        would otherwise re-train the same few seeds and starve the rest.
+        """
+        if not self.training_seeds:
+            return None
+        return self.training_seeds[completed_episodes % len(self.training_seeds)]
 
     @classmethod
     def from_dict(cls, values: Mapping[str, object]) -> TrainingConfig:
@@ -108,6 +155,11 @@ class TrainingPlan:
             raise ValueError("reset character must be between 0 and 4")
         if self.reset.game_mode == "standard" and self.reset.run_seed is not None:
             raise ValueError("run_seed is only supported for custom or daily runs")
+        if self.training.training_seeds and self.reset.game_mode != "custom":
+            raise ValueError(
+                "a seed pool needs the custom-run screen, which is the only one "
+                "that accepts a seed; pass --game-mode custom"
+            )
 
     def to_dict(self) -> dict[str, object]:
         """Return the complete plan as JSON-compatible primitives."""

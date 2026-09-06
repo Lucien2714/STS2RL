@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from dataclasses import replace
 from time import monotonic
 
 from sts2rl.agents import CandidatePPOAgent, EpisodeResult, EpisodeRunner
 from sts2rl.training.checkpoint import CheckpointManager
+from sts2rl.env import ResetSpec
 from sts2rl.training.config import TrainingPlan, TrainingState
 from sts2rl.training.metrics import EpisodeMetrics, TrainingMetricsWriter
 
@@ -48,13 +50,15 @@ class Trainer:
         try:
             while self.state.completed_episodes < target:
                 started_at = monotonic()
-                result = self.runner.run(self.plan.reset)
+                reset_spec = self._episode_reset_spec()
+                result = self.runner.run(reset_spec)
                 self._adopt_agent_counters()
                 self.state.completed_episodes += 1
                 self._log_pending_updates()
                 episode_metrics = self._episode_metrics(
                     result,
                     duration_seconds=monotonic() - started_at,
+                    seed=None if result.reused_run else reset_spec.run_seed,
                 )
                 self.metrics_writer.log_episode(episode_metrics)
                 self._log_action_errors(result)
@@ -160,6 +164,17 @@ class Trainer:
             self.state.environment_steps,
         )
 
+    def _episode_reset_spec(self) -> ResetSpec:
+        """Return the reset for the next episode, seeded from the pool.
+
+        Without a pool this is the configured reset unchanged, so an unseeded
+        run behaves exactly as before.
+        """
+        seed = self.plan.training.seed_for_episode(self.state.completed_episodes)
+        if seed is None:
+            return self.plan.reset
+        return replace(self.plan.reset, run_seed=seed)
+
     def _adopt_agent_counters(self) -> None:
         """Copy the agent's counters, which are the authority while training."""
         self.state.environment_steps = self.agent.environment_steps
@@ -170,6 +185,7 @@ class Trainer:
         result: EpisodeResult,
         *,
         duration_seconds: float,
+        seed: str | None,
     ) -> EpisodeMetrics:
         return EpisodeMetrics(
             episode=self.state.completed_episodes,
@@ -185,6 +201,8 @@ class Trainer:
             ),
             optimizer_updates=self.state.optimizer_updates,
             duration_seconds=duration_seconds,
+            seed=seed,
+            reused_run=result.reused_run,
         )
 
 

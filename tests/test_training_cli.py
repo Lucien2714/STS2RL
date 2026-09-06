@@ -8,6 +8,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from sts2rl.env import ResetSpec
 from sts2rl.training import TrainingConfig, TrainingPlan
 from sts2rl.training import cli
 
@@ -147,3 +148,78 @@ def test_action_delay_can_be_disabled_on_resume(tmp_path: Path):
     resumed = cli._resumed_plan(args, SimpleNamespace(plan=saved))  # type: ignore[arg-type]
 
     assert resumed.training.action_delay_seconds == 0.0
+
+
+def test_seed_pool_and_modifiers_come_from_the_command_line(tmp_path: Path):
+    args = cli.create_parser().parse_args(
+        [
+            "--run-dir", str(tmp_path / "run"),
+            "--game-mode", "custom",
+            "--seed-pool", "AAA,BBB",
+            "--holdout-seeds", "ZZZ",
+            "--modifiers", "MIDAS",
+        ]
+    )
+
+    plan = cli._new_plan(args)
+
+    assert plan.training.training_seeds == ("AAA", "BBB")
+    assert plan.training.holdout_seeds == ("ZZZ",)
+    assert plan.reset.modifiers == ("MIDAS",)
+
+
+def test_default_installs_the_bundled_pools(tmp_path: Path):
+    args = cli.create_parser().parse_args(
+        [
+            "--run-dir", str(tmp_path / "run"),
+            "--game-mode", "custom",
+            "--seed-pool", "default",
+            "--holdout-seeds", "default",
+        ]
+    )
+
+    plan = cli._new_plan(args)
+
+    assert len(plan.training.training_seeds) == 12
+    assert len(plan.training.holdout_seeds) == 3
+    assert not set(plan.training.training_seeds) & set(plan.training.holdout_seeds)
+
+
+def test_resume_refuses_to_reshuffle_the_seed_pool(tmp_path: Path):
+    """Changing the pool would remap every seed onto a different episode."""
+    saved = TrainingPlan(
+        training=TrainingConfig(
+            run_dir=tmp_path / "run", training_seeds=("AAA", "BBB")
+        ),
+        reset=ResetSpec(game_mode="custom"),
+    )
+    args = cli.create_parser().parse_args(
+        [
+            "--run-dir", str(tmp_path / "run"),
+            "--resume", "latest",
+            "--seed-pool", "AAA,CCC",
+        ]
+    )
+
+    with pytest.raises(ValueError, match="--seed-pool cannot change"):
+        cli._resumed_plan(args, SimpleNamespace(plan=saved))  # type: ignore[arg-type]
+
+
+def test_resume_accepts_the_pool_it_was_saved_with(tmp_path: Path):
+    saved = TrainingPlan(
+        training=TrainingConfig(
+            run_dir=tmp_path / "run", training_seeds=("AAA", "BBB")
+        ),
+        reset=ResetSpec(game_mode="custom"),
+    )
+    args = cli.create_parser().parse_args(
+        [
+            "--run-dir", str(tmp_path / "run"),
+            "--resume", "latest",
+            "--seed-pool", "AAA,BBB",
+        ]
+    )
+
+    resumed = cli._resumed_plan(args, SimpleNamespace(plan=saved))  # type: ignore[arg-type]
+
+    assert resumed.training.training_seeds == ("AAA", "BBB")

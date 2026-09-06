@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import argparse
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import replace
 from pathlib import Path
 from typing import TypeVar
@@ -14,7 +14,13 @@ from sts2rl.agents import CandidatePPOAgent, EpisodeRunner, PPOConfig
 from sts2rl.encoder import EncoderConfig, GameEncoder, GameTokenizer, GameVocabulary
 from sts2rl.env import GameEnv, ResetSpec
 from sts2rl.training.checkpoint import CheckpointManager, LoadedCheckpoint
-from sts2rl.training.config import TrainingConfig, TrainingPlan, TrainingState
+from sts2rl.training.config import (
+    DEFAULT_HOLDOUT_SEEDS,
+    DEFAULT_SEED_POOL,
+    TrainingConfig,
+    TrainingPlan,
+    TrainingState,
+)
 from sts2rl.training.metrics import EpisodeMetrics, TrainingMetricsWriter
 from sts2rl.training.trainer import Trainer
 
@@ -43,6 +49,27 @@ def create_parser() -> argparse.ArgumentParser:
     parser.add_argument("--character", type=int)
     parser.add_argument("--game-mode", choices=("standard", "custom", "daily"))
     parser.add_argument("--run-seed")
+    parser.add_argument(
+        "--seed-pool",
+        help=(
+            "Comma-separated run seeds cycled one per episode, or 'default' "
+            "for the bundled pool. Requires --game-mode custom."
+        ),
+    )
+    parser.add_argument(
+        "--holdout-seeds",
+        help=(
+            "Comma-separated seeds reserved for evaluation and never trained "
+            "on, or 'default' for the bundled set."
+        ),
+    )
+    parser.add_argument(
+        "--modifiers",
+        help=(
+            "Comma-separated custom-run modifier keys to tick; empty string "
+            "means every modifier off. Custom runs reconcile either way."
+        ),
+    )
     parser.add_argument("--start-run-option", choices=("confirm", "embark"))
     parser.add_argument("--allow-active-run", action="store_true", default=None)
     parser.add_argument(
@@ -175,6 +202,8 @@ def _new_plan(args: argparse.Namespace) -> TrainingPlan:
             action_delay_seconds=_or_default(
                 args.action_delay, training_defaults.action_delay_seconds
             ),
+            training_seeds=_seed_list(args.seed_pool, DEFAULT_SEED_POOL),
+            holdout_seeds=_seed_list(args.holdout_seeds, DEFAULT_HOLDOUT_SEEDS),
             device=_or_default(args.device, training_defaults.device),
             torch_seed=_or_default(args.torch_seed, training_defaults.torch_seed),
             run_dir=args.run_dir,
@@ -226,6 +255,7 @@ def _new_plan(args: argparse.Namespace) -> TrainingPlan:
                 else args.allow_active_run
             ),
             ascension=_or_default(args.ascension, reset_defaults.ascension),
+            modifiers=_seed_list(args.modifiers, ()),
         ),
     )
 
@@ -262,6 +292,15 @@ def _resumed_plan(
             "ascension": saved.reset.ascension,
         },
     )
+    _require_equal_overrides(
+        args,
+        {
+            "seed_pool": ",".join(saved.training.training_seeds),
+            "holdout_seeds": ",".join(saved.training.holdout_seeds),
+            "modifiers": ",".join(saved.reset.modifiers),
+        },
+        normalize=lambda value: ",".join(_seed_list(value, ()) or ()),
+    )
     if (
         args.no_tensorboard is not None
         and (not args.no_tensorboard) != saved.training.tensorboard_enabled
@@ -291,9 +330,12 @@ def _resumed_plan(
 def _require_equal_overrides(
     args: argparse.Namespace,
     expected: dict[str, object],
+    normalize: Callable[[object], object] | None = None,
 ) -> None:
     for name, expected_value in expected.items():
         value = getattr(args, name)
+        if value is not None and normalize is not None:
+            value = normalize(value)
         if value is not None and value != expected_value:
             option = "--" + name.replace("_", "-")
             raise ValueError(
@@ -312,3 +354,17 @@ def _report_episode(metrics: EpisodeMetrics) -> None:
 
 def _or_default(value: T | None, default: T) -> T:
     return default if value is None else value
+
+
+def _seed_list(value: object, bundled: tuple[str, ...]) -> tuple[str, ...]:
+    """Parse a comma-separated CLI list, with 'default' naming the bundled set.
+
+    An empty string is a real answer -- "none of them" -- and is kept distinct
+    from the flag being absent, which leaves the default in place.
+    """
+    if value is None:
+        return ()
+    text = str(value).strip()
+    if text == "default":
+        return bundled
+    return tuple(part.strip() for part in text.split(",") if part.strip())

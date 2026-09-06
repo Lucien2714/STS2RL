@@ -27,6 +27,7 @@ class EpisodeResult:
     total_reward: float
     terminated: bool
     truncated: bool
+    reused_run: bool = False
 
     @property
     def steps(self) -> int:
@@ -65,6 +66,7 @@ class EpisodeRunner:
         """Reset the environment and run until game over or the step limit."""
         self._cached_deck = None
         initial_state = self.env.reset(reset_spec)
+        reused_run = getattr(self.env, "reused_active_run", False)
         observation = self._observation(initial_state)
         transitions: list[Transition] = []
         total_reward = 0.0
@@ -112,6 +114,7 @@ class EpisodeRunner:
                     total_reward=total_reward,
                     terminated=True,
                     truncated=False,
+                    reused_run=reused_run,
                 )
 
         self.agent.finish_episode(observation, truncated=True)
@@ -122,6 +125,7 @@ class EpisodeRunner:
             total_reward=total_reward,
             terminated=False,
             truncated=True,
+            reused_run=reused_run,
         )
 
     def _choose_with_refresh(

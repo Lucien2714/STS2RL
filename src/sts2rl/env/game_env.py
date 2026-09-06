@@ -42,6 +42,11 @@ class GameEnv:
         """Navigate menus until a run is active and return its raw state."""
         return self.reset_controller.reset(spec or ResetSpec())
 
+    @property
+    def reused_active_run(self) -> bool:
+        """Whether the last reset joined a run instead of starting one."""
+        return self.reset_controller.reused_active_run
+
     def step(self, action: GameAction) -> EnvStep:
         """Dispatch one typed action and return the raw environment result."""
         if not isinstance(action, GameAction):

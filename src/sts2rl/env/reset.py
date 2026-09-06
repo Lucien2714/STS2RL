@@ -23,10 +23,18 @@ class ResetSpec:
     start_run_option: str = "confirm"
     allow_active_run: bool = False
     ascension: int | None = None
+    modifiers: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         if self.game_mode not in {"standard", "custom", "daily"}:
             raise ValueError(f"Unsupported game mode: {self.game_mode!r}")
+        object.__setattr__(self, "modifiers", tuple(self.modifiers))
+        if any(not isinstance(key, str) or not key for key in self.modifiers):
+            raise ValueError("modifiers must be non-empty strings")
+        if len(set(self.modifiers)) != len(self.modifiers):
+            raise ValueError("modifiers must not repeat")
+        if self.modifiers and self.game_mode != "custom":
+            raise ValueError("modifiers are only offered by the custom-run screen")
         if self.start_run_option not in {"confirm", "embark"}:
             raise ValueError(
                 f"Unsupported start-run option: {self.start_run_option!r}"
@@ -38,6 +46,16 @@ class ResetSpec:
     def uses_seed(self) -> bool:
         """Return whether reset should pass a seed to STS2MCP."""
         return self.game_mode in {"custom", "daily"} and self.run_seed is not None
+
+    @property
+    def enforces_modifiers(self) -> bool:
+        """Return whether reset must reconcile the custom-run modifier set.
+
+        An empty tuple is a real setting -- "every modifier off" -- so custom
+        runs always reconcile.  Only the custom-run screen offers modifiers at
+        all, so no other mode does.
+        """
+        return self.game_mode == "custom"
 
 
 def enabled_option_names(raw_state: RawState) -> set[str]:
@@ -82,6 +100,21 @@ def is_run_state(raw_state: RawState) -> bool:
         state_type not in MENU_STATE_TYPES
         and state_type not in TRANSITIONAL_STATE_TYPES
     )
+
+
+def _selected_modifiers(raw_state: RawState) -> set[str] | None:
+    """Return the ticked modifier keys, or None when the screen reports none.
+
+    A build that does not advertise ``selected`` tells us nothing about the
+    modifier set, and guessing would start runs under silently wrong rules.
+    """
+    selected = raw_state.get("selected")
+    if not isinstance(selected, dict):
+        return None
+    modifiers = selected.get("modifiers")
+    if not isinstance(modifiers, list):
+        return None
+    return {str(key) for key in modifiers}
 
 
 def _ascension_level(raw_state: RawState) -> int | None:
@@ -129,6 +162,7 @@ class ResetController:
     START_POLL_ATTEMPTS = 20
     START_POLL_SECONDS = 0.25
     MAX_ASCENSION_STEPS = 30
+    MAX_MODIFIER_STEPS = 40
 
     def __init__(
         self,
@@ -138,6 +172,7 @@ class ResetController:
         start_poll_attempts: int = START_POLL_ATTEMPTS,
         start_poll_seconds: float = START_POLL_SECONDS,
         max_ascension_steps: int = MAX_ASCENSION_STEPS,
+        max_modifier_steps: int = MAX_MODIFIER_STEPS,
     ) -> None:
         if max_transitions < 1:
             raise ValueError("max_transitions must be at least 1")
@@ -147,6 +182,11 @@ class ResetController:
         self.start_poll_attempts = start_poll_attempts
         self.start_poll_seconds = start_poll_seconds
         self.max_ascension_steps = max_ascension_steps
+        self.max_modifier_steps = max_modifier_steps
+        # Whether the most recent reset joined a run already in progress
+        # instead of starting the one it was asked for.  A reused run ignores
+        # the requested seed, so a seeded experiment has to be able to see it.
+        self.reused_active_run = False
 
     def reset(self, spec: ResetSpec) -> RawState:
         """Start a new run, or explicitly reuse an active run when permitted."""
@@ -154,11 +194,13 @@ class ResetController:
         if character_id is None:
             raise ValueError(f"Unsupported character index: {spec.character}")
 
+        self.reused_active_run = False
         raw_state = extract_raw_state(self.client.get_state())
         if raw_state.get("state_type") in TRANSITIONAL_STATE_TYPES:
             raw_state = self._await_stable_state(raw_state)
         if raw_state.get("state_type") not in MENU_STATE_TYPES:
             if spec.allow_active_run:
+                self.reused_active_run = True
                 return raw_state
             raise STS2ClientError(
                 "Cannot start a fresh run while another run is active; "
@@ -240,6 +282,8 @@ class ResetController:
                 missing_means_selected=menu_screen == "custom_run",
             ):
                 return self._select(raw_state, character_id)
+            if menu_screen == "custom_run" and spec.enforces_modifiers:
+                raw_state = self._apply_modifiers(raw_state, spec.modifiers)
             if spec.ascension is not None:
                 raw_state = self._apply_ascension(raw_state, spec.ascension)
             return self._start_run(
@@ -272,6 +316,60 @@ class ResetController:
                 return raw_state
             raw_state = self._select(raw_state, option)
         return raw_state
+
+    def _apply_modifiers(
+        self,
+        raw_state: RawState,
+        desired: tuple[str, ...],
+    ) -> RawState:
+        """Toggle the custom-run screen until exactly ``desired`` is ticked.
+
+        The screen remembers what was ticked last, including what a human
+        ticked by hand, so the modifier set is state we must reconcile rather
+        than assume.  A run started under the wrong modifiers is still a valid
+        run, which is exactly why this has to be checked: nothing downstream
+        would notice.
+
+        Modifiers come in mutually exclusive groups, so enabling one can
+        disable another.  Each toggle therefore changes one key and re-reads
+        the authoritative set rather than predicting the result.
+        """
+        wanted = set(desired)
+        for _ in range(self.max_modifier_steps):
+            current = _selected_modifiers(raw_state)
+            if current is None:
+                return raw_state
+            difference = current.symmetric_difference(wanted)
+            if not difference:
+                return raw_state
+            key = sorted(difference)[0]
+            raw_state = self._toggle_modifier(raw_state, key)
+        raise STS2ClientError(
+            f"Reset could not settle the custom-run modifiers on {sorted(wanted)}; "
+            f"the screen still reports {sorted(_selected_modifiers(raw_state) or ())}"
+        )
+
+    def _toggle_modifier(self, raw_state: RawState, key: str) -> RawState:
+        """Flip one modifier and return a state carrying the resulting set.
+
+        A toggle response reports ``modifiers`` instead of a full state, so the
+        authoritative set is spliced into the screen we already have; only a
+        response that omits it costs an extra read.
+        """
+        option = f"modifier_{key}"
+        options = enabled_option_names(raw_state)
+        if options and option.casefold() not in options:
+            raise STS2ClientError(
+                f"Custom run does not offer {option!r}; available={sorted(options)}"
+            )
+        response = self.dispatcher.dispatch(MenuSelectAction(option))
+        if isinstance(response, dict) and isinstance(response.get("modifiers"), list):
+            updated = dict(raw_state)
+            selected = dict(updated.get("selected") or {})
+            selected["modifiers"] = list(response["modifiers"])
+            updated["selected"] = selected
+            return updated
+        return extract_raw_state(self.client.get_state())
 
     def _leave_game_over(self, raw_state: RawState) -> RawState:
         """Return to the main menu, tolerating a screen that already left.

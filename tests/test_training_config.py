@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
@@ -73,3 +74,52 @@ def test_runtime_device_rejects_unavailable_cuda(monkeypatch: pytest.MonkeyPatch
 
     with pytest.raises(ValueError, match="CUDA is unavailable"):
         TrainingConfig(device="cuda").validate_runtime_device()
+
+
+def test_the_seed_pool_cycles_one_seed_per_episode():
+    config = TrainingConfig(training_seeds=("A", "B", "C"))
+
+    picked = [config.seed_for_episode(episode) for episode in range(7)]
+
+    assert picked == ["A", "B", "C", "A", "B", "C", "A"]
+
+
+def test_a_resumed_run_continues_the_cycle_rather_than_restarting_it():
+    """The cursor is derived from the episode counter, so resume keeps place."""
+    config = TrainingConfig(training_seeds=("A", "B", "C"))
+
+    assert config.seed_for_episode(100) == config.training_seeds[100 % 3]
+
+
+def test_no_pool_leaves_the_configured_reset_seed_alone():
+    assert TrainingConfig().seed_for_episode(0) is None
+
+
+def test_holdout_seeds_may_never_appear_in_the_training_pool():
+    with pytest.raises(ValueError, match="never be trained on"):
+        TrainingConfig(training_seeds=("A", "B"), holdout_seeds=("B", "C"))
+
+
+def test_a_repeated_training_seed_is_rejected():
+    with pytest.raises(ValueError, match="must not repeat"):
+        TrainingConfig(training_seeds=("A", "A"))
+
+
+def test_a_seed_pool_requires_the_custom_run_screen():
+    with pytest.raises(ValueError, match="custom-run screen"):
+        TrainingPlan(training=TrainingConfig(training_seeds=("A",)))
+
+
+def test_seed_pools_survive_a_serialization_round_trip():
+    plan = TrainingPlan(
+        training=TrainingConfig(
+            training_seeds=("A", "B"), holdout_seeds=("C",)
+        ),
+        reset=ResetSpec(game_mode="custom", modifiers=("MIDAS",)),
+    )
+
+    restored = TrainingPlan.from_dict(json.loads(json.dumps(plan.to_dict())))
+
+    assert restored.training.training_seeds == ("A", "B")
+    assert restored.training.holdout_seeds == ("C",)
+    assert restored.reset.modifiers == ("MIDAS",)

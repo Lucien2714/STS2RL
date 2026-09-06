@@ -38,6 +38,8 @@ class EpisodeMetrics:
     action_errors: int
     optimizer_updates: int
     duration_seconds: float
+    seed: str | None = None
+    reused_run: bool = False
 
     def __post_init__(self) -> None:
         for name in (
@@ -65,6 +67,7 @@ class TrainingMetricsWriter:
         "terminated": "episode/terminated",
         "truncated": "episode/truncated",
         "duration_seconds": "episode/duration_seconds",
+        "reused_run": "episode/reused_run",
         "episode": "training/completed_episodes",
         "optimizer_updates": "training/optimizer_updates",
         "environment_steps": "training/environment_steps",

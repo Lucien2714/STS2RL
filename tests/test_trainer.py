@@ -8,7 +8,7 @@ import pytest
 
 from sts2rl.actions import GameAction
 from sts2rl.agents import EpisodeResult, Transition
-from sts2rl.env import GameObservation
+from sts2rl.env import GameObservation, ResetSpec
 from sts2rl.training import EpisodeMetrics, TrainingConfig, TrainingPlan, TrainingState
 from sts2rl.training.trainer import Trainer
 
@@ -45,9 +45,11 @@ class FakeRunner:
         self.steps = steps
         self.failure = failure
         self.calls = 0
+        self.reset_specs: list[object] = []
+        self.reused_run = False
 
     def run(self, reset_spec: object) -> EpisodeResult:
-        del reset_spec
+        self.reset_specs.append(reset_spec)
         self.calls += 1
         self.agent.environment_steps += self.steps
         self.agent.optimizer_updates += 1
@@ -61,7 +63,11 @@ class FakeRunner:
         )
         if self.failure is not None:
             raise self.failure
-        return _result(self.steps, action_error=self.calls == 1)
+        return _result(
+            self.steps,
+            action_error=self.calls == 1,
+            reused_run=self.reused_run,
+        )
 
 
 class FakeCheckpointManager:
@@ -133,6 +139,7 @@ def _result(
     *,
     action_error: bool,
     error: str = "rejected",
+    reused_run: bool = False,
 ) -> EpisodeResult:
     observation = GameObservation({"state_type": "map", "run": {"floor": 4}})
     info: dict[str, object] = {"action_error": action_error}
@@ -153,6 +160,7 @@ def _result(
         total_reward=2.5,
         terminated=True,
         truncated=False,
+        reused_run=reused_run,
     )
 
 
@@ -310,3 +318,91 @@ def test_no_action_error_event_when_every_action_was_accepted():
     trainer.train()
 
     assert _payloads(writer, "action_errors") == []
+
+
+def _seeded_plan(seeds: tuple[str, ...], total: int) -> TrainingPlan:
+    return TrainingPlan(
+        training=TrainingConfig(
+            total_episodes=total,
+            checkpoint_every=total,
+            tensorboard_enabled=False,
+            training_seeds=seeds,
+        ),
+        reset=ResetSpec(game_mode="custom"),
+    )
+
+
+def _seeded_trainer(plan: TrainingPlan, state: TrainingState | None = None):
+    agent = FakeAgent()
+    runner = FakeRunner(agent)
+    return runner, Trainer(
+        runner,  # type: ignore[arg-type]
+        agent,  # type: ignore[arg-type]
+        FakeCheckpointManager(),  # type: ignore[arg-type]
+        FakeMetricsWriter(),  # type: ignore[arg-type]
+        plan,
+        state,
+    )
+
+
+def test_each_episode_runs_the_next_seed_in_the_pool():
+    runner, trainer = _seeded_trainer(_seeded_plan(("AAA", "BBB"), total=5))
+
+    trainer.train()
+
+    assert [spec.run_seed for spec in runner.reset_specs] == [
+        "AAA",
+        "BBB",
+        "AAA",
+        "BBB",
+        "AAA",
+    ]
+
+
+def test_a_resumed_run_picks_up_where_the_cycle_left_off():
+    """Restarting the cycle would re-train early seeds and starve the rest."""
+    runner, trainer = _seeded_trainer(
+        _seeded_plan(("AAA", "BBB", "CCC"), total=5),
+        TrainingState(completed_episodes=2),
+    )
+
+    trainer.train()
+
+    assert [spec.run_seed for spec in runner.reset_specs] == ["CCC", "AAA", "BBB"]
+
+
+def test_an_unseeded_run_passes_the_configured_reset_unchanged():
+    plan = _plan()
+    runner, trainer = _seeded_trainer(plan)
+
+    trainer.train()
+
+    assert all(spec is plan.reset for spec in runner.reset_specs)
+
+
+def test_metrics_record_which_seed_each_episode_ran():
+    runner, trainer = _seeded_trainer(_seeded_plan(("AAA", "BBB"), total=3))
+
+    trainer.train()
+
+    assert [m.seed for m in trainer.metrics_writer.episodes] == ["AAA", "BBB", "AAA"]
+
+
+def test_a_reused_run_is_flagged_and_reports_no_seed():
+    """Joining a run in progress ignores the seed, so claiming one would lie."""
+    agent = FakeAgent()
+    runner = FakeRunner(agent)
+    runner.reused_run = True
+    trainer = Trainer(
+        runner,  # type: ignore[arg-type]
+        agent,  # type: ignore[arg-type]
+        FakeCheckpointManager(),  # type: ignore[arg-type]
+        FakeMetricsWriter(),  # type: ignore[arg-type]
+        _seeded_plan(("AAA",), total=1),
+    )
+
+    trainer.train()
+
+    recorded = trainer.metrics_writer.episodes[0]
+    assert recorded.reused_run is True
+    assert recorded.seed is None
