@@ -107,35 +107,52 @@ Always present at the top level (except `menu`). Contains everything about the l
 }
 ```
 
-### Card Object (in hand)
+### Card Object
+
+The shared card shape. Used for hand cards, draw/discard/exhaust pile cards, card rewards, shop cards, selection overlays, and the deck entries returned by `GET /api/v1/player`. Contexts add fields on top (a hand card adds `index`, `target_type`, `can_play`, `unplayable_reason`; a deck entry adds `quantity` and `floors_added`).
 
 ```jsonc
 {
-  "index": 0,
   "id": "STRIKE_R",
   "name": "Strike",
-  "type": "Attack",          // Attack, Skill, Power, Status, Curse
-  "cost": "1",               // Energy cost as string ("X" for X-cost)
-  "star_cost": null,         // Regent star cost as string, null if N/A
+  "type": "Attack",             // Attack, Skill, Power, Status, Curse, Quest
+  "rarity": "Basic",            // Basic, Common, Uncommon, Rare, Ancient, Event, Token, Status, Curse, Quest
+  "cost": "1",                  // Energy cost as string ("X" for X-cost)
+  "star_cost": null,            // Regent star cost as string, omitted if N/A
   "description": "Deal 6 damage.",
+  "is_upgraded": false,
+  "current_upgrade_level": 0,   // 0 when unupgraded
+  "max_upgrade_level": 1,       // How far this card can be upgraded
+  "is_upgradable": true,        // False once current_upgrade_level == max_upgrade_level
+  "enchantment": {              // Omitted when the card carries no enchantment
+    "id": "SHARPENED",
+    "name": "Sharpened",
+    "description": "Deal 3 additional damage."
+  },
+  "affliction": null,           // Same shape as enchantment; omitted when unafflicted
+  "keywords": [ /* Keyword Objects */ ]
+}
+```
+
+`current_upgrade_level` matches the field name `GET /api/v1/wiki` already uses, so upgrade level has one spelling across the whole API. Null fields are omitted from JSON, so `enchantment`, `affliction`, and `star_cost` are absent rather than `null` on cards that don't have them.
+
+### Card Object (in hand)
+
+A Card Object plus the fields that only make sense while the card is playable:
+
+```jsonc
+{
+  // ... all Card Object fields ...
+  "index": 0,
   "target_type": "AnyEnemy", // None, Self, AnyEnemy, AllEnemies, etc.
   "can_play": true,
-  "unplayable_reason": null, // e.g. "NotEnoughEnergy", "Unplayable", null if playable
-  "is_upgraded": false,
-  "keywords": [ /* Keyword Objects */ ]
+  "unplayable_reason": null  // e.g. "NotEnoughEnergy", "Unplayable", null if playable
 }
 ```
 
 ### Pile Card Object (draw/discard/exhaust piles)
 
-```jsonc
-{
-  "name": "Strike",
-  "cost": "1",               // Energy cost as string ("X" for X-cost)
-  "star_cost": null,          // Regent star cost as string, null if N/A
-  "description": "Deal 6 damage."
-}
-```
+A plain Card Object — identical to a hand card minus `index`, `target_type`, `can_play`, and `unplayable_reason`. `description` is rendered for the pile the card is in.
 
 ### Orb Object
 
@@ -1008,7 +1025,7 @@ Response format is JSON only (no `format=markdown`).
   "deck": {
     "count": 14,              // Total cards in the deck
     "unique_count": 6,        // Number of grouped entries below
-    "upgraded_count": 3,      // Cards with upgrade_level > 0
+    "upgraded_count": 3,      // Cards with current_upgrade_level > 0
     "counts_by_type": { "Attack": 6, "Skill": 7, "Power": 1 },
     "cards": [ /* Deck Card Objects */ ]
   }
@@ -1019,32 +1036,15 @@ When no run is active (or the local player is not ready yet), the response is `{
 
 #### Deck Card Object
 
-Identical copies are collapsed into one entry with a `quantity`. Two copies group together only when card id, upgrade level, enchantment, affliction, cost, and rules text all match.
+A Card Object plus two deck-only fields. Identical copies are collapsed into one entry with a `quantity`; two copies group together only when card id, upgrade level, enchantment, affliction, cost, and rules text all match.
 
 Entries are sorted by card type (Attack, Skill, Power, Status, Curse), then name, then upgrade level — stable across calls.
 
 ```jsonc
 {
-  "id": "STRIKE",
-  "name": "Strike+",
+  // ... all Card Object fields ...
   "quantity": 2,             // How many identical copies are in the deck
-  "type": "Attack",          // Attack, Skill, Power, Status, Curse, Quest
-  "rarity": "Basic",         // Basic, Common, Uncommon, Rare, Ancient, Event, Token, Status, Curse, Quest
-  "cost": "1",               // "X" for X-cost cards
-  "star_cost": null,         // Regent star cost; null when the card has none
-  "description": "Deal 9 damage.",
-  "is_upgraded": true,
-  "upgrade_level": 1,        // 0 when unupgraded
-  "max_upgrade_level": 1,    // How far this card can be upgraded
-  "is_upgradable": false,    // False once upgrade_level == max_upgrade_level
-  "enchantment": {           // null when the card carries no enchantment
-    "id": "SHARPENED",
-    "name": "Sharpened",
-    "description": "Deal 3 additional damage."
-  },
-  "affliction": null,        // Same shape as enchantment; null when unafflicted
-  "floors_added": [12],      // Floors these copies joined the deck on; omitted for starter cards
-  "keywords": [ /* Keyword Objects */ ]
+  "floors_added": [12]       // Floors these copies joined the deck on; omitted for starter cards
 }
 ```
 

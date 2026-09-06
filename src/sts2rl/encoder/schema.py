@@ -35,10 +35,15 @@ MAP_NUMERIC_FIELDS = (
     "max_distance_to_boss",
 )
 
-GLOBAL_NUMERIC_FIELDS = (
+# Run-level scalars, which describe the situation rather than the player.
+RUN_NUMERIC_FIELDS = (
     "act",
     "floor",
     "ascension",
+    "battle_round",
+)
+
+PLAYER_NUMERIC_FIELDS = (
     "hp",
     "max_hp",
     "hp_ratio",
@@ -58,6 +63,8 @@ GLOBAL_NUMERIC_FIELDS = (
     "orb_slots",
     "orb_empty_slots",
 )
+
+GLOBAL_NUMERIC_FIELDS = RUN_NUMERIC_FIELDS + PLAYER_NUMERIC_FIELDS
 
 ENTITY_CATEGORICAL: Mapping[str, tuple[tuple[str, str], ...]] = MappingProxyType(
     {
@@ -152,7 +159,7 @@ ENTITY_CATEGORICAL: Mapping[str, tuple[tuple[str, str], ...]] = MappingProxyType
 
 ENTITY_NUMERIC_FIELDS: Mapping[str, tuple[str, ...]] = MappingProxyType(
     {
-        "player": GLOBAL_NUMERIC_FIELDS[3:],
+        "player": PLAYER_NUMERIC_FIELDS,
         "card": (
             "cost",
             "star_cost",

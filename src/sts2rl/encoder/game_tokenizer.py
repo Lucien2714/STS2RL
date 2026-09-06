@@ -9,12 +9,14 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 import heapq
+from types import MappingProxyType
 from typing import Callable, Hashable, Mapping, Sequence
 
 import torch
 
 from sts2rl.actions import GameAction
 from sts2rl.encoder.schema import (
+    RUN_NUMERIC_FIELDS,
     ENTITY_CATEGORICAL_FIELDS,
     ENTITY_KINDS,
     ENTITY_NUMERIC_FIELDS,
@@ -149,7 +151,7 @@ class GameTokenizer:
             dtype=torch.long,
         )
         global_numeric, global_numeric_mask = pack_numeric(
-            self._global_numeric(run, player, deck)
+            self._global_numeric(run, player, deck, _mapping(state.get("battle")))
         )
 
         rows = {kind: _EntityRows() for kind in ENTITY_KINDS}
@@ -305,11 +307,13 @@ class GameTokenizer:
         run: Mapping[str, object],
         player: Mapping[str, object],
         deck: Mapping[str, object],
+        battle: Mapping[str, object] = MappingProxyType({}),
     ) -> tuple[NumericFeature, ...]:
         return (
             linear_feature(run.get("act")),
             signed_log_feature(run.get("floor")),
             linear_feature(run.get("ascension")),
+            linear_feature(battle.get("round")),
             signed_log_feature(player.get("hp")),
             signed_log_feature(player.get("max_hp")),
             ratio_feature(player.get("hp"), player.get("max_hp")),
@@ -343,7 +347,7 @@ class GameTokenizer:
                 self.vocabulary.lookup("characters", _text(player.get("character"))),
                 self.vocabulary.lookup("owner_types", "player"),
             ],
-            self._global_numeric({}, player, deck)[3:],
+            self._global_numeric({}, player, deck)[len(RUN_NUMERIC_FIELDS):],
             activity=_activity(player),
         )
         return EntityReference("player", index)
@@ -468,7 +472,7 @@ class GameTokenizer:
     ) -> int:
         return rows["card"].append(
             [
-                self.vocabulary.lookup("cards", _identity(card)),
+                self.vocabulary.lookup_first("cards", _identity_keys(card)),
                 self.vocabulary.lookup("card_types", _text(card.get("type"))),
                 self.vocabulary.lookup("rarities", _text(card.get("rarity"))),
                 self.vocabulary.lookup("card_zones", zone),
@@ -503,7 +507,7 @@ class GameTokenizer:
         for potion in _records(player.get("potions")):
             index = rows["potion"].append(
                 [
-                    self.vocabulary.lookup("potions", _identity(potion)),
+                    self.vocabulary.lookup_first("potions", _identity_keys(potion)),
                     self.vocabulary.lookup(
                         "target_types", _text(potion.get("target_type"))
                     ),
@@ -520,7 +524,7 @@ class GameTokenizer:
         for position, orb in enumerate(_records(player.get("orbs"))):
             rows["orb"].append(
                 [
-                    self.vocabulary.lookup("orbs", _identity(orb)),
+                    self.vocabulary.lookup_first("orbs", _identity_keys(orb)),
                     self.vocabulary.lookup("entity_zones", "battle"),
                 ],
                 [
@@ -539,7 +543,7 @@ class GameTokenizer:
     ) -> int:
         return rows["relic"].append(
             [
-                self.vocabulary.lookup("relics", _identity(relic)),
+                self.vocabulary.lookup_first("relics", _identity_keys(relic)),
                 self.vocabulary.lookup("rarities", _text(relic.get("rarity"))),
                 self.vocabulary.lookup("entity_zones", zone),
             ],
@@ -567,7 +571,7 @@ class GameTokenizer:
         for position, pet in enumerate(_records(player.get("pets"))):
             index = rows["pet"].append(
                 [
-                    self.vocabulary.lookup("monsters", _identity(pet)),
+                    self.vocabulary.lookup_first("monsters", _identity_keys(pet)),
                     self.vocabulary.lookup("owner_types", "pet"),
                     self.vocabulary.lookup("entity_zones", "battle"),
                 ],
@@ -583,7 +587,7 @@ class GameTokenizer:
         for position, enemy in enumerate(_records(battle.get("enemies"))):
             index = rows["enemy"].append(
                 [
-                    self.vocabulary.lookup("monsters", _identity(enemy, include_entity=False)),
+                    self.vocabulary.lookup_first("monsters", _identity_keys(enemy, include_entity=False)),
                     self.vocabulary.lookup("owner_types", "enemy"),
                     self.vocabulary.lookup("entity_zones", "battle"),
                 ],
@@ -618,7 +622,7 @@ class GameTokenizer:
         for power in powers:
             rows["power"].append(
                 [
-                    self.vocabulary.lookup("powers", _identity(power)),
+                    self.vocabulary.lookup_first("powers", _identity_keys(power)),
                     self.vocabulary.lookup("power_types", _text(power.get("type"))),
                     self.vocabulary.lookup("owner_types", owner_type),
                     self.vocabulary.lookup("entity_zones", "battle"),
@@ -748,7 +752,7 @@ class GameTokenizer:
             enabled = option.get("is_enabled")
             index = rows["rest_option"].append(
                 [
-                    self.vocabulary.lookup("rest_options", _identity(option)),
+                    self.vocabulary.lookup_first("rest_options", _identity_keys(option)),
                     self.vocabulary.lookup("entity_zones", "rest"),
                 ],
                 [_bool_feature(enabled)],
@@ -1238,12 +1242,28 @@ def _normalized_text(value: object) -> str | None:
 
 
 def _identity(record: Mapping[str, object], *, include_entity: bool = True) -> str | None:
-    keys = ("id", "name") if not include_entity else ("id", "name", "entity_id")
-    for key in keys:
-        value = _text(record.get(key))
-        if value:
-            return value
+    """Return the single best identifier for a record."""
+    for value in _identity_keys(record, include_entity=include_entity):
+        return value
     return None
+
+
+def _identity_keys(
+    record: Mapping[str, object],
+    *,
+    include_entity: bool = True,
+) -> tuple[str, ...]:
+    """Return every identifier a record can be recognized by, best first.
+
+    The API does not always spell an id the way the bundled tables do — a
+    status arrives as ``STRENGTH_POWER`` against a table holding ``STRENGTH``
+    — so the display name is kept as a fallback rather than dropping the
+    entity as unknown.
+    """
+    keys = ("id", "name", "entity_id") if include_entity else ("id", "name")
+    return tuple(
+        value for value in (_text(record.get(key)) for key in keys) if value
+    )
 
 
 def _integer(value: object) -> int | None:

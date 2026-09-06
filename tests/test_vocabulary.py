@@ -124,3 +124,41 @@ def test_vocabulary_fingerprint_is_deterministic_and_content_sensitive():
     assert first.fingerprint() == second.fingerprint()
     assert len(first.fingerprint()) == 64
     assert changed.fingerprint() != first.fingerprint()
+
+
+def test_camel_case_enums_resolve_without_breaking_concatenated_tokens():
+    """The API sends CamelCase where tables hold snake_case, and vice versa."""
+    vocabulary = GameVocabulary.from_bundled_data()
+
+    # tables hold DEBUFF_STRONG / CARD_DEBUFF / DEATH_BLOW
+    for camel in ("DebuffStrong", "CardDebuff", "DeathBlow"):
+        assert vocabulary.lookup("intents", camel) > UNKNOWN_INDEX
+
+    # ...while map_node_types holds the concatenated "restsite"
+    assert vocabulary.lookup("map_node_types", "RestSite") > UNKNOWN_INDEX
+    assert vocabulary.lookup("map_node_types", "restsite") > UNKNOWN_INDEX
+
+
+def test_lookup_first_falls_back_from_an_unrecognized_id_to_the_name():
+    """Statuses arrive as STRENGTH_POWER against a table holding STRENGTH."""
+    vocabulary = GameVocabulary.from_bundled_data()
+
+    assert vocabulary.lookup("powers", "STRENGTH_POWER") == UNKNOWN_INDEX
+    assert vocabulary.lookup_first(
+        "powers", ["STRENGTH_POWER", "Strength"]
+    ) == vocabulary.lookup("powers", "STRENGTH")
+
+
+def test_lookup_first_separates_absent_values_from_unrecognized_ones():
+    vocabulary = GameVocabulary.from_bundled_data()
+
+    assert vocabulary.lookup_first("powers", []) == PAD_INDEX
+    assert vocabulary.lookup_first("powers", [None, None]) == PAD_INDEX
+    assert vocabulary.lookup_first("powers", ["NOPE", "Nope"]) == UNKNOWN_INDEX
+
+
+def test_no_state_type_token_the_api_cannot_produce():
+    """/player carries no state_type, so the old player_detail token is gone."""
+    vocabulary = GameVocabulary.from_bundled_data()
+
+    assert vocabulary.lookup("state_types", "player_detail") == UNKNOWN_INDEX

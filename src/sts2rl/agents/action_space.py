@@ -174,7 +174,12 @@ class LegalActionProvider:
             for index in [self._index(item)]
             if index is not None
         ]
-        if shop.get("can_proceed") is True:
+        if shop.get("can_proceed") is True or (
+            not actions and self._records(shop.get("items"))
+        ):
+            # An open shop the player cannot afford anything in reports
+            # can_proceed false while still accepting proceed, which would
+            # otherwise strand the run.  Verified against the live API.
             actions.append(GameAction("proceed"))
         actions.extend(self._discard_potion_actions(state))
         return actions

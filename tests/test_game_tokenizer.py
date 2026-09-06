@@ -559,3 +559,68 @@ def test_a_missing_deck_leaves_deck_columns_masked(tokenizer: GameTokenizer):
 
     assert tokenized.global_numeric_mask[total].item() is False
     assert tokenized.entities["card"].entity_count == 0
+
+
+def test_battle_round_reaches_the_global_features(tokenizer: GameTokenizer):
+    state = {
+        "state_type": "monster",
+        "run": {"act": 1, "floor": 3},
+        "player": _base_player(),
+        "battle": {"round": 4, "enemies": []},
+    }
+
+    tokenized = tokenizer.tokenize_state(GameObservation(state))
+    column = _column(GLOBAL_NUMERIC_FIELDS, "battle_round")
+
+    assert tokenized.global_numeric[column].item() == 4.0
+    assert tokenized.global_numeric_mask[column].item() is True
+
+
+def test_battle_round_is_missing_outside_combat(tokenizer: GameTokenizer):
+    tokenized = tokenizer.tokenize_state(
+        GameObservation({"state_type": "map", "player": _base_player()})
+    )
+    column = _column(GLOBAL_NUMERIC_FIELDS, "battle_round")
+
+    assert tokenized.global_numeric_mask[column].item() is False
+
+
+def test_statuses_resolve_through_the_suffixed_ids_the_api_sends(
+    tokenizer: GameTokenizer,
+    vocabulary: GameVocabulary,
+):
+    """Live statuses arrive as STRENGTH_POWER, which the table does not hold."""
+    state = {
+        "state_type": "monster",
+        "player": _base_player(
+            status=[{"id": "STRENGTH_POWER", "name": "Strength",
+                     "type": "Buff", "amount": 2}],
+        ),
+        "battle": {
+            "enemies": [
+                {
+                    "entity_id": "JAW_WORM_0",
+                    "name": "Jaw Worm",
+                    "hp": 40,
+                    "status": [{"id": "VULNERABLE_POWER", "name": "Vulnerable",
+                                "type": "Debuff", "amount": 2}],
+                    "intents": [{"type": "DebuffStrong", "label": ""}],
+                }
+            ]
+        },
+    }
+
+    tokenized = tokenizer.tokenize_state(GameObservation(state))
+    powers = tokenized.entities["power"]
+    intents = tokenized.entities["intent"]
+    pid = _column(ENTITY_CATEGORICAL_FIELDS["power"], "power_id")
+    iid = _column(ENTITY_CATEGORICAL_FIELDS["intent"], "intent_id")
+
+    assert sorted(powers.categorical[:, pid].tolist()) == sorted(
+        [vocabulary.lookup("powers", "STRENGTH"),
+         vocabulary.lookup("powers", "VULNERABLE")]
+    )
+    assert UNKNOWN_INDEX not in powers.categorical[:, pid].tolist()
+    assert intents.categorical[0, iid].item() == vocabulary.lookup(
+        "intents", "DEBUFF_STRONG"
+    )

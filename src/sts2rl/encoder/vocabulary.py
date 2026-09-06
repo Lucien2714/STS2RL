@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 import hashlib
 import json
+import re
 from pathlib import Path
 from types import MappingProxyType
 from typing import ClassVar, Iterable, Mapping
@@ -18,9 +19,22 @@ PAD_TOKEN = "<pad>"
 UNKNOWN_TOKEN = "<unknown>"
 
 
+_CAMEL_BOUNDARY = re.compile(r"(?<=[a-z0-9])(?=[A-Z])")
+
+
 def normalize_token(value: str) -> str:
     """Normalize a categorical value for case-insensitive lookup."""
     return value.strip().casefold()
+
+
+def snake_variant(value: str) -> str:
+    """Return the underscore-separated reading of a CamelCase value.
+
+    This is a second spelling tried only when the plain one misses, never the
+    canonical form: tables hold both ``restsite`` and ``DEBUFF_STRONG``, so
+    rewriting every token this way would fix one and break the other.
+    """
+    return normalize_token(_CAMEL_BOUNDARY.sub("_", value.strip()))
 
 
 @dataclass(frozen=True)
@@ -47,10 +61,19 @@ class TokenVocabulary:
         return cls(indexed_tokens, MappingProxyType(indices))
 
     def lookup(self, token: str | None) -> int:
-        """Return PAD for missing values and UNKNOWN for unseen values."""
+        """Return PAD for missing values and UNKNOWN for unseen values.
+
+        A miss is retried against the CamelCase reading, because the game's
+        runtime enums are CamelCase where the bundled tables are snake_case:
+        the API reports an intent as ``DebuffStrong`` for ``DEBUFF_STRONG``.
+        """
         if token is None:
             return PAD_INDEX
-        return self._indices.get(normalize_token(str(token)), UNKNOWN_INDEX)
+        text = str(token)
+        index = self._indices.get(normalize_token(text))
+        if index is not None:
+            return index
+        return self._indices.get(snake_variant(text), UNKNOWN_INDEX)
 
     def token(self, index: int) -> str:
         """Return the canonical token stored at an index."""
@@ -135,7 +158,6 @@ class GameVocabulary:
                 "crystal_sphere",
                 "game_over",
                 "overlay",
-                "player_detail",
             ),
             "action_types": (
                 "menu_select",
@@ -381,6 +403,26 @@ class GameVocabulary:
             normalize_token(str(token)),
             UNKNOWN_INDEX,
         )
+
+    def lookup_first(self, table_name: str, candidates: Iterable[object]) -> int:
+        """Return the index of the first candidate that resolves.
+
+        The API does not always name a thing the way the bundled data does:
+        statuses arrive as ``STRENGTH_POWER`` where the table holds
+        ``STRENGTH``, while the display name still matches.  Trying the
+        identifiers in order recovers those instead of discarding the entity as
+        unknown.  All-missing yields PAD; present-but-unrecognized yields
+        UNKNOWN.
+        """
+        seen_any = False
+        for candidate in candidates:
+            if candidate is None:
+                continue
+            seen_any = True
+            index = self.lookup(table_name, candidate)
+            if index != UNKNOWN_INDEX:
+                return index
+        return UNKNOWN_INDEX if seen_any else PAD_INDEX
 
     def size(self, table_name: str) -> int:
         """Return the embedding table size including PAD and UNKNOWN.

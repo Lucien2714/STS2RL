@@ -251,3 +251,63 @@ def test_crystal_sphere_requires_selecting_tool_before_clicking_cell():
 def test_non_automatable_states_raise_explicitly(state_type):
     with pytest.raises(NoLegalActionsError, match="No safe legal actions"):
         LegalActionProvider().require_candidates({"state_type": state_type})
+
+
+def test_an_unaffordable_open_shop_can_still_be_left():
+    """can_proceed is false there, but the live API accepts proceed anyway."""
+    state = {
+        "state_type": "shop",
+        "player": {"gold": 28, "potions": []},
+        "shop": {
+            "can_proceed": False,
+            "items": [
+                {"index": 0, "category": "card", "price": 149,
+                 "is_stocked": True, "can_afford": False},
+                {"index": 1, "category": "relic", "price": 150,
+                 "is_stocked": False, "can_afford": False},
+            ],
+        },
+    }
+
+    actions = LegalActionProvider().candidates(state)
+
+    assert [a.to_dict() for a in actions] == [{"type": "proceed"}]
+
+
+def test_an_affordable_shop_does_not_advertise_proceed_without_the_flag():
+    state = {
+        "state_type": "shop",
+        "player": {"gold": 500, "potions": []},
+        "shop": {
+            "can_proceed": False,
+            "items": [
+                {"index": 0, "category": "card", "price": 50,
+                 "is_stocked": True, "can_afford": True},
+            ],
+        },
+    }
+
+    actions = [a.to_dict() for a in LegalActionProvider().candidates(state)]
+
+    assert {"type": "shop_purchase", "index": 0} in actions
+    assert {"type": "proceed"} not in actions
+
+
+def test_a_shop_that_has_not_loaded_its_inventory_offers_nothing():
+    """No items means the screen is still opening, not that it is a dead end."""
+    state = {
+        "state_type": "shop",
+        "player": {"gold": 28, "potions": []},
+        "shop": {"can_proceed": False, "items": [], "error": "inventory not ready"},
+    }
+
+    assert LegalActionProvider().candidates(state) == ()
+
+
+def test_an_opening_treasure_chest_is_not_skipped_by_a_proceed_fallback():
+    state = {
+        "state_type": "treasure",
+        "treasure": {"message": "Opening chest..."},
+    }
+
+    assert LegalActionProvider().candidates(state) == ()
