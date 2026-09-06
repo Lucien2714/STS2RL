@@ -9,7 +9,7 @@ and PPO rollout integration described here are implemented.
 ## Data flow
 
 ```text
-GameEnv raw state
+GameEnv raw state + /player deck
                  |
                  v
          GameObservation
@@ -37,17 +37,17 @@ The boundary is deliberately split into deterministic and trainable work:
 
 ## GameObservation
 
-`GameObservation` wraps the one STS2MCP state response:
+`GameObservation` combines the two STS2MCP responses the agent needs:
 
 ```python
-GameObservation(raw_state=raw_state)
+GameObservation(raw_state=raw_state, player_detail=player_detail)
 ```
 
 `raw_state` contains the current screen, legal-decision context, player state,
-and combat or map data. The API exposes no separate player-detail response and
-no master deck, so this is everything the agent sees. It stays a type of its
-own so enrichment can be added later without changing signatures between the
-environment and the agent.
+and combat or map data. `player_detail` is the `GET /api/v1/player` response;
+its `deck` block is the only source of the run-level master deck, since game
+state exposes the piles only during combat. It is `None` on terminal states,
+before a run starts, and on builds without the endpoint.
 
 `GameObservation` is a frozen dataclass, but the raw dictionaries inside it are
 not copied or recursively frozen. Callers must treat them as read-only.
@@ -622,7 +622,7 @@ combinations.
 ## Responsibility summary
 
 ```text
-GameObservation   the one raw state the API returns
+GameObservation   raw state plus the run-level deck
 GameVocabulary    stable string-to-index identity
 numeric.py        finite values, scaling, and missing masks
 GameTokenizer     deterministic state, action, and full-map parsing

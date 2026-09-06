@@ -15,6 +15,7 @@ from sts2rl.encoder import (
     GLOBAL_NUMERIC_FIELDS,
     GameTokenizer,
     GameVocabulary,
+    PAD_INDEX,
     UNKNOWN_INDEX,
 )
 from sts2rl.env import GameObservation
@@ -433,3 +434,128 @@ def test_free_text_does_not_change_tokenized_state(tokenizer: GameTokenizer):
         tokenized_first.entities["enemy"].numeric,
         tokenized_second.entities["enemy"].numeric,
     )
+
+
+def _player_detail(cards, **deck_changes):
+    deck = {
+        "count": sum(c.get("quantity", 1) for c in cards),
+        "unique_count": len(cards),
+        "upgraded_count": sum(
+            c.get("quantity", 1) for c in cards if c.get("upgrade_level")
+        ),
+        "cards": cards,
+    }
+    deck.update(deck_changes)
+    return {"in_run": True, "deck": deck}
+
+
+def _deck_card(**changes):
+    card = {
+        "id": "STRIKE_IRONCLAD",
+        "name": "Strike",
+        "type": "Attack",
+        "rarity": "Basic",
+        "cost": "1",
+        "star_cost": None,
+        "description": "Deal 6 damage.",
+        "is_upgraded": False,
+        "upgrade_level": 0,
+        "max_upgrade_level": 1,
+        "is_upgradable": True,
+        "enchantment": None,
+        "affliction": None,
+        "quantity": 5,
+    }
+    card.update(changes)
+    return card
+
+
+def test_master_deck_becomes_deck_zone_rows_with_reported_quantities(
+    tokenizer: GameTokenizer,
+    vocabulary: GameVocabulary,
+):
+    observation = GameObservation(
+        {"state_type": "map", "player": _base_player()},
+        _player_detail(
+            [
+                _deck_card(),
+                _deck_card(
+                    id="BASH", name="Bash", cost="2", quantity=1,
+                    upgrade_level=1, is_upgraded=True, is_upgradable=False,
+                ),
+            ]
+        ),
+    )
+
+    tokenized = tokenizer.tokenize_state(observation)
+    cards = tokenized.entities["card"]
+    zone = _column(ENTITY_CATEGORICAL_FIELDS["card"], "card_zone")
+    ident = _column(ENTITY_CATEGORICAL_FIELDS["card"], "card_id")
+    count = _column(ENTITY_NUMERIC_FIELDS["card"], "copy_count")
+    level = _column(ENTITY_NUMERIC_FIELDS["card"], "upgrade_level")
+    deck_rows = cards.categorical[:, zone] == vocabulary.lookup("card_zones", "deck")
+
+    assert deck_rows.sum().item() == 2
+    assert vocabulary.lookup("cards", "STRIKE_IRONCLAD") in (
+        cards.categorical[deck_rows, ident].tolist()
+    )
+    assert sorted(cards.numeric[deck_rows, count].tolist()) == pytest.approx(
+        sorted([math.log1p(5), math.log1p(1)])
+    )
+    assert sorted(cards.numeric[deck_rows, level].tolist()) == [0.0, 1.0]
+
+
+def test_deck_totals_reach_the_global_features(tokenizer: GameTokenizer):
+    observation = GameObservation(
+        {"state_type": "map", "player": _base_player()},
+        _player_detail([_deck_card(quantity=7, upgrade_level=1)]),
+    )
+
+    tokenized = tokenizer.tokenize_state(observation)
+    total = _column(GLOBAL_NUMERIC_FIELDS, "deck_count")
+    upgraded = _column(GLOBAL_NUMERIC_FIELDS, "deck_upgraded_count")
+
+    assert tokenized.global_numeric[total].item() == pytest.approx(math.log1p(7))
+    assert tokenized.global_numeric[upgraded].item() == pytest.approx(math.log1p(7))
+
+
+def test_enchantment_and_affliction_are_distinguished_from_absence(
+    tokenizer: GameTokenizer,
+    vocabulary: GameVocabulary,
+):
+    observation = GameObservation(
+        {"state_type": "map", "player": _base_player()},
+        _player_detail(
+            [
+                _deck_card(quantity=1),
+                _deck_card(
+                    id="BASH",
+                    quantity=1,
+                    enchantment={"id": "ADROIT", "name": "Adroit"},
+                    affliction={"id": "SOMETHING", "name": "Something"},
+                ),
+            ]
+        ),
+    )
+
+    tokenized = tokenizer.tokenize_state(observation)
+    cards = tokenized.entities["card"]
+    zone = _column(ENTITY_CATEGORICAL_FIELDS["card"], "card_zone")
+    ench = _column(ENTITY_CATEGORICAL_FIELDS["card"], "enchantment_id")
+    afflicted = _column(ENTITY_NUMERIC_FIELDS["card"], "is_afflicted")
+    deck_rows = cards.categorical[:, zone] == vocabulary.lookup("card_zones", "deck")
+
+    assert sorted(cards.categorical[deck_rows, ench].tolist()) == sorted(
+        [PAD_INDEX, vocabulary.lookup("enchantments", "ADROIT")]
+    )
+    assert sorted(cards.numeric[deck_rows, afflicted].tolist()) == [0.0, 1.0]
+
+
+def test_a_missing_deck_leaves_deck_columns_masked(tokenizer: GameTokenizer):
+    tokenized = tokenizer.tokenize_state(
+        GameObservation({"state_type": "map", "player": _base_player()})
+    )
+    total = _column(GLOBAL_NUMERIC_FIELDS, "deck_count")
+
+    assert tokenized.global_numeric_mask[total].item() is False
+    assert tokenized.entities["card"].entity_count == 0

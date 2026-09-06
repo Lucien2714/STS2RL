@@ -18,8 +18,11 @@ The environment deliberately does not encode state or calculate reward. Those
 layers consume `RawState` after the raw transition boundary is stable.
 
 `EpisodeRunner` turns that raw boundary into the Agent-facing observation by
-wrapping the state directly. The API has one state response and no separate
-player-detail endpoint, so an observation costs no extra request.
+pairing the state with `GET /api/v1/player`, the only source of the run-level
+master deck. That snapshot is reused for the duration of a battle, because no
+mid-battle screen can add, remove, or upgrade a card; off-battle steps refetch
+it. A build that does not serve the endpoint warns once and continues without
+the deck.
 
 `GameEnv.step` also issues no follow-up read: every action response embeds the
 resulting state, and a rejected action returns the unchanged state alongside

@@ -74,6 +74,18 @@ class GameEnv:
         """Return and validate the current raw STS2MCP state."""
         return extract_raw_state(self.client.get_state())
 
+    def get_player_detail(self) -> RawState | None:
+        """Return run-level player detail, or None when no run is active.
+
+        ``in_run: false`` arrives as a normal HTTP 200 body rather than an
+        error, so it is translated to None here instead of reaching callers as
+        a payload with no deck in it.
+        """
+        detail = self.client.get_player_detail()
+        if not isinstance(detail, dict) or not detail.get("in_run"):
+            return None
+        return detail
+
     def is_end_state(self) -> bool:
         """Return whether the current backend state is game over."""
         return self._is_done(self.get_state())

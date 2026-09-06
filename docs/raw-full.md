@@ -7,6 +7,7 @@ HTTP API served by the STS2_MCP mod on `localhost:15526`. No authentication. Loc
 - `POST /api/v1/singleplayer` — perform a game action
 - `GET  /api/v1/multiplayer` — read multiplayer game state
 - `POST /api/v1/multiplayer` — perform a multiplayer action
+- `GET  /api/v1/player` — read run-level player detail incl. the full deck
 - `GET  /api/v1/profile` — read current profile progress
 - `GET  /api/v1/compendium` — read Compendium-shaped profile progress
 - `GET  /api/v1/wiki` — fuzzy-search discovered card/relic wiki entries
@@ -976,6 +977,74 @@ Prevents soft-locks when an unrecognized overlay is active.
   },
   "run": { ... },
   "player": { ... }
+}
+```
+
+---
+
+## Player Detail
+
+### `GET /api/v1/player`
+
+Run-level detail for the local player. Independent of the singleplayer and multiplayer run endpoints — it only reads the local player and enqueues nothing, so it works in either mode and never returns 409.
+
+This is the only endpoint that exposes the **master deck**. State responses only show combat piles (hand / draw / discard / exhaust), which hold per-combat copies; `deck` here is the run-level card list at any point, including mid-combat.
+
+Combat-only detail (block, energy, hand, piles, orbs, status) is intentionally *not* repeated here — read game state for that.
+
+Response format is JSON only (no `format=markdown`).
+
+```jsonc
+{
+  "in_run": true,
+  "is_multiplayer": false,
+  "character": "The Ironclad",
+  "hp": 72,
+  "max_hp": 80,
+  "gold": 99,
+  "relics": [ /* same shape as player.relics in game state */ ],
+  "potions": [ /* same shape as player.potions in game state */ ],
+  "max_potion_slots": 3,
+  "deck": {
+    "count": 14,              // Total cards in the deck
+    "unique_count": 6,        // Number of grouped entries below
+    "upgraded_count": 3,      // Cards with upgrade_level > 0
+    "counts_by_type": { "Attack": 6, "Skill": 7, "Power": 1 },
+    "cards": [ /* Deck Card Objects */ ]
+  }
+}
+```
+
+When no run is active (or the local player is not ready yet), the response is `{ "in_run": false, "error": "..." }` with HTTP 200.
+
+#### Deck Card Object
+
+Identical copies are collapsed into one entry with a `quantity`. Two copies group together only when card id, upgrade level, enchantment, affliction, cost, and rules text all match.
+
+Entries are sorted by card type (Attack, Skill, Power, Status, Curse), then name, then upgrade level — stable across calls.
+
+```jsonc
+{
+  "id": "STRIKE",
+  "name": "Strike+",
+  "quantity": 2,             // How many identical copies are in the deck
+  "type": "Attack",          // Attack, Skill, Power, Status, Curse, Quest
+  "rarity": "Basic",         // Basic, Common, Uncommon, Rare, Ancient, Event, Token, Status, Curse, Quest
+  "cost": "1",               // "X" for X-cost cards
+  "star_cost": null,         // Regent star cost; null when the card has none
+  "description": "Deal 9 damage.",
+  "is_upgraded": true,
+  "upgrade_level": 1,        // 0 when unupgraded
+  "max_upgrade_level": 1,    // How far this card can be upgraded
+  "is_upgradable": false,    // False once upgrade_level == max_upgrade_level
+  "enchantment": {           // null when the card carries no enchantment
+    "id": "SHARPENED",
+    "name": "Sharpened",
+    "description": "Deal 3 additional damage."
+  },
+  "affliction": null,        // Same shape as enchantment; null when unafflicted
+  "floors_added": [12],      // Floors these copies joined the deck on; omitted for starter cards
+  "keywords": [ /* Keyword Objects */ ]
 }
 ```
 

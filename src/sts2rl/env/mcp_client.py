@@ -178,6 +178,15 @@ class STS2Client:
     def get_multiplayer_state(self, format: ResponseFormat = "json") -> Any:
         return self._get("multiplayer", {"format": format})
 
+    def get_player_detail(self) -> dict[str, Any]:
+        """Read run-level player detail, the only source of the master deck.
+
+        JSON only, and independent of the singleplayer/multiplayer routing, so
+        it never returns 409.  With no active run it answers HTTP 200 with
+        ``in_run: false`` rather than an error status.
+        """
+        return self._get("player")
+
     def get_profile(self) -> dict[str, Any]:
         return self._get("profile")
 

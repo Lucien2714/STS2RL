@@ -135,6 +135,7 @@ class GameTokenizer:
         state = observation.raw_state
         player = _mapping(state.get("player"))
         run = _mapping(state.get("run"))
+        deck = _mapping(_mapping(observation.player_detail).get("deck"))
 
         global_values = {
             "state_type": _text(state.get("state_type")),
@@ -148,13 +149,13 @@ class GameTokenizer:
             dtype=torch.long,
         )
         global_numeric, global_numeric_mask = pack_numeric(
-            self._global_numeric(run, player)
+            self._global_numeric(run, player, deck)
         )
 
         rows = {kind: _EntityRows() for kind in ENTITY_KINDS}
         registry = _ReferenceRegistry()
-        player_ref = self._add_player(rows, player)
-        self._add_cards(rows, state, player, registry)
+        player_ref = self._add_player(rows, player, deck)
+        self._add_cards(rows, state, player, deck, registry)
         self._add_inventory(rows, player, registry)
         self._add_combat_entities(rows, state, player, player_ref, registry)
         self._add_screen_entities(rows, state, registry)
@@ -303,6 +304,7 @@ class GameTokenizer:
         self,
         run: Mapping[str, object],
         player: Mapping[str, object],
+        deck: Mapping[str, object],
     ) -> tuple[NumericFeature, ...]:
         return (
             linear_feature(run.get("act")),
@@ -318,6 +320,9 @@ class GameTokenizer:
             ratio_feature(player.get("energy"), player.get("max_energy")),
             linear_feature(player.get("stars")),
             linear_feature(player.get("max_potion_slots")),
+            signed_log_feature(deck.get("count")),
+            signed_log_feature(deck.get("unique_count")),
+            signed_log_feature(deck.get("upgraded_count")),
             signed_log_feature(player.get("draw_pile_count")),
             signed_log_feature(player.get("discard_pile_count")),
             signed_log_feature(player.get("exhaust_pile_count")),
@@ -329,6 +334,7 @@ class GameTokenizer:
         self,
         rows: dict[str, _EntityRows],
         player: Mapping[str, object],
+        deck: Mapping[str, object],
     ) -> EntityReference | None:
         if not player:
             return None
@@ -337,7 +343,7 @@ class GameTokenizer:
                 self.vocabulary.lookup("characters", _text(player.get("character"))),
                 self.vocabulary.lookup("owner_types", "player"),
             ],
-            self._global_numeric({}, player)[3:],
+            self._global_numeric({}, player, deck)[3:],
             activity=_activity(player),
         )
         return EntityReference("player", index)
@@ -347,8 +353,18 @@ class GameTokenizer:
         rows: dict[str, _EntityRows],
         state: Mapping[str, object],
         player: Mapping[str, object],
+        deck: Mapping[str, object],
         registry: _ReferenceRegistry,
     ) -> None:
+        # /player already collapses identical copies and reports a quantity,
+        # so these rows are pre-grouped rather than grouped here.
+        for card in _records(deck.get("cards")):
+            self._append_card(
+                rows,
+                card,
+                "deck",
+                copy_count=_integer(card.get("quantity")) or 1,
+            )
         self._add_individual_cards(
             rows,
             _records(player.get("hand")),
@@ -458,12 +474,16 @@ class GameTokenizer:
                 self.vocabulary.lookup("card_zones", zone),
                 self.vocabulary.lookup("entity_zones", zone),
                 self.vocabulary.lookup("target_types", _text(card.get("target_type"))),
+                self.vocabulary.lookup("enchantments", _attachment_id(card, "enchantment")),
                 self.vocabulary.lookup("selection_types", selection_type),
             ],
             [
                 _cost_feature(card.get("cost")),
                 _cost_feature(card.get("star_cost")),
                 _upgrade_feature(card),
+                linear_feature(card.get("max_upgrade_level")),
+                _bool_feature(card.get("is_upgradable")),
+                _bool_feature(_has_attachment(card, "affliction")),
                 signed_log_feature(copy_count),
                 linear_feature(position),
                 _bool_feature(card.get("can_play")),
@@ -1248,11 +1268,29 @@ def _cost_feature(value: object) -> NumericFeature:
 
 
 def _upgrade_feature(card: Mapping[str, object]) -> NumericFeature:
-    level = card.get("current_upgrade_level")
-    if level is not None:
-        return linear_feature(level)
-    upgraded = card.get("is_upgraded")
-    return _bool_feature(upgraded)
+    """Prefer an exact upgrade level; fall back to the upgraded flag.
+
+    Deck cards report ``upgrade_level``; hand and selection cards report only
+    ``is_upgraded``; pile cards report neither.
+    """
+    for key in ("upgrade_level", "current_upgrade_level"):
+        level = card.get(key)
+        if level is not None:
+            return linear_feature(level)
+    return _bool_feature(card.get("is_upgraded"))
+
+
+def _attachment_id(card: Mapping[str, object], key: str) -> str | None:
+    """Return an enchantment or affliction identifier attached to a card."""
+    attachment = _mapping(card.get(key))
+    return _text(attachment.get("id") or attachment.get("name"))
+
+
+def _has_attachment(card: Mapping[str, object], key: str) -> bool | None:
+    """Return whether a card carries an attachment, or None when unreported."""
+    if key not in card:
+        return None
+    return isinstance(card.get(key), dict)
 
 
 def _coordinate_ratio(value: object, size: object) -> NumericFeature:

@@ -43,10 +43,33 @@ class FixedReward:
         return -1.0, {"type": "error", "error": str(error), "total": -1.0}
 
 
+def _deck(count=10):
+    return {
+        "in_run": True,
+        "deck": {
+            "count": count,
+            "unique_count": 1,
+            "upgraded_count": 0,
+            "cards": [
+                {
+                    "id": "STRIKE_IRONCLAD",
+                    "name": "Strike",
+                    "type": "Attack",
+                    "rarity": "Basic",
+                    "cost": "1",
+                    "quantity": count,
+                    "upgrade_level": 0,
+                }
+            ],
+        },
+    }
+
+
 class FakeEnv:
     def __init__(self):
         self.state = {"state_type": "map", "map": {"next_options": [{"index": 0}]}}
         self.state_reads = 0
+        self.deck_reads = 0
 
     def reset(self, spec=None):
         return self.state
@@ -54,6 +77,10 @@ class FakeEnv:
     def get_state(self):
         self.state_reads += 1
         return self.state
+
+    def get_player_detail(self):
+        self.deck_reads += 1
+        return _deck()
 
     def step(self, action: GameAction):
         assert action.to_dict() == {"type": "choose_map_node", "index": 0}
@@ -173,3 +200,81 @@ def test_runner_can_choose_on_the_last_allowed_attempt(max_refreshes):
     assert result.terminated is True
     assert result.steps == 1
     assert env.state_reads == max_refreshes
+
+
+def _battle_state():
+    return {
+        "state_type": "monster",
+        "battle": {
+            "turn": "player",
+            "is_play_phase": True,
+            "enemies": [{"entity_id": "JAW_WORM_0", "hp": 40}],
+        },
+        "player": {"hand": [{"index": 0, "id": "Strike", "can_play": True}]},
+    }
+
+
+def test_deck_is_read_once_per_battle_but_refreshed_off_battle():
+    """The deck cannot change mid-battle, so one read covers the whole fight."""
+
+    class BattleEnv(FakeEnv):
+        def __init__(self):
+            super().__init__()
+            self.state = _battle_state()
+
+        def step(self, action):
+            self.state = _battle_state()
+            return EnvStep(self.state, done=False, info={"action_error": False})
+
+    env = BattleEnv()
+    _runner(env, RecordingAgent(), max_steps=4).run()
+    assert env.deck_reads == 1
+
+    off_battle = FakeEnv()
+
+    class MapEnv(FakeEnv):
+        def step(self, action):
+            self.state = {
+                "state_type": "map",
+                "map": {"next_options": [{"index": 0}]},
+            }
+            return EnvStep(self.state, done=False, info={"action_error": False})
+
+    off_battle = MapEnv()
+    _runner(off_battle, RecordingAgent(), max_steps=4).run()
+    assert off_battle.deck_reads == 5
+
+
+def test_deck_reaches_the_agent_and_becomes_deck_zone_rows():
+    env = FakeEnv()
+    agent = RecordingAgent()
+
+    _runner(env, agent).run()
+
+    assert agent.initial.player_detail["deck"]["count"] == 10
+
+
+def test_a_build_without_the_deck_endpoint_degrades_and_is_not_retried():
+    from sts2rl.env.mcp_client import STS2ClientError
+
+    class NoDeckEnv(FakeEnv):
+        def get_player_detail(self):
+            self.deck_reads += 1
+            raise STS2ClientError("HTTP 404: Not found")
+
+        def step(self, action):
+            self.state = {
+                "state_type": "map",
+                "map": {"next_options": [{"index": 0}]},
+            }
+            return EnvStep(self.state, done=False, info={"action_error": False})
+
+    env = NoDeckEnv()
+    agent = RecordingAgent()
+
+    with pytest.warns(RuntimeWarning, match="master deck"):
+        result = _runner(env, agent, max_steps=3).run()
+
+    assert result.steps == 3
+    assert env.deck_reads == 1
+    assert agent.initial.player_detail is None

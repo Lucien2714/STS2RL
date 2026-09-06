@@ -13,12 +13,14 @@ RawState: TypeAlias = dict[str, Any]
 class GameObservation:
     """Agent input for one decision point.
 
-    The official API exposes everything the agent sees under one state, so this
-    currently wraps exactly that; it stays a type of its own so enrichment can
-    be added without changing every signature between the env and the agent.
+    ``raw_state`` is the screen the agent is acting on.  ``player_detail`` is
+    the ``/player`` response, the only source of the run-level master deck; it
+    is None on a terminal state, before a run starts, or on a mod build that
+    does not serve the endpoint.
     """
 
     raw_state: RawState
+    player_detail: RawState | None = None
 
 
 @dataclass(frozen=True)
