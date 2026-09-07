@@ -36,6 +36,19 @@ class EpisodeResult:
 
 REFRESH_BACKOFF_SECONDS = 0.25
 
+# How long combat may take to reach the play phase before the episode is
+# truncated.
+#
+# The wait used to double unbounded over three attempts -- 1.75s in total --
+# which was enough while the policy died on floor 3.  Once it reached floor 9
+# to 14 the fights had several enemies and their turns ran longer than that:
+# 103 of 601 episodes truncated, rising to 60% of a block.  A truncated episode
+# leaves the run alive, so the next reset joined it instead of starting the
+# seed it was given, and the experiment quietly stopped measuring what it
+# claimed to.  Capping the backoff buys patience without an unbounded stall.
+MAX_REFRESH_BACKOFF_SECONDS = 1.0
+MAX_STATE_REFRESHES = 12
+
 
 class EpisodeRunner:
     """Execute one complete run while keeping learning outside GameEnv."""
@@ -46,8 +59,9 @@ class EpisodeRunner:
         agent: Agent,
         reward_model: RewardModel | None = None,
         max_steps: int = 10_000,
-        max_state_refreshes: int = 3,
+        max_state_refreshes: int = MAX_STATE_REFRESHES,
         refresh_backoff_seconds: float = REFRESH_BACKOFF_SECONDS,
+        max_refresh_backoff_seconds: float = MAX_REFRESH_BACKOFF_SECONDS,
     ) -> None:
         if max_steps < 1:
             raise ValueError("max_steps must be positive")
@@ -59,6 +73,7 @@ class EpisodeRunner:
         self.max_steps = max_steps
         self.max_state_refreshes = max_state_refreshes
         self.refresh_backoff_seconds = refresh_backoff_seconds
+        self.max_refresh_backoff_seconds = max_refresh_backoff_seconds
         self._cached_deck: RawState | None = None
         self._deck_endpoint_available = True
 
@@ -144,7 +159,12 @@ class EpisodeRunner:
                 if attempt == self.max_state_refreshes:
                     return None
                 if self.refresh_backoff_seconds:
-                    time.sleep(self.refresh_backoff_seconds * (2**attempt))
+                    time.sleep(
+                        min(
+                            self.refresh_backoff_seconds * (2**attempt),
+                            self.max_refresh_backoff_seconds,
+                        )
+                    )
                 observation = self._observation(self.env.get_state())
 
 

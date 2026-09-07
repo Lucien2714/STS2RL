@@ -278,3 +278,32 @@ def test_a_build_without_the_deck_endpoint_degrades_and_is_not_retried():
     assert result.steps == 3
     assert env.deck_reads == 1
     assert agent.initial.player_detail is None
+
+
+def test_combat_is_given_far_longer_than_one_animation_to_settle(monkeypatch):
+    """A truncated episode leaves the run alive for the next reset to join."""
+    import sts2rl.agents.runner as runner_module
+
+    slept: list[float] = []
+    monkeypatch.setattr(runner_module.time, "sleep", slept.append)
+
+    assert runner_module.MAX_STATE_REFRESHES >= 10
+    total = sum(
+        min(runner_module.REFRESH_BACKOFF_SECONDS * (2**attempt),
+            runner_module.MAX_REFRESH_BACKOFF_SECONDS)
+        for attempt in range(runner_module.MAX_STATE_REFRESHES)
+    )
+    # The old budget was 1.75s, which multi-enemy turns outlasted.
+    assert total > 8.0
+
+
+def test_the_refresh_backoff_is_capped(monkeypatch):
+    """Doubling without a cap would stall a worker for minutes."""
+    import sts2rl.agents.runner as runner_module
+
+    longest = min(
+        runner_module.REFRESH_BACKOFF_SECONDS * (2**20),
+        runner_module.MAX_REFRESH_BACKOFF_SECONDS,
+    )
+
+    assert longest == runner_module.MAX_REFRESH_BACKOFF_SECONDS

@@ -9,7 +9,7 @@ from urllib.parse import urlsplit, urlunsplit
 
 import torch
 
-from sts2rl.agents import PPOConfig
+from sts2rl.agents import MAX_STATE_REFRESHES, PPOConfig
 from sts2rl.encoder import EncoderConfig
 from sts2rl.env import DEFAULT_ACTION_DELAY_SECONDS, ResetSpec
 
@@ -40,7 +40,7 @@ class TrainingConfig:
     total_episodes: int = 100
     checkpoint_every: int = 10
     max_steps_per_episode: int = 10_000
-    max_state_refreshes: int = 3
+    max_state_refreshes: int = MAX_STATE_REFRESHES
     base_url: str = "http://localhost:15526/api/v1"
     timeout: float = 20.0
     action_delay_seconds: float = DEFAULT_ACTION_DELAY_SECONDS
