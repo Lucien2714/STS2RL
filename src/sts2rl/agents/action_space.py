@@ -119,40 +119,42 @@ class LegalActionProvider:
         return actions
 
     def _reward_actions(self, state: RawState) -> list[GameAction]:
-        """Return the claims, and offer to leave once nothing is simply owed.
+        """Return one screen's worth of claiming, in an order that is safe.
 
-        ``proceed`` ends the screen and abandons everything still on it, and it
-        is immediately cheaper than claiming.  Offered side by side, a traced
-        policy took it on 27 of 28 reward screens and reached the card-reward
-        screen not once in 925 decisions, so the deck never improved.
+        Leaving is not a choice here.  ``proceed`` ends the screen and abandons
+        everything on it for one cheap step, and offered beside the claims a
+        traced policy took it on 27 of 28 reward screens and reached
+        ``card_reward`` not once in 925 decisions.  The screen is claimed out
+        instead, and ``GameEnv`` leaves it once the card reward is resolved.
 
-        Gold, a relic and a free potion are taken in one step and are then
-        gone; walking away from them is not a decision worth offering, so while
-        one is on the screen there is no way out but to take it.
+        Rewards in ``REWARDS_TAKEN_OUTRIGHT`` come first and alone.  They are
+        taken in one step and are then gone, so each is a single candidate --
+        a forced step that costs no policy gradient -- and none can be
+        stranded by leaving early.  Only once they are all taken is the card
+        reward offered, which is what makes the automatic exit safe: nothing
+        else is left to abandon.
 
-        A card is different, and so is a card removal: claiming opens a second
-        screen the game lets you decline, and **declining puts the reward back
-        on this screen unchanged** -- verified live, the item list is identical
-        before and after ``skip_card_reward``.  Refusing to offer ``proceed``
-        there would trap the agent claiming and declining forever, so anything
-        outside ``REWARDS_TAKEN_OUTRIGHT`` leaves the exit open.  An unfamiliar
-        reward type is treated the same way: an unknown screen must never be
-        able to lock a run.
+        ``proceed`` reappears only when there is nothing to claim at all, so a
+        screen we cannot act on is never a dead end.
         """
         rewards = self._mapping(state.get("rewards"))
-        actions: list[GameAction] = []
-        owed = False
+        outright: list[GameAction] = []
+        deferred: list[GameAction] = []
         for item in self._records(rewards.get("items")):
             if item.get("type") == "potion" and self._potion_belt_is_full(state):
                 continue
             index = self._index(item)
             if index is None:
                 continue
-            actions.append(GameAction("claim_reward", index=index))
+            claim = GameAction("claim_reward", index=index)
             if item.get("type") in REWARDS_TAKEN_OUTRIGHT:
-                owed = True
-        if not owed and rewards.get("can_proceed") is True:
-            actions.append(GameAction("proceed"))
+                outright.append(claim)
+            else:
+                deferred.append(claim)
+
+        actions = outright or deferred
+        if not actions and rewards.get("can_proceed") is True:
+            actions = [GameAction("proceed")]
         actions.extend(self._discard_potion_actions(state))
         return actions
 
@@ -253,12 +255,18 @@ class LegalActionProvider:
     def _selectable_indices(self, prompt: RawState) -> list[int]:
         """Return the card indices a selection prompt will still accept.
 
-        The screen reports ``is_selected`` per card plus ``selected_count`` and
-        ``max_select``.  Re-picking a selected card and picking past the
-        maximum are both rejected, and an agent that cannot see the difference
-        wastes most of its steps toggling the same cards.
+        Picking past ``max_select`` is rejected, and an agent that cannot see
+        that wastes most of its steps on refusals.  Once the prompt is full,
+        confirming is the only thing left.
+
+        A card that has been picked is *moved*: the mod drops it from ``cards``
+        and lists it under ``selected_cards``, so everything still in ``cards``
+        is still selectable and there is nothing here to filter.  An earlier
+        version also skipped cards flagged ``is_selected``; live traces show
+        that flag is never true, because the card is gone from the list by
+        then.  If a build ever leaves picked cards in place with a flag
+        instead, that filter has to come back.
         """
-        cards = self._records(prompt.get("cards"))
         selected_count = self._integer(prompt.get("selected_count"))
         max_select = self._integer(prompt.get("max_select"))
         if (
@@ -267,13 +275,7 @@ class LegalActionProvider:
             and selected_count >= max_select
         ):
             return []
-        return [
-            index
-            for card in cards
-            if card.get("is_selected") is not True
-            for index in [self._index(card)]
-            if index is not None
-        ]
+        return self._indices(prompt.get("cards"))
 
     def _relic_select_actions(self, state: RawState) -> list[GameAction]:
         selection = self._mapping(state.get("relic_select"))

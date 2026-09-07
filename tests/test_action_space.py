@@ -63,11 +63,9 @@ def test_combat_candidates_expand_enemy_targets_and_filter_unplayable_cards():
                 "rewards": {"items": [{"index": 1}], "can_proceed": True},
                 "player": {"potions": []},
             },
-            # The item reports no type, so it is not one that is simply
-            # owed, and the exit stays open.
+            # Leaving is never a choice here; the screen is claimed out.
             [
                 {"type": "claim_reward", "index": 1},
-                {"type": "proceed"},
             ],
         ),
         (
@@ -291,8 +289,13 @@ def test_an_opening_treasure_chest_is_not_skipped_by_a_proceed_fallback():
     assert LegalActionProvider().candidates(state) == ()
 
 
-def test_a_selected_card_is_not_offered_again():
-    """Re-picking a selected card is rejected and wastes the step."""
+def test_a_picked_card_leaves_the_list_and_so_is_never_re_offered():
+    """The mod moves a picked card out of `cards` into `selected_cards`.
+
+    Verified live on hand_select: after picking, the card is gone from `cards`
+    and `is_selected` stays false on everything that remains, so the list is
+    already the set of still-selectable cards.
+    """
     state = {
         "state_type": "card_select",
         "card_select": {
@@ -300,10 +303,8 @@ def test_a_selected_card_is_not_offered_again():
             "selected_count": 1,
             "min_select": 2,
             "max_select": 2,
-            "cards": [
-                {"index": 0, "id": "STRIKE_IRONCLAD", "is_selected": True},
-                {"index": 1, "id": "DEFEND_IRONCLAD", "is_selected": False},
-            ],
+            "selected_cards": [{"index": 0, "id": "STRIKE_IRONCLAD"}],
+            "cards": [{"index": 0, "id": "DEFEND_IRONCLAD"}],
             "can_confirm": False,
             "can_cancel": True,
         },
@@ -311,8 +312,7 @@ def test_a_selected_card_is_not_offered_again():
 
     actions = [a.to_dict() for a in LegalActionProvider().candidates(state)]
 
-    assert {"type": "select_card", "index": 1} in actions
-    assert {"type": "select_card", "index": 0} not in actions
+    assert {"type": "select_card", "index": 0} in actions
 
 
 def test_no_further_picks_once_the_maximum_is_selected():
@@ -338,7 +338,7 @@ def test_no_further_picks_once_the_maximum_is_selected():
     assert actions == [{"type": "confirm_selection"}, {"type": "cancel_selection"}]
 
 
-def test_hand_selection_also_skips_already_picked_cards():
+def test_hand_selection_offers_what_the_prompt_still_lists():
     state = {
         "state_type": "hand_select",
         "hand_select": {
@@ -346,17 +346,36 @@ def test_hand_selection_also_skips_already_picked_cards():
             "selected_count": 1,
             "min_select": 2,
             "max_select": 2,
-            "cards": [
-                {"index": 0, "id": "STRIKE_IRONCLAD", "is_selected": True},
-                {"index": 1, "id": "DEFEND_IRONCLAD", "is_selected": False},
-            ],
+            "selected_cards": [{"index": 0, "id": "STRIKE_IRONCLAD"}],
+            "cards": [{"index": 0, "id": "DEFEND_IRONCLAD"}],
             "can_confirm": False,
         },
     }
 
     actions = [a.to_dict() for a in LegalActionProvider().candidates(state)]
 
-    assert actions == [{"type": "combat_select_card", "card_index": 1}]
+    assert actions == [{"type": "combat_select_card", "card_index": 0}]
+
+
+def test_a_full_prompt_offers_only_confirming():
+    """Observed live: selected_count 1 of max 1 leaves confirm as the only move."""
+    state = {
+        "state_type": "hand_select",
+        "hand_select": {
+            "mode": "simple_select",
+            "selected_count": 1,
+            "min_select": 1,
+            "max_select": 1,
+            "selected_cards": [{"index": 0, "id": "THUNDERCLAP"}],
+            "cards": [{"index": 0, "id": "DEFEND_IRONCLAD"},
+                      {"index": 1, "id": "STRIKE_IRONCLAD"}],
+            "can_confirm": True,
+        },
+    }
+
+    actions = [a.to_dict() for a in LegalActionProvider().candidates(state)]
+
+    assert actions == [{"type": "combat_confirm_selection"}]
 
 
 def test_selection_without_the_new_fields_still_offers_every_card():
@@ -460,10 +479,10 @@ def test_the_shop_follows_the_same_rule():
     assert not [a for a in payloads(roomy) if a["type"] == "discard_potion"]
 
 
-def test_leaving_is_not_offered_while_gold_or_a_relic_sits_there():
-    """proceed abandons the screen and is a step cheaper than claiming.
+def test_a_reward_screen_is_never_left_by_choice():
+    """proceed abandons the screen for one cheap step.
 
-    Offered side by side, a traced policy took proceed on 27 of 28 reward
+    Offered beside the claims, a traced policy took it on 27 of 28 reward
     screens and never once reached the card-reward screen behind them.
     """
     state = {
@@ -479,47 +498,42 @@ def test_leaving_is_not_offered_while_gold_or_a_relic_sits_there():
         "player": {"potions": []},
     }
 
-    actions = payloads(state)
-
-    assert [a["type"] for a in actions] == ["claim_reward"] * 3
+    assert {"type": "proceed"} not in payloads(state)
 
 
-def test_a_card_alone_never_shuts_the_exit():
-    """Declining a card puts it straight back, so it must not block leaving.
-
-    Verified live: the rewards item list is identical before claiming a card
-    reward and after skipping it, so refusing to offer proceed here would trap
-    the agent claiming and declining the same card forever.
-    """
+def test_outright_rewards_are_claimed_before_the_card_is_offered():
+    """The card must go last, or leaving after it would strand the gold."""
     state = {
         "state_type": "rewards",
         "rewards": {
             "items": [
                 {"index": 0, "type": "card"},
-                {"index": 1, "type": "card_removal"},
+                {"index": 1, "type": "gold"},
+                {"index": 2, "type": "relic"},
             ],
             "can_proceed": True,
         },
         "player": {"potions": []},
     }
 
-    assert {"type": "proceed"} in payloads(state)
+    assert payloads(state) == [
+        {"type": "claim_reward", "index": 1},
+        {"type": "claim_reward", "index": 2},
+    ]
 
 
-def test_an_unfamiliar_reward_type_cannot_lock_the_screen():
+def test_the_card_is_offered_once_nothing_else_is_left():
     state = {
         "state_type": "rewards",
-        "rewards": {
-            "items": [{"index": 0, "type": "something_new"}],
-            "can_proceed": True,
-        },
+        "rewards": {"items": [{"index": 2, "type": "card"}], "can_proceed": True},
         "player": {"potions": []},
     }
 
-    assert {"type": "proceed"} in payloads(state)
+    assert payloads(state) == [{"type": "claim_reward", "index": 2}]
 
 
-def test_a_full_belt_does_not_let_a_potion_shut_the_exit():
+def test_a_potion_against_a_full_belt_does_not_hold_the_card_back():
+    """It cannot be claimed, so it must not count as still owed."""
     state = {
         "state_type": "rewards",
         "rewards": {
@@ -532,15 +546,12 @@ def test_a_full_belt_does_not_let_a_potion_shut_the_exit():
         "player": {"potions": [{"slot": 0}], "max_potion_slots": 1},
     }
 
-    actions = payloads(state)
+    claims = [a for a in payloads(state) if a["type"] == "claim_reward"]
 
-    assert {"type": "proceed"} in actions
-    assert [a for a in actions if a["type"] == "claim_reward"] == [
-        {"type": "claim_reward", "index": 1}
-    ]
+    assert claims == [{"type": "claim_reward", "index": 1}]
 
 
-def test_an_empty_reward_screen_may_be_left():
+def test_a_screen_with_nothing_claimable_is_not_a_dead_end():
     state = {
         "state_type": "rewards",
         "rewards": {"items": [], "can_proceed": True},
@@ -548,20 +559,6 @@ def test_an_empty_reward_screen_may_be_left():
     }
 
     assert payloads(state) == [{"type": "proceed"}]
-
-
-def test_a_screen_holding_only_an_unclaimable_potion_may_be_left():
-    """A full belt blocks the claim, so refusing to leave would strand it."""
-    state = {
-        "state_type": "rewards",
-        "rewards": {"items": [{"index": 0, "type": "potion"}], "can_proceed": True},
-        "player": {"potions": [{"slot": 0}], "max_potion_slots": 1},
-    }
-
-    actions = payloads(state)
-
-    assert {"type": "proceed"} in actions
-    assert not [a for a in actions if a["type"] == "claim_reward"]
 
 
 def test_the_card_choice_still_lives_on_its_own_screen():

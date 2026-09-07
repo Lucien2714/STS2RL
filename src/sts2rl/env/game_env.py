@@ -14,6 +14,11 @@ from sts2rl.env.state import extract_raw_state, response_state as _response_stat
 from sts2rl.env.types import EnvStep, RawState
 
 
+# Resolving a card reward is not finished until the screen is left, because
+# declining one puts it straight back with nothing to say it was refused.
+CARD_REWARD_DECISIONS = frozenset({"select_card_reward", "skip_card_reward"})
+
+
 class GameEnv:
     """Reset and step one raw STS2MCP single-player environment."""
 
@@ -68,11 +73,14 @@ class GameEnv:
             )
 
         raw_state = self._state_after(_response_state(api_result))
+        raw_state, left_rewards = self._leave_resolved_rewards(action, raw_state)
         info: dict = {
             "api_result": api_result,
             "action": action_payload,
             "action_error": False,
         }
+        if left_rewards:
+            info["auto_proceeded"] = True
         if isinstance(api_result, dict) and api_result.get("state_wait_timed_out"):
             info["state_wait_timed_out"] = True
         return EnvStep(
@@ -80,6 +88,35 @@ class GameEnv:
             done=self._is_done(raw_state),
             info=info,
         )
+
+    def _leave_resolved_rewards(
+        self,
+        action: GameAction,
+        raw_state: RawState,
+    ) -> tuple[RawState, bool]:
+        """Leave the rewards screen once its card reward has been resolved.
+
+        Declining a card puts it back on the rewards screen unchanged, and the
+        game marks nothing to say it was refused, so an agent offered that
+        screen again would be offered the same card again.  Resolving the card
+        reward therefore has to include leaving, which is the one place the
+        environment sends a request the agent did not choose.
+
+        It is safe only because ``LegalActionProvider`` withholds the card
+        claim until every reward that is taken outright has been: there is
+        nothing left on the screen to abandon.  A card reward reached straight
+        from an event does not land back on ``rewards`` and is left alone.
+        """
+        if action.action_type not in CARD_REWARD_DECISIONS:
+            return raw_state, False
+        if raw_state.get("state_type") != "rewards":
+            return raw_state, False
+        try:
+            response = self.client.proceed()
+        except STS2ClientError:
+            # Nothing is lost by staying: the screen is still legal to act on.
+            return raw_state, False
+        return self._state_after(_response_state(response)), True
 
     def get_state(self) -> RawState:
         """Return and validate the current raw STS2MCP state."""
