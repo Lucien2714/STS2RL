@@ -85,10 +85,10 @@ def test_combat_actions_reference_hand_potions_and_live_enemy(
 
     decision = tokenizer.tokenize_decision(GameObservation(state), candidates)
 
+    # The belt is not full, so discarding the potion is not offered.
     assert [action.source for action in decision.actions] == [
         EntityReference("card", 0),
         EntityReference("card", 1),
-        EntityReference("potion", 0),
         EntityReference("potion", 0),
         None,
     ]
@@ -96,7 +96,6 @@ def test_combat_actions_reference_hand_potions_and_live_enemy(
         EntityReference("enemy", 0),
         None,
         EntityReference("enemy", 0),
-        None,
         None,
     ]
     assert all(action.numeric.shape == (len(ACTION_NUMERIC_FIELDS),) for action in decision.actions)

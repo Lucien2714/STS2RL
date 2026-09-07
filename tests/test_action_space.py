@@ -40,7 +40,6 @@ def test_combat_candidates_expand_enemy_targets_and_filter_unplayable_cards():
         {"type": "play_card", "card_index": 0, "target": "A"},
         {"type": "play_card", "card_index": 1},
         {"type": "use_potion", "slot": 0, "target": "A"},
-        {"type": "discard_potion", "slot": 0},
         {"type": "end_turn"},
     ]
 
@@ -393,3 +392,67 @@ def test_an_open_bundle_preview_offers_only_confirm_and_cancel():
         {"type": "confirm_bundle_selection"},
         {"type": "cancel_bundle_selection"},
     ]
+
+
+def _player_with_potions(count: int, capacity: int | None) -> dict:
+    player: dict = {
+        "hand": [],
+        "potions": [
+            {"slot": slot, "can_use_in_combat": False} for slot in range(count)
+        ],
+    }
+    if capacity is not None:
+        player["max_potion_slots"] = capacity
+    return player
+
+
+def _combat(count: int, capacity: int | None) -> dict:
+    return {
+        "state_type": "monster",
+        "battle": {"turn": "player", "is_play_phase": True, "enemies": []},
+        "player": _player_with_potions(count, capacity),
+    }
+
+
+def test_a_potion_is_not_discardable_while_the_belt_has_room():
+    """Throwing one away buys nothing, so it is not a choice worth offering."""
+    actions = payloads(_combat(count=1, capacity=3))
+
+    assert not [a for a in actions if a["type"] == "discard_potion"]
+
+
+def test_a_full_belt_may_discard_to_make_room():
+    actions = payloads(_combat(count=3, capacity=3))
+
+    assert [a["slot"] for a in actions if a["type"] == "discard_potion"] == [0, 1, 2]
+
+
+def test_an_unreported_capacity_does_not_invent_discards():
+    """Without max_potion_slots the belt cannot be known to be full."""
+    actions = payloads(_combat(count=2, capacity=None))
+
+    assert not [a for a in actions if a["type"] == "discard_potion"]
+
+
+def test_the_rewards_screen_follows_the_same_rule():
+    full = {
+        "state_type": "rewards",
+        "rewards": {"items": [{"index": 0, "type": "gold"}], "can_proceed": True},
+        "player": _player_with_potions(2, 2),
+    }
+    roomy = {**full, "player": _player_with_potions(1, 2)}
+
+    assert [a for a in payloads(full) if a["type"] == "discard_potion"]
+    assert not [a for a in payloads(roomy) if a["type"] == "discard_potion"]
+
+
+def test_the_shop_follows_the_same_rule():
+    full = {
+        "state_type": "shop",
+        "shop": {"items": [], "can_proceed": True},
+        "player": _player_with_potions(2, 2),
+    }
+    roomy = {**full, "player": _player_with_potions(1, 2)}
+
+    assert [a for a in payloads(full) if a["type"] == "discard_potion"]
+    assert not [a for a in payloads(roomy) if a["type"] == "discard_potion"]

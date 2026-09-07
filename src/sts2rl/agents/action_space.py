@@ -96,7 +96,7 @@ class LegalActionProvider:
                 actions.extend(
                     self._targeted_actions("use_potion", "slot", slot, potion, enemies)
                 )
-            actions.append(GameAction("discard_potion", slot=slot))
+        actions.extend(self._discard_potion_actions(state))
 
         actions.append(GameAction("end_turn"))
         return actions
@@ -303,6 +303,15 @@ class LegalActionProvider:
         return [GameAction(action_type, **base)]
 
     def _discard_potion_actions(self, state: RawState) -> list[GameAction]:
+        """Return discards, but only once the belt has no room left.
+
+        Throwing a potion away is a loss with nothing bought back, so the one
+        time it is worth considering is when the belt is full and a slot has to
+        be freed.  Offered unconditionally it is simply a cheap way to destroy
+        a resource, and an exploring agent takes it.
+        """
+        if not self._potion_belt_is_full(state):
+            return []
         player = self._mapping(state.get("player"))
         return [
             GameAction("discard_potion", slot=slot)
