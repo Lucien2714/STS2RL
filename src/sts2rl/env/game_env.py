@@ -73,13 +73,13 @@ class GameEnv:
             )
 
         raw_state = self._state_after(_response_state(api_result))
-        raw_state, left_rewards = self._leave_resolved_rewards(action, raw_state)
+        raw_state, finished = self._finish_resolved_screen(action, raw_state)
         info: dict = {
             "api_result": api_result,
             "action": action_payload,
             "action_error": False,
         }
-        if left_rewards:
+        if finished:
             info["auto_proceeded"] = True
         if isinstance(api_result, dict) and api_result.get("state_wait_timed_out"):
             info["state_wait_timed_out"] = True
@@ -89,30 +89,48 @@ class GameEnv:
             info=info,
         )
 
-    def _leave_resolved_rewards(
+    def _finish_resolved_screen(
         self,
         action: GameAction,
         raw_state: RawState,
     ) -> tuple[RawState, bool]:
-        """Leave the rewards screen once its card reward has been resolved.
+        """Complete a choice the game leaves half-made.
 
-        Declining a card puts it back on the rewards screen unchanged, and the
-        game marks nothing to say it was refused, so an agent offered that
-        screen again would be offered the same card again.  Resolving the card
-        reward therefore has to include leaving, which is the one place the
-        environment sends a request the agent did not choose.
+        Two screens hand back a decision that is not finished yet, and in both
+        cases the unfinished half is a loop rather than a choice:
 
-        It is safe only because ``LegalActionProvider`` withholds the card
-        claim until every reward that is taken outright has been: there is
-        nothing left on the screen to abandon.  A card reward reached straight
-        from an event does not land back on ``rewards`` and is left alone.
+        * Resolving a card reward lands back on ``rewards`` with the card still
+          listed and nothing marking it refused, so an agent offered that
+          screen again is offered the same card again.  The screen is left.
+        * Picking a bundle opens a preview whose only moves are confirming and
+          cancelling, and cancelling returns to the same list of bundles.  The
+          pick is confirmed.
+
+        This is the one place the environment sends a request the agent did not
+        choose.  It is safe because in both cases nothing else is left on the
+        screen to decide: the reward screen withholds the card claim until
+        everything taken outright has been, and a bundle preview offers no
+        third option.  A card reward reached straight from an event does not
+        land back on ``rewards`` and is left alone.
         """
-        if action.action_type not in CARD_REWARD_DECISIONS:
+        if action.action_type in CARD_REWARD_DECISIONS:
+            if raw_state.get("state_type") != "rewards":
+                return raw_state, False
+            follow_up = self.client.proceed
+        elif action.action_type == "select_bundle":
+            bundle = raw_state.get("bundle_select")
+            if raw_state.get("state_type") != "bundle_select" or not isinstance(
+                bundle, dict
+            ):
+                return raw_state, False
+            if bundle.get("can_confirm") is not True:
+                return raw_state, False
+            follow_up = self.client.confirm_bundle_selection
+        else:
             return raw_state, False
-        if raw_state.get("state_type") != "rewards":
-            return raw_state, False
+
         try:
-            response = self.client.proceed()
+            response = follow_up()
         except STS2ClientError:
             # Nothing is lost by staying: the screen is still legal to act on.
             return raw_state, False

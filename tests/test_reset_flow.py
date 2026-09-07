@@ -219,3 +219,72 @@ def test_other_actions_never_trigger_the_automatic_exit():
 
     assert client.actions == [("end_turn", None)]
     assert "auto_proceeded" not in step.info
+
+
+class BundleClient:
+    """A bundle overlay that opens a preview when a bundle is picked."""
+
+    def __init__(self, *, can_confirm: bool = True, confirm_fails: bool = False):
+        self.calls = []
+        self.can_confirm = can_confirm
+        self.confirm_fails = confirm_fails
+        self.state = self._bundles(preview=False)
+
+    def _bundles(self, *, preview: bool):
+        return {
+            "state_type": "bundle_select",
+            "bundle_select": {
+                "bundles": [{"index": 0}, {"index": 1}],
+                "preview_showing": preview,
+                "can_confirm": preview and self.can_confirm,
+                "can_cancel": preview,
+            },
+        }
+
+    def get_state(self):
+        return self.state
+
+    def select_bundle(self, index):
+        self.calls.append(f"select_bundle:{index}")
+        self.state = self._bundles(preview=True)
+        return {"state": self.state}
+
+    def confirm_bundle_selection(self):
+        self.calls.append("confirm_bundle_selection")
+        if self.confirm_fails:
+            raise STS2ClientError("not now")
+        self.state = {"state_type": "map", "run": {"floor": 4}}
+        return {"state": self.state}
+
+
+def test_picking_a_bundle_also_confirms_it():
+    """Cancelling a preview returns to the same bundles, which is a loop."""
+    client = BundleClient()
+
+    with GameEnv(client=client) as env:
+        step = env.step(GameAction("select_bundle", index=1))
+
+    assert client.calls == ["select_bundle:1", "confirm_bundle_selection"]
+    assert step.raw_state["state_type"] == "map"
+    assert step.info["auto_proceeded"] is True
+
+
+def test_a_bundle_pick_that_opens_nothing_confirmable_is_left_alone():
+    client = BundleClient(can_confirm=False)
+
+    with GameEnv(client=client) as env:
+        step = env.step(GameAction("select_bundle", index=0))
+
+    assert client.calls == ["select_bundle:0"]
+    assert "auto_proceeded" not in step.info
+
+
+def test_a_refused_bundle_confirmation_leaves_an_actionable_screen():
+    client = BundleClient(confirm_fails=True)
+
+    with GameEnv(client=client) as env:
+        step = env.step(GameAction("select_bundle", index=0))
+
+    assert step.raw_state["state_type"] == "bundle_select"
+    assert step.info["action_error"] is False
+    assert "auto_proceeded" not in step.info
