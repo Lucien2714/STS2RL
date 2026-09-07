@@ -7,6 +7,7 @@ import json
 from types import MappingProxyType
 
 from sts2rl.data import DEFAULT_DATA_DIR
+from sts2rl.encoder import vocabulary as vocabulary_module
 from sts2rl.encoder import (
     GameVocabulary,
     PAD_INDEX,
@@ -168,3 +169,55 @@ def test_no_state_type_token_the_api_cannot_produce():
     vocabulary = GameVocabulary.from_bundled_data()
 
     assert vocabulary.lookup("state_types", "player_detail") == UNKNOWN_INDEX
+
+
+def test_the_games_own_spelling_of_a_status_intent_resolves():
+    """The game sends StatusCard where the table holds STATUS.
+
+    No rule bridges that: the CamelCase retry gives "status_card", and the
+    display-name fallback cannot help because DEBUFF, DEBUFF_STRONG and STATUS
+    all present as "Strategic", so that alias is ambiguous and dropped.
+    """
+    vocabulary = GameVocabulary.from_bundled_data()
+
+    assert vocabulary.lookup("intents", "StatusCard") == vocabulary.lookup(
+        "intents", "STATUS"
+    )
+    assert vocabulary.lookup("intents", "StatusCard") != UNKNOWN_INDEX
+
+
+def test_an_ambiguous_display_name_is_still_refused():
+    """Three intents present as "Strategic"; guessing one would be worse."""
+    vocabulary = GameVocabulary.from_bundled_data()
+
+    assert vocabulary.lookup("intents", "Strategic") == UNKNOWN_INDEX
+
+
+def test_every_declared_api_spelling_names_a_real_token():
+    vocabulary = GameVocabulary.from_bundled_data()
+
+    for table, spellings in vocabulary_module.API_SPELLINGS.items():
+        for spelling, target in spellings.items():
+            assert vocabulary.lookup(table, target) != UNKNOWN_INDEX
+            assert vocabulary.lookup(table, spelling) == vocabulary.lookup(
+                table, target
+            )
+
+
+def test_the_fingerprint_covers_the_api_spellings(monkeypatch):
+    """Rerouting a token to another row changes what the model is shown.
+
+    A checkpoint trained before the alias saw StatusCard as unknown; after it,
+    the same screen lands on a different embedding row.  The fingerprint has to
+    notice, or the old weights load silently against new inputs.
+    """
+    before = GameVocabulary.from_bundled_data().fingerprint()
+    monkeypatch.setattr(
+        vocabulary_module,
+        "API_SPELLINGS",
+        MappingProxyType({"intents": MappingProxyType({"Sleepy": "SLEEP"})}),
+    )
+
+    after = GameVocabulary.from_bundled_data().fingerprint()
+
+    assert before != after

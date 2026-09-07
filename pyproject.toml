@@ -19,6 +19,7 @@ dev = [
 
 [project.scripts]
 sts2rl-train = "sts2rl.training.cli:main"
+sts2rl-eval = "sts2rl.training.eval_cli:main"
 
 [build-system]
 requires = ["hatchling"]

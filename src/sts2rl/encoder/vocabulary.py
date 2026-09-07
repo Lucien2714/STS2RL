@@ -37,6 +37,24 @@ def snake_variant(value: str) -> str:
     return normalize_token(_CAMEL_BOUNDARY.sub("_", value.strip()))
 
 
+# Spellings the game sends that no normalization can reach from the table's id.
+#
+# Two mechanisms already absorb most of the difference: identifiers are tried in
+# order (id, then display name), and a miss is retried as the CamelCase reading,
+# which turns ``DebuffStrong`` into ``DEBUFF_STRONG``.  Neither can help when the
+# game uses a *different word*: the intent is ``StatusCard`` where the table
+# holds ``STATUS``, and the display-name fallback cannot rescue it either,
+# because ``DEBUFF``, ``DEBUFF_STRONG`` and ``STATUS`` all present as
+# "Strategic", so that alias is ambiguous and deliberately dropped.
+#
+# Keep this list short and only for spellings confirmed against a running game.
+# It belongs here rather than in the bundled JSON, which is copied wholesale
+# from spire-codex and would lose the edit on the next refresh.
+API_SPELLINGS: Mapping[str, Mapping[str, str]] = MappingProxyType(
+    {"intents": MappingProxyType({"StatusCard": "STATUS"})}
+)
+
+
 @dataclass(frozen=True)
 class TokenVocabulary:
     """An immutable token-to-index table with stable special indices."""
@@ -330,7 +348,7 @@ class GameVocabulary:
         compare=False,
     )
 
-    FINGERPRINT_VERSION: ClassVar[int] = 1
+    FINGERPRINT_VERSION: ClassVar[int] = 2
 
     @classmethod
     def from_bundled_data(
@@ -381,6 +399,15 @@ class GameVocabulary:
                 for alias, indices in alias_candidates.items()
                 if len(indices) == 1
             }
+            # Explicit spellings win: they are the ones no rule can derive.
+            for spelling, target in API_SPELLINGS.get(name, {}).items():
+                index = table.lookup(target)
+                if index == UNKNOWN_INDEX:
+                    raise ValueError(
+                        f"API_SPELLINGS maps {spelling!r} onto {target!r}, "
+                        f"which is not in the {name!r} table"
+                    )
+                table_aliases[normalize_token(spelling)] = index
             aliases[name] = MappingProxyType(table_aliases)
         return cls(
             MappingProxyType(tables),
@@ -453,6 +480,10 @@ class GameVocabulary:
             "tables": {
                 name: [normalize_token(token) for token in table.tokens]
                 for name, table in sorted(self.tables.items())
+            },
+            "api_spellings": {
+                name: dict(sorted(spellings.items()))
+                for name, spellings in sorted(API_SPELLINGS.items())
             },
             "event_options": [
                 [normalize_token(event_id), normalize_token(title)]

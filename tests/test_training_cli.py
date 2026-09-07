@@ -11,6 +11,7 @@ import pytest
 from sts2rl.env import ResetSpec
 from sts2rl.training import TrainingConfig, TrainingPlan
 from sts2rl.training import cli
+from sts2rl.training import eval_cli
 
 
 def test_help_exits_without_starting_training(monkeypatch: pytest.MonkeyPatch):
@@ -249,3 +250,40 @@ def test_resume_refuses_to_change_the_client_set(tmp_path: Path):
 
     with pytest.raises(ValueError, match="--ports cannot change"):
         cli._resumed_plan(args, SimpleNamespace(plan=saved))  # type: ignore[arg-type]
+
+
+def test_the_evaluation_cli_defaults_to_both_pools(tmp_path: Path):
+    args = eval_cli.create_parser().parse_args(["--run-dir", str(tmp_path / "run")])
+
+    assert args.pools == "both"
+    assert args.checkpoint == "latest"
+
+
+def test_the_evaluation_cli_takes_ports_and_a_checkpoint(tmp_path: Path):
+    args = eval_cli.create_parser().parse_args(
+        [
+            "--run-dir", str(tmp_path / "run"),
+            "--checkpoint", "episode_000500.pt",
+            "--ports", "15526,15527",
+            "--episodes-per-seed", "5",
+        ]
+    )
+
+    assert args.checkpoint == "episode_000500.pt"
+    assert args.episodes_per_seed == 5
+    assert args.ports == "15526,15527"
+
+
+def test_the_evaluation_cli_builds_one_client_per_port(tmp_path: Path):
+    args = eval_cli.create_parser().parse_args(
+        ["--run-dir", str(tmp_path / "run"), "--ports", "15526,15527,15528"]
+    )
+    plan = TrainingPlan(training=TrainingConfig(run_dir=tmp_path / "run"))
+
+    urls = eval_cli._client_base_urls(args, plan)
+
+    assert urls == (
+        "http://localhost:15526/api/v1",
+        "http://localhost:15527/api/v1",
+        "http://localhost:15528/api/v1",
+    )

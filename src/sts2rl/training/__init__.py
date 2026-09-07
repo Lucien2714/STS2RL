@@ -7,6 +7,13 @@ from sts2rl.training.checkpoint import (
     LoadedCheckpoint,
 )
 from sts2rl.training.config import TrainingConfig, TrainingPlan, TrainingState
+from sts2rl.training.evaluate import (
+    EpisodeScore,
+    Evaluator,
+    build_schedule,
+    format_report,
+    summarize,
+)
 from sts2rl.training.metrics import (
     EpisodeMetrics,
     MetricsError,
@@ -19,12 +26,16 @@ __all__ = [
     "CheckpointError",
     "CheckpointManager",
     "EpisodeMetrics",
+    "EpisodeScore",
+    "Evaluator",
     "LoadedCheckpoint",
-
     "MetricsError",
     "TrainingConfig",
     "TrainingMetricsWriter",
     "TrainingPlan",
     "TrainingState",
     "Trainer",
+    "build_schedule",
+    "format_report",
+    "summarize",
 ]
