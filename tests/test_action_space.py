@@ -146,10 +146,11 @@ def test_combat_candidates_expand_enemy_targets_and_filter_unplayable_cards():
                     "can_cancel": True,
                 },
             },
+            # Cancelling puts every card back, so it is not offered while
+            # there is something to pick or confirm.
             [
                 {"type": "select_card", "index": 3},
                 {"type": "confirm_selection"},
-                {"type": "cancel_selection"},
             ],
         ),
         (
@@ -164,7 +165,6 @@ def test_combat_candidates_expand_enemy_targets_and_filter_unplayable_cards():
             [
                 {"type": "select_bundle", "index": 2},
                 {"type": "confirm_bundle_selection"},
-                {"type": "cancel_bundle_selection"},
             ],
         ),
         (
@@ -335,7 +335,7 @@ def test_no_further_picks_once_the_maximum_is_selected():
 
     actions = [a.to_dict() for a in LegalActionProvider().candidates(state)]
 
-    assert actions == [{"type": "confirm_selection"}, {"type": "cancel_selection"}]
+    assert actions == [{"type": "confirm_selection"}]
 
 
 def test_hand_selection_offers_what_the_prompt_still_lists():
@@ -409,10 +409,7 @@ def test_an_open_bundle_preview_offers_only_confirm_and_cancel():
 
     actions = [a.to_dict() for a in LegalActionProvider().candidates(state)]
 
-    assert actions == [
-        {"type": "confirm_bundle_selection"},
-        {"type": "cancel_bundle_selection"},
-    ]
+    assert actions == [{"type": "confirm_bundle_selection"}]
 
 
 def _player_with_potions(count: int, capacity: int | None) -> dict:
@@ -572,3 +569,62 @@ def test_the_card_choice_still_lives_on_its_own_screen():
 
     assert {"type": "skip_card_reward"} in actions
     assert len([a for a in actions if a["type"] == "select_card_reward"]) == 2
+
+
+def test_cancelling_returns_when_a_prompt_offers_nothing_else():
+    """Asking for a card the deck does not contain would otherwise be a dead end."""
+    state = {
+        "state_type": "card_select",
+        "card_select": {"cards": [], "can_confirm": False, "can_cancel": True},
+    }
+
+    assert [a.to_dict() for a in LegalActionProvider().candidates(state)] == [
+        {"type": "cancel_selection"}
+    ]
+
+
+def test_a_skippable_prompt_with_nothing_to_pick_can_be_left():
+    state = {
+        "state_type": "card_select",
+        "card_select": {"cards": [], "can_confirm": False, "can_skip": True},
+    }
+
+    assert [a.to_dict() for a in LegalActionProvider().candidates(state)] == [
+        {"type": "cancel_selection"}
+    ]
+
+
+def test_a_bundle_screen_with_nothing_to_pick_can_be_left():
+    state = {
+        "state_type": "bundle_select",
+        "bundle_select": {
+            "bundles": [],
+            "preview_showing": False,
+            "can_confirm": False,
+            "can_cancel": True,
+        },
+    }
+
+    assert [a.to_dict() for a in LegalActionProvider().candidates(state)] == [
+        {"type": "cancel_bundle_selection"}
+    ]
+
+
+def test_a_full_prompt_offers_confirming_and_nothing_else():
+    """This is the fork "choose a card to upgrade" used to loop on."""
+    state = {
+        "state_type": "card_select",
+        "card_select": {
+            "selected_count": 1,
+            "min_select": 1,
+            "max_select": 1,
+            "selected_cards": [{"index": 0}],
+            "cards": [{"index": 0}, {"index": 1}],
+            "can_confirm": True,
+            "can_cancel": True,
+        },
+    }
+
+    assert [a.to_dict() for a in LegalActionProvider().candidates(state)] == [
+        {"type": "confirm_selection"}
+    ]

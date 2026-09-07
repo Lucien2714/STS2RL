@@ -223,6 +223,18 @@ class LegalActionProvider:
         return actions
 
     def _card_select_actions(self, state: RawState) -> list[GameAction]:
+        """Return the picks, and cancelling only when there is nothing to pick.
+
+        Cancelling puts every card back exactly as it was, which is a loop
+        rather than a choice: a deterministic policy picks the same card again
+        and arrives at the same fork, and "choose a card to upgrade" never
+        ends.  Filling the prompt is confirmed by ``GameEnv`` anyway, so the
+        decision here is only which card.
+
+        It stays as a last resort.  A screen can offer nothing to pick and
+        nothing to confirm -- asking for a card the deck does not contain --
+        and then cancelling is the only way out.
+        """
         selection = self._mapping(state.get("card_select"))
         actions = [
             GameAction("select_card", index=index)
@@ -230,11 +242,14 @@ class LegalActionProvider:
         ]
         if selection.get("can_confirm") is True:
             actions.append(GameAction("confirm_selection"))
-        if selection.get("can_cancel") is True or selection.get("can_skip") is True:
+        if not actions and (
+            selection.get("can_cancel") is True or selection.get("can_skip") is True
+        ):
             actions.append(GameAction("cancel_selection"))
         return actions
 
     def _bundle_select_actions(self, state: RawState) -> list[GameAction]:
+        """Return the picks, and cancelling only when there is nothing to pick."""
         selection = self._mapping(state.get("bundle_select"))
         # Opening a preview replaces picking: the API rejects select_bundle
         # with "a bundle preview is already open - confirm or cancel it first".
@@ -248,7 +263,7 @@ class LegalActionProvider:
         )
         if selection.get("can_confirm") is True:
             actions.append(GameAction("confirm_bundle_selection"))
-        if selection.get("can_cancel") is True:
+        if not actions and selection.get("can_cancel") is True:
             actions.append(GameAction("cancel_bundle_selection"))
         return actions
 
