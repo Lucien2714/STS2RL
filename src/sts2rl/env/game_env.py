@@ -19,6 +19,24 @@ from sts2rl.env.types import EnvStep, RawState
 CARD_REWARD_DECISIONS = frozenset({"select_card_reward", "skip_card_reward"})
 
 
+def _selection_is_complete(prompt: dict) -> bool:
+    """Return whether a selection prompt is full and ready to be confirmed.
+
+    Only a prompt that reports how many it wants can be known to be full.  A
+    "choose" screen picks immediately and leaves ``selected_count`` at zero, so
+    it never looks complete and is correctly left alone.
+    """
+    if prompt.get("can_confirm") is not True:
+        return False
+    selected = prompt.get("selected_count")
+    maximum = prompt.get("max_select")
+    if isinstance(selected, bool) or not isinstance(selected, int):
+        return False
+    if isinstance(maximum, bool) or not isinstance(maximum, int):
+        return False
+    return selected >= maximum
+
+
 class GameEnv:
     """Reset and step one raw STS2MCP single-player environment."""
 
@@ -105,6 +123,10 @@ class GameEnv:
         * Picking a bundle opens a preview whose only moves are confirming and
           cancelling, and cancelling returns to the same list of bundles.  The
           pick is confirmed.
+        * Filling a card-selection prompt leaves confirming and cancelling, and
+          cancelling puts every card back for the same deterministic policy to
+          pick again.  "Choose a card to upgrade" loops forever that way.  The
+          selection is confirmed once the prompt will take no more cards.
 
         This is the one place the environment sends a request the agent did not
         choose.  It is safe because in both cases nothing else is left on the
@@ -117,6 +139,24 @@ class GameEnv:
             if raw_state.get("state_type") != "rewards":
                 return raw_state, False
             follow_up = self.client.proceed
+        elif action.action_type == "select_card":
+            prompt = raw_state.get("card_select")
+            if raw_state.get("state_type") != "card_select" or not isinstance(
+                prompt, dict
+            ):
+                return raw_state, False
+            if not _selection_is_complete(prompt):
+                return raw_state, False
+            follow_up = self.client.confirm_selection
+        elif action.action_type == "combat_select_card":
+            prompt = raw_state.get("hand_select")
+            if raw_state.get("state_type") != "hand_select" or not isinstance(
+                prompt, dict
+            ):
+                return raw_state, False
+            if not _selection_is_complete(prompt):
+                return raw_state, False
+            follow_up = self.client.combat_confirm_selection
         elif action.action_type == "select_bundle":
             bundle = raw_state.get("bundle_select")
             if raw_state.get("state_type") != "bundle_select" or not isinstance(

@@ -288,3 +288,97 @@ def test_a_refused_bundle_confirmation_leaves_an_actionable_screen():
     assert step.raw_state["state_type"] == "bundle_select"
     assert step.info["action_error"] is False
     assert "auto_proceeded" not in step.info
+
+
+class UpgradeClient:
+    """A "choose a card to upgrade" overlay: pick one, then confirm or cancel."""
+
+    def __init__(self, *, max_select: int = 1, screen: str = "card_select"):
+        self.calls = []
+        self.max_select = max_select
+        self.screen = screen
+        self.selected = 0
+        self.state = self._prompt()
+
+    def _prompt(self):
+        block = {
+            "screen_type": "upgrade",
+            "selected_count": self.selected,
+            "min_select": self.max_select,
+            "max_select": self.max_select,
+            "cards": [{"index": 0}, {"index": 1}],
+            "can_confirm": self.selected >= self.max_select,
+            "can_cancel": True,
+        }
+        return {"state_type": self.screen, self.screen: block}
+
+    def get_state(self):
+        return self.state
+
+    def select_card(self, index):
+        self.calls.append(f"select_card:{index}")
+        self.selected += 1
+        self.state = self._prompt()
+        return {"state": self.state}
+
+    def combat_select_card(self, card_index):
+        self.calls.append(f"combat_select_card:{card_index}")
+        self.selected += 1
+        self.state = self._prompt()
+        return {"state": self.state}
+
+    def confirm_selection(self):
+        self.calls.append("confirm_selection")
+        self.state = {"state_type": "rest_site", "run": {"floor": 5}}
+        return {"state": self.state}
+
+    def combat_confirm_selection(self):
+        self.calls.append("combat_confirm_selection")
+        self.state = {"state_type": "monster", "run": {"floor": 5}}
+        return {"state": self.state}
+
+
+def test_a_full_card_selection_confirms_itself():
+    """Cancelling puts every card back for argmax to pick again, forever."""
+    client = UpgradeClient()
+
+    with GameEnv(client=client) as env:
+        step = env.step(GameAction("select_card", index=1))
+
+    assert client.calls == ["select_card:1", "confirm_selection"]
+    assert step.raw_state["state_type"] == "rest_site"
+    assert step.info["auto_proceeded"] is True
+
+
+def test_a_half_filled_selection_is_left_to_the_agent():
+    """Choosing 2 of N is a real sequence of decisions, not one."""
+    client = UpgradeClient(max_select=2)
+
+    with GameEnv(client=client) as env:
+        step = env.step(GameAction("select_card", index=0))
+
+    assert client.calls == ["select_card:0"]
+    assert "auto_proceeded" not in step.info
+    assert step.raw_state["card_select"]["selected_count"] == 1
+
+
+def test_hand_selection_confirms_itself_when_full():
+    client = UpgradeClient(screen="hand_select")
+
+    with GameEnv(client=client) as env:
+        step = env.step(GameAction("combat_select_card", card_index=0))
+
+    assert client.calls == ["combat_select_card:0", "combat_confirm_selection"]
+    assert step.raw_state["state_type"] == "monster"
+
+
+def test_a_choose_screen_that_never_reports_a_selection_is_left_alone():
+    """"choose" picks immediately and holds selected_count at zero."""
+    client = UpgradeClient()
+    client.selected = -1  # so selected_count stays below max after the pick
+
+    with GameEnv(client=client) as env:
+        step = env.step(GameAction("select_card", index=0))
+
+    assert client.calls == ["select_card:0"]
+    assert "auto_proceeded" not in step.info
