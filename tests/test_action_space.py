@@ -63,9 +63,11 @@ def test_combat_candidates_expand_enemy_targets_and_filter_unplayable_cards():
                 "rewards": {"items": [{"index": 1}], "can_proceed": True},
                 "player": {"potions": []},
             },
-            # Leaving is not offered while a reward is still there to take.
+            # The item reports no type, so it is not one that is simply
+            # owed, and the exit stays open.
             [
                 {"type": "claim_reward", "index": 1},
+                {"type": "proceed"},
             ],
         ),
         (
@@ -458,7 +460,7 @@ def test_the_shop_follows_the_same_rule():
     assert not [a for a in payloads(roomy) if a["type"] == "discard_potion"]
 
 
-def test_leaving_a_reward_screen_is_not_offered_while_rewards_remain():
+def test_leaving_is_not_offered_while_gold_or_a_relic_sits_there():
     """proceed abandons the screen and is a step cheaper than claiming.
 
     Offered side by side, a traced policy took proceed on 27 of 28 reward
@@ -480,6 +482,62 @@ def test_leaving_a_reward_screen_is_not_offered_while_rewards_remain():
     actions = payloads(state)
 
     assert [a["type"] for a in actions] == ["claim_reward"] * 3
+
+
+def test_a_card_alone_never_shuts_the_exit():
+    """Declining a card puts it straight back, so it must not block leaving.
+
+    Verified live: the rewards item list is identical before claiming a card
+    reward and after skipping it, so refusing to offer proceed here would trap
+    the agent claiming and declining the same card forever.
+    """
+    state = {
+        "state_type": "rewards",
+        "rewards": {
+            "items": [
+                {"index": 0, "type": "card"},
+                {"index": 1, "type": "card_removal"},
+            ],
+            "can_proceed": True,
+        },
+        "player": {"potions": []},
+    }
+
+    assert {"type": "proceed"} in payloads(state)
+
+
+def test_an_unfamiliar_reward_type_cannot_lock_the_screen():
+    state = {
+        "state_type": "rewards",
+        "rewards": {
+            "items": [{"index": 0, "type": "something_new"}],
+            "can_proceed": True,
+        },
+        "player": {"potions": []},
+    }
+
+    assert {"type": "proceed"} in payloads(state)
+
+
+def test_a_full_belt_does_not_let_a_potion_shut_the_exit():
+    state = {
+        "state_type": "rewards",
+        "rewards": {
+            "items": [
+                {"index": 0, "type": "potion"},
+                {"index": 1, "type": "card"},
+            ],
+            "can_proceed": True,
+        },
+        "player": {"potions": [{"slot": 0}], "max_potion_slots": 1},
+    }
+
+    actions = payloads(state)
+
+    assert {"type": "proceed"} in actions
+    assert [a for a in actions if a["type"] == "claim_reward"] == [
+        {"type": "claim_reward", "index": 1}
+    ]
 
 
 def test_an_empty_reward_screen_may_be_left():

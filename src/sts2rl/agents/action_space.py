@@ -13,6 +13,13 @@ class NoLegalActionsError(RuntimeError):
     """Raised when the current state exposes no safe automatable action."""
 
 
+# Rewards that are taken in one step and are then gone.  Everything else opens
+# a second screen the game lets you decline, and declining leaves the reward
+# sitting on the rewards screen exactly as it was, so it can never be what
+# keeps the exit shut.  Unknown types fall outside this set on purpose.
+REWARDS_TAKEN_OUTRIGHT = frozenset({"gold", "relic", "potion"})
+
+
 class LegalActionProvider:
     """Enumerate complete, parameterized actions that are legal in a raw state."""
 
@@ -112,36 +119,39 @@ class LegalActionProvider:
         return actions
 
     def _reward_actions(self, state: RawState) -> list[GameAction]:
-        """Return the claims, and offer to leave only once nothing is left.
+        """Return the claims, and offer to leave once nothing is simply owed.
 
         ``proceed`` ends the screen and abandons everything still on it, and it
-        is immediately cheaper than claiming: leaving costs one step, while
-        taking a reward costs a step and still leaves the screen to leave.  The
-        payoff for claiming arrives many nodes later, if at all.  Offered side
-        by side, the agent learned the obvious lesson -- a traced policy took
-        ``proceed`` on 27 of 28 reward screens and reached the card-reward
-        screen not once in 925 decisions.
+        is immediately cheaper than claiming.  Offered side by side, a traced
+        policy took it on 27 of 28 reward screens and reached the card-reward
+        screen not once in 925 decisions, so the deck never improved.
 
-        Walking away from gold, a relic, or a free potion is not a decision
-        worth offering.  The decision that *is* real -- which card to add, or
-        none -- lives on the ``card_reward`` screen the claim opens, where the
-        game itself provides ``skip_card_reward``.  Claiming a card reward is
-        how the agent gets to make it.
+        Gold, a relic and a free potion are taken in one step and are then
+        gone; walking away from them is not a decision worth offering, so while
+        one is on the screen there is no way out but to take it.
 
-        Nothing forces a claim that cannot be made: a potion with a full belt
-        is not offered, and when that leaves no claims at all, ``proceed``
-        comes back.
+        A card is different, and so is a card removal: claiming opens a second
+        screen the game lets you decline, and **declining puts the reward back
+        on this screen unchanged** -- verified live, the item list is identical
+        before and after ``skip_card_reward``.  Refusing to offer ``proceed``
+        there would trap the agent claiming and declining forever, so anything
+        outside ``REWARDS_TAKEN_OUTRIGHT`` leaves the exit open.  An unfamiliar
+        reward type is treated the same way: an unknown screen must never be
+        able to lock a run.
         """
         rewards = self._mapping(state.get("rewards"))
-        claims = [
-            GameAction("claim_reward", index=index)
-            for item in self._records(rewards.get("items"))
-            if item.get("type") != "potion" or not self._potion_belt_is_full(state)
-            for index in [self._index(item)]
-            if index is not None
-        ]
-        actions = list(claims)
-        if not claims and rewards.get("can_proceed") is True:
+        actions: list[GameAction] = []
+        owed = False
+        for item in self._records(rewards.get("items")):
+            if item.get("type") == "potion" and self._potion_belt_is_full(state):
+                continue
+            index = self._index(item)
+            if index is None:
+                continue
+            actions.append(GameAction("claim_reward", index=index))
+            if item.get("type") in REWARDS_TAKEN_OUTRIGHT:
+                owed = True
+        if not owed and rewards.get("can_proceed") is True:
             actions.append(GameAction("proceed"))
         actions.extend(self._discard_potion_actions(state))
         return actions
