@@ -307,17 +307,23 @@ class CandidatePPOAgent(Agent):
         return metrics
 
     def abort_lane(self, lane: int) -> None:
-        """Drop one environment's in-flight decision after its episode failed.
+        """Discard one environment's whole trajectory after its episode failed.
 
-        The steps that lane already recorded are real experience whose rewards
-        the environment actually paid, so they stay in the rollout; only the
-        decision waiting on an observation that will never arrive is dropped.
-        Clearing the whole agent here would throw away the other clients' work.
+        The steps leading up to a crash are the least trustworthy in the
+        rollout, not the most: a client on its way out serves stale or partial
+        state, and rewards are differences between states -- a floor that
+        failed to update invents progress that never happened.  Keeping them to
+        save the handful of samples a rare crash costs trades data quality for
+        almost no data.
+
+        Only this lane is cleared.  ``abort_episode`` clears every lane and
+        would throw away the other clients' work.
         """
         entry = self._lane(lane)
         entry.pending = None
         entry.forced_action = False
         entry.carried_reward = 0.0
+        entry.steps.clear()
 
     def abort_episode(self) -> None:
         """Discard incomplete actions and rollouts without undoing prior updates."""

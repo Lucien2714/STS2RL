@@ -540,3 +540,41 @@ def test_a_checkpoint_refuses_a_boundary_any_lane_is_mid_decision():
 
     with pytest.raises(RuntimeError, match="unobserved action"):
         agent.checkpoint_state()
+
+
+def test_aborting_a_lane_discards_its_whole_trajectory():
+    """Steps recorded on the way to a crash are the least trustworthy ones."""
+    agent = _agent(rollout_size=1000)
+    for _ in range(3):
+        _step(agent, 0, reward=1.0, done=False)
+    agent.choose_action(_observation(_map_state(2)), lane=0)
+
+    agent.abort_lane(0)
+
+    assert agent._lane(0).steps == []
+    assert agent._lane(0).pending is None
+    assert agent._lane(0).carried_reward == 0.0
+
+
+def test_aborting_one_lane_leaves_the_other_clients_alone():
+    agent = _agent(rollout_size=1000)
+    _step(agent, 0, reward=1.0, done=False)
+    _step(agent, 1, reward=1.0, done=False)
+    _step(agent, 1, reward=1.0, done=False)
+
+    agent.abort_lane(0)
+
+    assert agent._lane(0).steps == []
+    assert len(agent._lane(1).steps) == 2
+
+
+def test_an_aborted_lane_does_not_break_the_next_update():
+    agent = _agent(rollout_size=1000)
+    _step(agent, 0, reward=1.0, done=False)
+    _step(agent, 1, reward=1.0, done=False)
+    agent.abort_lane(0)
+
+    metrics = agent.update()
+
+    assert metrics["lanes"] == 1.0
+    assert metrics["rollout_steps"] == 1.0
