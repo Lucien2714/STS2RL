@@ -104,6 +104,9 @@ class LaneView(Agent):
     def observe(self, transition: Transition) -> None:
         self.agent.observe(transition, lane=self.lane)
 
+    def discard_decision(self) -> None:
+        self.agent.discard_decision(lane=self.lane)
+
     def finish_episode(self, final_state: GameObservation, truncated: bool) -> None:
         self.agent.finish_episode(final_state, truncated, lane=self.lane)
 
@@ -324,6 +327,18 @@ class CandidatePPOAgent(Agent):
         metrics = tuple(dict(item) for item in self._completed_update_metrics)
         self._completed_update_metrics.clear()
         return metrics
+
+    def discard_decision(self, lane: int = 0) -> None:
+        """Forget one lane's chosen action, keeping everything it has learned.
+
+        A refusal that leaves the screen unchanged is not a transition: the
+        action was legal and the screen was simply not ready.  The decision is
+        dropped so the lane can choose again, while the rollout it has already
+        collected is untouched.
+        """
+        entry = self._lane(lane)
+        entry.pending = None
+        entry.forced_action = False
 
     def abort_lane(self, lane: int) -> None:
         """Discard one environment's whole trajectory after its episode failed.

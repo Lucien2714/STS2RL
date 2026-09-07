@@ -14,7 +14,7 @@ from sts2rl.env.game_env import GameEnv
 from sts2rl.env.mcp_client import STS2ClientError
 from sts2rl.env.reset import ResetSpec
 from sts2rl.env.rewards import RewardModel, RunProgressReward
-from sts2rl.env.types import GameObservation, RawState
+from sts2rl.env.types import EnvStep, GameObservation, RawState
 
 
 @dataclass(frozen=True)
@@ -85,6 +85,8 @@ class EpisodeRunner:
         observation = self._observation(initial_state)
         transitions: list[Transition] = []
         total_reward = 0.0
+        stalled = 0
+        truncated_by_stall = False
         self.reward_model.reset(initial_state)
         self.agent.reset(observation)
 
@@ -94,6 +96,22 @@ class EpisodeRunner:
                 break
             action, observation = decision
             env_step = self.env.step(action)
+
+            if self._refused_without_moving(observation, env_step):
+                # The screen was not ready, not the action wrong.  Recording
+                # this would teach that resting at a rest site does nothing,
+                # and repeating it is how a deterministic policy spends ten
+                # thousand steps on one screen.
+                stalled += 1
+                self.agent.discard_decision()
+                if stalled > self.max_state_refreshes:
+                    truncated_by_stall = True
+                    break
+                self._wait_for_the_screen(stalled - 1)
+                observation = self._observation(self.env.get_state())
+                continue
+            stalled = 0
+
             if env_step.info.get("action_error"):
                 reward, reward_info = self.reward_model.action_error_reward(
                     env_step.info.get("error")
@@ -132,6 +150,7 @@ class EpisodeRunner:
                     reused_run=reused_run,
                 )
 
+        del truncated_by_stall
         self.agent.finish_episode(observation, truncated=True)
         return EpisodeResult(
             initial_state=initial_state,
@@ -142,6 +161,32 @@ class EpisodeRunner:
             truncated=True,
             reused_run=reused_run,
         )
+
+    @staticmethod
+    def _refused_without_moving(
+        observation: GameObservation,
+        env_step: EnvStep,
+    ) -> bool:
+        """Return whether the game refused an action and nothing changed.
+
+        Screens move between being read and being clicked -- a rest site that
+        has not opened, a map that has closed -- and the game answers "not
+        open" while the state stays exactly as it was.  That pair is the whole
+        signature of a livelock: a deterministic policy sees the same screen,
+        chooses the same action, and is refused again forever.
+        """
+        if not env_step.info.get("action_error"):
+            return False
+        return env_step.raw_state == observation.raw_state
+
+    def _wait_for_the_screen(self, attempt: int) -> None:
+        if self.refresh_backoff_seconds:
+            time.sleep(
+                min(
+                    self.refresh_backoff_seconds * (2**attempt),
+                    self.max_refresh_backoff_seconds,
+                )
+            )
 
     def _choose_with_refresh(
         self, observation: GameObservation

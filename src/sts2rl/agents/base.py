@@ -37,6 +37,16 @@ class Agent(ABC):
         """Observe a completed transition; evaluation agents may ignore it."""
         return None
 
+    def discard_decision(self) -> None:
+        """Forget the last chosen action instead of observing a result for it.
+
+        The runner calls this when the game refused an action and the screen
+        did not move.  That is not a transition worth learning from -- the
+        action was legal, the screen simply was not ready -- and recording it
+        would teach that resting at a rest site does nothing.
+        """
+        return None
+
     def finish_episode(
         self, final_state: GameObservation, truncated: bool
     ) -> None:

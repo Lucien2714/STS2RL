@@ -307,3 +307,87 @@ def test_the_refresh_backoff_is_capped(monkeypatch):
     )
 
     assert longest == runner_module.MAX_REFRESH_BACKOFF_SECONDS
+
+
+class RefusingEnv:
+    """An env whose screen refuses the action until it finally opens."""
+
+    def __init__(self, refusals: int):
+        self.refusals = refusals
+        self.steps = 0
+        self.screen = {"state_type": "rest_site",
+                       "rest_site": {"options": [{"index": 0}], "can_proceed": False},
+                       "run": {"floor": 3}}
+        self.reused_active_run = False
+
+    def reset(self, spec=None):
+        return self.screen
+
+    def get_state(self):
+        return self.screen
+
+    def step(self, action):
+        self.steps += 1
+        if self.refusals:
+            self.refusals -= 1
+            # Refused, and the screen is exactly as it was.
+            return EnvStep(
+                raw_state=self.screen,
+                done=False,
+                info={"action_error": True, "error": "Rest site room is not open"},
+            )
+        done_state = {"state_type": "game_over", "run": {"floor": 4}}
+        return EnvStep(raw_state=done_state, done=True, info={"action_error": False})
+
+    def get_player_detail(self):
+        return None
+
+
+class CountingAgent:
+    def __init__(self) -> None:
+        self.observed = 0
+        self.discarded = 0
+
+    def reset(self, observation) -> None:
+        pass
+
+    def choose_action(self, observation):
+        return GameAction("choose_rest_option", index=0)
+
+    def observe(self, transition) -> None:
+        self.observed += 1
+
+    def discard_decision(self) -> None:
+        self.discarded += 1
+
+    def finish_episode(self, final_state, truncated) -> None:
+        pass
+
+
+def test_a_refusal_that_moves_nothing_is_retried_not_learned_from():
+    """Recording it would teach that resting at a rest site does nothing."""
+    env = RefusingEnv(refusals=3)
+    agent = CountingAgent()
+    runner = EpisodeRunner(env, agent, refresh_backoff_seconds=0.0)
+
+    result = runner.run()
+
+    assert agent.discarded == 3
+    assert agent.observed == 1
+    assert result.steps == 1
+    assert result.terminated is True
+
+
+def test_a_screen_that_never_opens_ends_the_episode():
+    """Otherwise a deterministic policy spends the whole step budget on it."""
+    env = RefusingEnv(refusals=10_000)
+    agent = CountingAgent()
+    runner = EpisodeRunner(
+        env, agent, max_state_refreshes=3, refresh_backoff_seconds=0.0
+    )
+
+    result = runner.run()
+
+    assert agent.observed == 0
+    assert result.truncated is True
+    assert env.steps <= 5

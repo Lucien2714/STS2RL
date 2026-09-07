@@ -270,17 +270,23 @@ class LegalActionProvider:
     def _selectable_indices(self, prompt: RawState) -> list[int]:
         """Return the card indices a selection prompt will still accept.
 
-        Picking past ``max_select`` is rejected, and an agent that cannot see
-        that wastes most of its steps on refusals.  Once the prompt is full,
-        confirming is the only thing left.
+        Picking past ``max_select`` is rejected, and so is re-picking a card
+        that is already chosen.  An agent that cannot see either wastes its
+        steps on refusals -- and a deterministic one never stops, because the
+        refusal leaves the screen exactly as it was.
 
-        A card that has been picked is *moved*: the mod drops it from ``cards``
-        and lists it under ``selected_cards``, so everything still in ``cards``
-        is still selectable and there is nothing here to filter.  An earlier
-        version also skipped cards flagged ``is_selected``; live traces show
-        that flag is never true, because the card is gone from the list by
-        then.  If a build ever leaves picked cards in place with a flag
-        instead, that filter has to come back.
+        **The two selection screens report a pick differently**, and both
+        shapes are live:
+
+        * ``hand_select`` *moves* the card, dropping it from ``cards`` and
+          listing it under ``selected_cards``, so ``is_selected`` is never true
+          on what remains.
+        * ``card_select`` *leaves it in place* with ``is_selected: true`` --
+          observed on "Choose 2 cards to Remove", where the picked card stayed
+          in the list and offering it again livelocked the run.
+
+        Filtering on the flag handles both: it is simply never set on the
+        screen that moves the card.
         """
         selected_count = self._integer(prompt.get("selected_count"))
         max_select = self._integer(prompt.get("max_select"))
@@ -290,7 +296,13 @@ class LegalActionProvider:
             and selected_count >= max_select
         ):
             return []
-        return self._indices(prompt.get("cards"))
+        return [
+            index
+            for card in self._records(prompt.get("cards"))
+            if card.get("is_selected") is not True
+            for index in [self._index(card)]
+            if index is not None
+        ]
 
     def _relic_select_actions(self, state: RawState) -> list[GameAction]:
         selection = self._mapping(state.get("relic_select"))

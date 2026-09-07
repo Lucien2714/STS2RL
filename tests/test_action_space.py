@@ -654,3 +654,60 @@ def test_a_full_prompt_offers_confirming_and_nothing_else():
     assert [a.to_dict() for a in LegalActionProvider().candidates(state)] == [
         {"type": "confirm_selection"}
     ]
+
+
+def test_a_picked_card_that_stays_in_the_list_is_not_offered_again():
+    """card_select leaves the pick in place with is_selected; hand_select moves it.
+
+    Taken from a live "Choose 2 cards to Remove" screen: selected_count 1 of 2,
+    no selected_cards field, and the chosen card still listed. Offering it
+    again is refused by the game and leaves the screen unchanged, so a
+    deterministic policy picks it forever.
+    """
+    state = {
+        "state_type": "card_select",
+        "card_select": {
+            "screen_type": "select",
+            "prompt": "Choose 2 cards to Remove.",
+            "selected_count": 1,
+            "min_select": 2,
+            "max_select": 2,
+            "preview_showing": False,
+            "can_confirm": False,
+            "can_cancel": False,
+            "cards": [
+                {"index": 0, "name": "Strike", "is_selected": False},
+                {"index": 1, "name": "Twin Strike", "is_selected": True},
+                {"index": 2, "name": "Defend", "is_selected": False},
+            ],
+        },
+    }
+
+    actions = [a.to_dict() for a in LegalActionProvider().candidates(state)]
+
+    assert actions == [
+        {"type": "select_card", "index": 0},
+        {"type": "select_card", "index": 2},
+    ]
+
+
+def test_the_other_shape_still_works_when_the_pick_is_moved_away():
+    """hand_select drops the card from `cards`, so nothing carries the flag."""
+    state = {
+        "state_type": "hand_select",
+        "hand_select": {
+            "selected_count": 1,
+            "min_select": 2,
+            "max_select": 2,
+            "selected_cards": [{"index": 0, "name": "Thunderclap"}],
+            "cards": [{"index": 0, "name": "Defend"}, {"index": 1, "name": "Strike"}],
+            "can_confirm": False,
+        },
+    }
+
+    actions = [a.to_dict() for a in LegalActionProvider().candidates(state)]
+
+    assert actions == [
+        {"type": "combat_select_card", "card_index": 0},
+        {"type": "combat_select_card", "card_index": 1},
+    ]
