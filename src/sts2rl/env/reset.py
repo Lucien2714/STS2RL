@@ -234,7 +234,19 @@ class ResetController:
             if state_type == "game_over":
                 advanced = self._leave_game_over(raw_state)
             else:
-                advanced = self._advance_menu(raw_state, spec, character_id)
+                try:
+                    advanced = self._advance_menu(raw_state, spec, character_id)
+                except STS2ClientError:
+                    # The screen can move between the read and the request --
+                    # game_over dismisses itself, a run finishes loading -- and
+                    # the mod then rejects the click with "Not on a menu
+                    # screen".  Whether that is a failure depends on the state,
+                    # not the message: if the game moved on, it is progress.
+                    advanced = self._await_stable_state(raw_state)
+                    if not is_run_state(advanced) and (
+                        self._menu_signature(advanced) == signature
+                    ):
+                        raise
 
             # A menu that reports no change may simply not have applied the
             # transition yet, so give it a moment before calling it a stall.

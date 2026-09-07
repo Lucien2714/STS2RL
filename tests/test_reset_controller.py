@@ -842,3 +842,50 @@ def test_a_menu_that_never_moves_is_still_a_stall():
 
     # It tried the menu's own option before giving up.
     assert ("abandon_run", None) in client.calls
+
+
+class MovedOnClient:
+    """A menu that rejects the click because the game already left it."""
+
+    def __init__(self, *, recovers: bool):
+        self.calls = []
+        self.recovers = recovers
+        self.rejected = False
+
+    def get_state(self):
+        if self.rejected and self.recovers:
+            return {"state_type": "map", "run": {"floor": 0}}
+        return {
+            "state_type": "menu",
+            "menu_screen": "main",
+            "options": ["singleplayer", "settings"],
+        }
+
+    def menu_select(self, option, seed=None):
+        self.calls.append((option, seed))
+        self.rejected = True
+        raise STS2ClientError("Not on a menu screen")
+
+
+def test_a_click_rejected_because_the_game_moved_on_is_progress():
+    """game_over dismisses itself; the click loses the race but we wanted that."""
+    client = MovedOnClient(recovers=True)
+    controller = ResetController(
+        client, ActionDispatcher(client), start_poll_seconds=0.0
+    )
+
+    state = controller.reset(ResetSpec())
+
+    assert state["state_type"] == "map"
+    assert client.calls == [("singleplayer", None)]
+
+
+def test_a_rejected_click_on_a_screen_that_never_moves_still_fails():
+    """Otherwise a genuinely broken menu would loop until the budget ran out."""
+    client = MovedOnClient(recovers=False)
+    controller = ResetController(
+        client, ActionDispatcher(client), start_poll_seconds=0.0, start_poll_attempts=2
+    )
+
+    with pytest.raises(STS2ClientError, match="Not on a menu screen"):
+        controller.reset(ResetSpec())
