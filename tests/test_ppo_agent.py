@@ -177,14 +177,16 @@ def test_agent_checkpoint_round_trip_restores_logits_and_optimizer():
     assert restored.optimizer.state
 
 
-def test_checkpoint_requires_clean_boundary_and_abort_discards_partial_work():
+def test_saving_is_a_snapshot_that_does_not_disturb_the_rollout():
+    """Demanding an empty rollout is what forced updates on 13 transitions."""
     torch.manual_seed(38)
     agent = _agent(rollout_size=20)
     observation = _observation(_map_state(2))
     action = agent.choose_action(observation)
 
-    with pytest.raises(RuntimeError, match="unobserved action"):
-        agent.checkpoint_state()
+    # Mid-decision on one lane, and mid-rollout after it: both are fine to save.
+    payload = agent.checkpoint_state()
+    assert set(payload) == {"encoder", "optimizer"}
 
     agent.observe(
         Transition(
@@ -195,8 +197,52 @@ def test_checkpoint_requires_clean_boundary_and_abort_discards_partial_work():
             done=False,
         )
     )
-    with pytest.raises(RuntimeError, match="non-empty rollout"):
-        agent.checkpoint_state()
+    agent.checkpoint_state()
+
+    assert len(agent._lane(0).steps) == 1
+    assert agent.optimizer_updates == 0
+
+
+def test_a_saved_snapshot_is_detached_from_later_training():
+    """Another client can be mid-optimizer-step while the file is written."""
+    torch.manual_seed(38)
+    agent = _agent(rollout_size=2)
+    payload = agent.checkpoint_state()
+    before = {name: tensor.clone() for name, tensor in payload["encoder"].items()}
+
+    for _ in range(2):
+        _step(agent, 0, reward=1.0, done=False)
+
+    assert agent.optimizer_updates == 1
+    for name, tensor in payload["encoder"].items():
+        assert torch.equal(tensor, before[name])
+
+
+def test_loading_still_refuses_an_agent_with_work_in_flight():
+    """Overwriting the weights a pending decision was made under is real damage."""
+    torch.manual_seed(38)
+    agent = _agent()
+    payload = agent.checkpoint_state()
+    agent.choose_action(_observation(_map_state(2)))
+
+    with pytest.raises(RuntimeError, match="unobserved action"):
+        agent.load_checkpoint_state(payload)
+
+
+def test_aborting_discards_partial_work():
+    torch.manual_seed(38)
+    agent = _agent(rollout_size=20)
+    observation = _observation(_map_state(2))
+    action = agent.choose_action(observation)
+    agent.observe(
+        Transition(
+            state=observation,
+            action=action,
+            reward=0.0,
+            next_state=_observation(_map_state(1)),
+            done=False,
+        )
+    )
 
     agent.abort_episode()
 
@@ -534,12 +580,16 @@ def test_a_lane_view_binds_every_call_to_its_lane():
     assert agent._lane(0).steps == []
 
 
-def test_a_checkpoint_refuses_a_boundary_any_lane_is_mid_decision():
-    agent = _agent()
-    agent.choose_action(_observation(_map_state(2)), lane=3)
+def test_the_update_hook_fires_where_the_rollout_is_empty():
+    """The trainer checkpoints here, which is why nothing has to be flushed."""
+    agent = _agent(rollout_size=2)
+    seen: list[int] = []
+    agent.on_update = lambda: seen.append(agent._rollout_length())
 
-    with pytest.raises(RuntimeError, match="unobserved action"):
-        agent.checkpoint_state()
+    for _ in range(2):
+        _step(agent, 0, reward=1.0, done=False)
+
+    assert seen == [0]
 
 
 def test_aborting_a_lane_discards_its_whole_trajectory():

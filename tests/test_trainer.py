@@ -21,6 +21,23 @@ class FakeAgent:
         self.optimizer_updates = 0
         self.updates: list[dict[str, float]] = []
         self.abort_count = 0
+        # The real agent calls this the moment an update finishes; the trainer
+        # checkpoints from there, so a fake that skips it tests nothing.
+        self.on_update = None
+
+    def finish_update(self) -> None:
+        """Stand in for one completed optimizer update."""
+        self.optimizer_updates += 1
+        self.updates.append(
+            {
+                "environment_steps": float(self.environment_steps),
+                "optimizer_update": float(self.optimizer_updates),
+                "loss": 0.5,
+                "rollout_steps": 256.0,
+            }
+        )
+        if self.on_update is not None:
+            self.on_update()
 
     def drain_update_metrics(self) -> tuple[dict[str, float], ...]:
         result = tuple(self.updates)
@@ -54,15 +71,7 @@ class FakeRunner:
         self.reset_specs.append(reset_spec)
         self.calls += 1
         self.agent.environment_steps += self.steps
-        self.agent.optimizer_updates += 1
-        self.agent.updates.append(
-            {
-                "environment_steps": float(self.agent.environment_steps),
-                "optimizer_update": float(self.agent.optimizer_updates),
-                "loss": 0.5,
-                "rollout_steps": float(self.steps),
-            }
-        )
+        self.agent.finish_update()
         if self.failure is not None:
             raise self.failure
         return _result(
@@ -473,15 +482,21 @@ def test_clients_actually_overlap():
     assert peak == 2
 
 
-def test_a_checkpoint_drains_every_client_first():
-    """A checkpoint needs an empty rollout, so no episode may be in flight."""
+def test_a_checkpoint_no_longer_has_to_stop_the_other_clients():
+    """Saving is a read-only snapshot, so nobody has to be idle for it.
+
+    Draining first is what created the empty rollout a checkpoint used to
+    demand, and manufacturing that emptiness meant updating on whatever had
+    been collected -- the tail of an episode, where the deaths and the boss
+    wins are.
+    """
     agent = FakeAgent()
     ledger: list = []
     runners = [
         SlowFakeRunner(agent, ledger, "a", 0.02),
         SlowFakeRunner(agent, ledger, "b", 0.02),
     ]
-    trainer = _parallel_trainer(runners, _plan(total=4, checkpoint_every=2))
+    trainer = _parallel_trainer(runners, _plan(total=4, checkpoint_every=1))
     original = trainer._save_checkpoint
 
     def recording_save() -> None:
@@ -491,14 +506,25 @@ def test_a_checkpoint_drains_every_client_first():
     trainer._save_checkpoint = recording_save  # type: ignore[method-assign]
     trainer.train()
 
-    depth = 0
-    for kind, _ in ledger:
-        if kind == "enter":
-            depth += 1
-        elif kind == "leave":
-            depth -= 1
-        else:
-            assert depth == 0, "a checkpoint ran while an episode was in flight"
+    assert any(kind == "checkpoint" for kind, _ in ledger)
+    assert trainer.checkpoint_manager.episodes
+
+
+def test_a_checkpoint_never_flushes_the_rollout():
+    """Flushing is what produced 13-transition updates before every save."""
+    agent = FakeAgent()
+    runner = UpdatingRunner(agent, updates_per_episode=1)
+    trainer = Trainer(
+        runner,  # type: ignore[arg-type]
+        agent,  # type: ignore[arg-type]
+        FakeCheckpointManager(),  # type: ignore[arg-type]
+        FakeMetricsWriter(),  # type: ignore[arg-type]
+        _plan(total=4, checkpoint_every=1),
+    )
+
+    trainer.train()
+
+    assert getattr(agent, "flush_count", 0) == 0
 
 
 def test_parallel_episodes_claim_distinct_seeds():
@@ -652,15 +678,7 @@ class UpdatingRunner(FakeRunner):
         self.calls += 1
         self.agent.environment_steps += self.steps
         for _ in range(self.updates_per_episode):
-            self.agent.optimizer_updates += 1
-            self.agent.updates.append(
-                {
-                    "environment_steps": float(self.agent.environment_steps),
-                    "optimizer_update": float(self.agent.optimizer_updates),
-                    "loss": 0.5,
-                    "rollout_steps": 256.0,
-                }
-            )
+            self.agent.finish_update()
         return _result(self.steps, action_error=False)
 
 

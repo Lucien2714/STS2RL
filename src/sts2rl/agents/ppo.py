@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
+import copy
 from dataclasses import dataclass, field
 import threading
 
@@ -134,6 +135,10 @@ class CandidatePPOAgent(Agent):
         # each worker spends its time in HTTP, outside this lock -- so
         # serializing the small tensor work costs almost nothing.
         self._lock = threading.RLock()
+        # Called right after an update completes, which is the one moment the
+        # rollout is empty by construction.  The trainer checkpoints there
+        # instead of manufacturing an empty rollout later by force.
+        self.on_update: Callable[[], None] | None = None
         self.last_update: dict[str, float] = {}
         self.environment_steps = 0
         self.optimizer_updates = 0
@@ -226,6 +231,8 @@ class CandidatePPOAgent(Agent):
             ready = self._rollout_length() >= self.config.rollout_size
         if ready:
             self.update()
+            if self.on_update is not None:
+                self.on_update()
 
     def _absorb_forced_transition(self, transition: Transition, entry: _Lane) -> None:
         """Merge a forced step into the decision it followed.
@@ -273,16 +280,28 @@ class CandidatePPOAgent(Agent):
         self.train(False)
 
     def checkpoint_state(self) -> dict[str, object]:
-        """Return model and optimizer tensors at a clean boundary.
+        """Return a detached copy of the model and optimizer tensors.
 
-        Lifetime counters belong to ``TrainingState``, which the checkpoint
-        stores once; the caller restores them onto the agent.
+        Saving is a read-only snapshot, so it does not require an idle agent:
+        a rollout in progress is not written and simply carries on, and another
+        client's undelivered decision changes neither the weights nor the
+        counters.  Demanding an empty rollout is what used to force a PPO
+        update on whatever happened to be collected -- 13 transitions in one
+        measured case -- and then save the weights that update had just moved.
+
+        The copy is taken under the lock because another client can be running
+        an optimizer step, and serialising live tensors would write a mixture
+        of before and after.  Lifetime counters belong to ``TrainingState``,
+        which stores them once.
         """
-        self._require_clean_checkpoint_boundary("save")
-        return {
-            "encoder": self.game_encoder.state_dict(),
-            "optimizer": self.optimizer.state_dict(),
-        }
+        with self._lock:
+            return {
+                "encoder": {
+                    name: tensor.detach().clone()
+                    for name, tensor in self.game_encoder.state_dict().items()
+                },
+                "optimizer": copy.deepcopy(self.optimizer.state_dict()),
+            }
 
     def load_checkpoint_state(self, state: Mapping[str, object]) -> None:
         """Restore model and optimizer tensors into an unused agent."""
@@ -473,6 +492,7 @@ class CandidatePPOAgent(Agent):
         return advantages, advantages + values
 
     def _require_clean_checkpoint_boundary(self, operation: str) -> None:
+        """Refuse to overwrite the weights an in-flight decision was made under."""
         if any(lane.pending for lane in self._lanes.values()):
             raise RuntimeError(
                 f"cannot {operation} a checkpoint with an unobserved action"

@@ -19,43 +19,6 @@ from sts2rl.training.config import (
 from sts2rl.training.metrics import EpisodeMetrics, TrainingMetricsWriter
 
 
-class _EpisodeGate:
-    """Let episodes run freely, and drain them when a checkpoint is due.
-
-    A checkpoint needs an empty rollout and no unobserved action, and with
-    several clients playing there is no moment when that is true by luck.  The
-    gate closes the door on new episodes and waits for the ones in flight, so
-    the boundary is created rather than hoped for.
-    """
-
-    def __init__(self) -> None:
-        self._condition = threading.Condition()
-        self._open = True
-        self._active = 0
-
-    def enter(self) -> None:
-        with self._condition:
-            while not self._open:
-                self._condition.wait()
-            self._active += 1
-
-    def leave(self) -> None:
-        with self._condition:
-            self._active -= 1
-            self._condition.notify_all()
-
-    def close_and_drain(self) -> None:
-        with self._condition:
-            self._open = False
-            while self._active:
-                self._condition.wait()
-
-    def open(self) -> None:
-        with self._condition:
-            self._open = True
-            self._condition.notify_all()
-
-
 class Trainer:
     """Run complete episodes, publish metrics, and save resumable boundaries."""
 
@@ -87,6 +50,27 @@ class Trainer:
         if max_episode_failures < 1:
             raise ValueError("max_episode_failures must be at least 1")
         self.max_episode_failures = max_episode_failures
+        self._checkpointing = threading.Lock()
+        self._last_saved_update = self.state.optimizer_updates
+        self._last_saved_episode = self.state.completed_episodes
+
+    def _checkpoint_after_update(self) -> None:
+        """Save right where the rollout is empty, if enough training has passed.
+
+        This runs from inside the agent, immediately after an update, which is
+        the only moment the rollout is empty by construction.  Checkpointing at
+        an episode boundary instead meant manufacturing that moment by force,
+        updating on whatever had been collected since -- 13 transitions in one
+        measured case -- and then saving the weights that update had moved.
+        """
+        with self._checkpointing:
+            if (
+                self.state.optimizer_updates - self._last_saved_update
+                < self.plan.training.checkpoint_every
+            ):
+                return
+            self._adopt_agent_counters()
+            self._save_checkpoint()
 
     def train(self) -> TrainingState:
         """Train until the configured cumulative episode target is reached."""
@@ -98,11 +82,17 @@ class Trainer:
         if target == self.state.completed_episodes:
             return self.state
 
-        if len(self.runners) > 1:
-            return self._train_parallel(target)
+        self.agent.on_update = self._checkpoint_after_update
+        try:
+            if len(self.runners) > 1:
+                return self._train_parallel(target)
+            return self._train_sequential(target)
+        finally:
+            self.agent.on_update = None
 
-        last_saved_update = self.state.optimizer_updates
-        last_saved_episode = self.state.completed_episodes
+    def _train_sequential(self, target: int) -> TrainingState:
+        """Play one client, without threads."""
+
         consecutive_failures = 0
         try:
             while self.state.completed_episodes < target:
@@ -143,17 +133,9 @@ class Trainer:
                 if self.reporter is not None:
                     self.reporter(episode_metrics)
 
-                if (
-                    self.state.optimizer_updates - last_saved_update
-                    >= self.plan.training.checkpoint_every
-                ):
-                    self._save_checkpoint()
-                    last_saved_update = self.state.optimizer_updates
-                    last_saved_episode = self.state.completed_episodes
-
             # Episodes can finish without ever filling a rollout, and a run
             # that ends with nothing on disk has lost all of its work.
-            if self.state.completed_episodes != last_saved_episode:
+            if self.state.completed_episodes != self._last_saved_episode:
                 self._save_checkpoint()
             return self.state
         except KeyboardInterrupt as exc:
@@ -170,17 +152,13 @@ class Trainer:
         outside the agent's lock -- so threads buy close to linear throughput
         while the tensor work stays serialized and therefore correct.
         """
-        gate = _EpisodeGate()
         bookkeeping = threading.Lock()
-        checkpointing = threading.Lock()
         in_flight = 0
-        last_saved_update = self.state.optimizer_updates
-        last_saved_episode = self.state.completed_episodes
         failure: list[BaseException] = []
         retired: dict[int, BaseException] = {}
 
         def worker(runner: EpisodeRunner, lane: int) -> None:
-            nonlocal in_flight, last_saved_update, last_saved_episode
+            nonlocal in_flight
             consecutive_failures = 0
             while True:
                 with bookkeeping:
@@ -193,7 +171,6 @@ class Trainer:
                     )
                     in_flight += 1
 
-                gate.enter()
                 error: STS2ClientError | None = None
                 try:
                     started_at = monotonic()
@@ -203,8 +180,6 @@ class Trainer:
                     # a reason to start another run, not to end a job that has
                     # cost hours.  Anything else is our own bug and stays fatal.
                     error = exc
-                finally:
-                    gate.leave()
 
                 if error is not None:
                     self.agent.abort_lane(lane)
@@ -246,22 +221,6 @@ class Trainer:
                     self._log_action_errors(result)
                     if self.reporter is not None:
                         self.reporter(episode_metrics)
-                    due = (
-                        self.state.optimizer_updates - last_saved_update
-                        >= self.plan.training.checkpoint_every
-                        or self.state.completed_episodes >= target
-                    )
-
-                if due:
-                    with checkpointing:
-                        if last_saved_episode != self.state.completed_episodes:
-                            gate.close_and_drain()
-                            try:
-                                self._save_checkpoint()
-                                last_saved_update = self.state.optimizer_updates
-                                last_saved_episode = self.state.completed_episodes
-                            finally:
-                                gate.open()
 
         def guarded(runner: EpisodeRunner, lane: int) -> None:
             try:
@@ -269,8 +228,6 @@ class Trainer:
             except BaseException as exc:  # noqa: BLE001 - re-raised on the main thread
                 with bookkeeping:
                     failure.append(exc)
-                # A worker that dies holding the door shut would hang the rest.
-                gate.open()
 
         threads = [
             threading.Thread(
@@ -287,7 +244,6 @@ class Trainer:
                 thread.join()
         except KeyboardInterrupt as exc:
             failure.append(exc)
-            gate.open()
             for thread in threads:
                 thread.join()
 
@@ -303,19 +259,19 @@ class Trainer:
             self._recover(kind, error)
             raise error
 
-        if self.state.completed_episodes != last_saved_episode:
+        if self.state.completed_episodes != self._last_saved_episode:
             self._save_checkpoint()
         return self.state
 
     def _save_checkpoint(self) -> None:
-        """Flush the rollout, then save; a checkpoint needs a clean boundary.
+        """Save a snapshot without disturbing the rollout.
 
-        The agent accumulates across episodes, so this is the one place that
-        forces a possibly-short update.  It fires every ``checkpoint_every``
-        optimizer updates, which is a fixed amount of training, rather than
-        every N episodes, whose length quadruples over a run.
+        Nothing is flushed and nothing is discarded: whatever has been
+        collected since the last update stays in the rollout and is learned
+        from normally.  That matters most for the transitions a checkpoint used
+        to land on -- the end of an episode, where the deaths are, and where
+        the 29 boss wins in 1549 episodes are.
         """
-        self.agent.update()
         self._adopt_agent_counters()
         self._log_pending_updates()
         self.metrics_writer.flush()
@@ -325,6 +281,8 @@ class Trainer:
             self.state,
             self.tensorboard_log_dir,
         )
+        self._last_saved_update = self.state.optimizer_updates
+        self._last_saved_episode = self.state.completed_episodes
 
     def _recover(self, kind: str, original: BaseException) -> None:
         try:
