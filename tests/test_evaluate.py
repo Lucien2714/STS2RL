@@ -35,11 +35,14 @@ class FakeRunner:
     """Returns a floor derived from the seed, so scores are checkable."""
 
     def __init__(self, agent, floors: dict[str, int], delay: float = 0.0,
-                 failures: int = 0):
+                 failures: int = 0, reused_once: bool = False,
+                 always_reused: bool = False):
         self.agent = agent
         self.floors = floors
         self.delay = delay
         self.failures = failures
+        self.reused_once = reused_once
+        self.always_reused = always_reused
         self.seeds: list[str] = []
 
     def run(self, reset_spec: ResetSpec) -> EpisodeResult:
@@ -59,6 +62,8 @@ class FakeRunner:
             done=True,
             info={},
         )
+        reused = self.always_reused or self.reused_once
+        self.reused_once = False
         return EpisodeResult(
             initial_state=observation.raw_state,
             final_state=observation.raw_state,
@@ -66,6 +71,7 @@ class FakeRunner:
             total_reward=float(floor),
             terminated=True,
             truncated=False,
+            reused_run=reused,
         )
 
 
@@ -203,3 +209,24 @@ def test_a_generalising_policy_reports_a_gap_near_zero():
 
 def test_the_report_survives_having_nothing_to_report():
     assert format_report([]) == "no episodes were scored"
+
+
+def test_a_joined_run_is_played_out_but_never_scored():
+    """Training leaves its clients mid-run and the game cannot quit one, so a
+    leftover has to be cleared by playing it -- but scoring it would file
+    another map's result under this seed's name."""
+    agent = FakeAgent()
+    runner = FakeRunner(agent, {"A": 4}, reused_once=True)
+
+    scores = _evaluator([runner], agent).run([("A", "training")])
+
+    assert runner.seeds == ["A", "A"]
+    assert [score.floor for score in scores] == [4]
+
+
+def test_a_client_that_always_hands_back_someone_elses_run_fails_loudly():
+    agent = FakeAgent()
+    runner = FakeRunner(agent, {"A": 4}, always_reused=True)
+
+    with pytest.raises(RuntimeError, match="did not start"):
+        _evaluator([runner], agent, max_episode_failures=2).run([("A", "training")])

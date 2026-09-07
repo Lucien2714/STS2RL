@@ -154,17 +154,28 @@ class Evaluator:
         self.max_episode_failures = max_episode_failures
 
     def _spec_for(self, seed: str) -> ResetSpec:
-        """Return the configured reset, seeded, and forced onto custom mode.
+        """Return the configured reset, seeded, and forced to start its own run.
 
-        Standard single-player does not accept a seed, so evaluating on one
-        would silently score a random map instead.
+        Two settings are overridden rather than inherited, because both would
+        make the measurement quietly describe something else:
+
+        ``game_mode`` is forced to custom, since standard single-player ignores
+        a seed and would score a random map.
+
+        ``allow_active_run`` stays on, but only so a leftover run can be
+        cleared.  Training ends with its clients part-way through a run, and
+        the game offers no way to quit one from inside, so refusing to join
+        would leave the evaluation unable to start at all.  What must not
+        happen is *scoring* a joined run -- that reports somebody else's map
+        under this seed's name -- so ``run`` plays such an episode out, throws
+        the score away, and puts the seed back.
         """
         return ResetSpec(
             character=self.reset.character,
             game_mode="custom",
             run_seed=seed,
             start_run_option=self.reset.start_run_option,
-            allow_active_run=self.reset.allow_active_run,
+            allow_active_run=True,
             ascension=self.reset.ascension,
             modifiers=self.reset.modifiers,
         )
@@ -201,6 +212,24 @@ class Evaluator:
                         # than reporting a pool it never finished.
                         pending.insert(0, (seed, pool))
                     continue
+                if result.reused_run:
+                    # Joined a run left over from training rather than starting
+                    # this seed.  Playing it out clears the client; scoring it
+                    # would file another map's result under this seed.
+                    consecutive += 1
+                    with lock:
+                        if consecutive >= self.max_episode_failures:
+                            failure.append(
+                                RuntimeError(
+                                    "a client kept handing back a run this "
+                                    "evaluation did not start; finish or "
+                                    "abandon it before evaluating"
+                                )
+                            )
+                            return
+                        pending.insert(0, (seed, pool))
+                    continue
+
                 consecutive = 0
                 with lock:
                     scores.append(
