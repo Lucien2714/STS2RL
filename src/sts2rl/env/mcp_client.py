@@ -18,14 +18,20 @@ ResponseFormat = Literal["json", "markdown"]
 WikiItemType = Literal["all", "card", "relic"]
 GameCharacter = {0: "IRONCLAD", 1: "SILENT", 2: "REGENT", 3: "NECROBINDER", 4: "DEFECT"}
 
-# Pause after every accepted action POST.
+# Pause after every accepted action POST, giving the game room to transition.
 #
 # The mod settles the game before it captures the state it returns, so this is
 # not what makes that state correct.  It paces the *next* request instead: an
 # action sent while the game is still resolving the previous one is the case
 # the settle logic does not cover.  A rejected action changed nothing, so it is
 # not followed by a pause.
-DEFAULT_ACTION_DELAY_SECONDS = 0.1
+#
+# Every action opens a window the game accepts nothing in -- combat reports
+# is_play_phase false while it deals the hand and resolves the enemy turn, and
+# cards report can_play true throughout it.  0.1s covered that with one client;
+# with several sharing a machine the transitions run longer, so the pause is
+# 0.2s.  Set --action-delay to trade it back for throughput.
+DEFAULT_ACTION_DELAY_SECONDS = 0.2
 
 # Retry a dropped connection, but only for reads.
 #
