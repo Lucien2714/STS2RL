@@ -303,21 +303,39 @@ class LegalActionProvider:
         return actions
 
     def _crystal_sphere_actions(self, state: RawState) -> list[GameAction]:
+        """Play the sphere minigame by rule, never by choice.
+
+        The grid is a whole second game -- pick a tool, uncover cells, read
+        what is revealed -- and it appears rarely enough that an agent would
+        only ever see noise from it.  So it is not offered as a decision at
+        all: exactly one action comes back, which the agent executes as a
+        forced step costing no policy gradient, and the sphere resolves itself
+        without ever entering training.
+
+        Offering it as a choice also had a loop in it.  ``set_tool`` was
+        offered whenever a tool *could* be used rather than when it was not
+        already selected, so a deterministic policy could set the tool it had
+        already set, forever.
+
+        The rule: leave when the game lets you, otherwise uncover a cell,
+        otherwise pick up a tool so cells become clickable.
+        """
         sphere = self._mapping(state.get("crystal_sphere"))
-        actions: list[GameAction] = []
-        if sphere.get("can_use_big_tool") is True:
-            actions.append(GameAction("crystal_sphere_set_tool", tool="big"))
-        if sphere.get("can_use_small_tool") is True:
-            actions.append(GameAction("crystal_sphere_set_tool", tool="small"))
+        if sphere.get("can_proceed") is True:
+            return [GameAction("crystal_sphere_proceed")]
+
         if sphere.get("tool") in {"big", "small"}:
             for cell in self._records(sphere.get("clickable_cells")):
                 x = self._integer(cell.get("x"))
                 y = self._integer(cell.get("y"))
                 if x is not None and y is not None:
-                    actions.append(GameAction("crystal_sphere_click_cell", x=x, y=y))
-        if sphere.get("can_proceed") is True:
-            actions.append(GameAction("crystal_sphere_proceed"))
-        return actions
+                    return [GameAction("crystal_sphere_click_cell", x=x, y=y)]
+
+        for tool in ("big", "small"):
+            if sphere.get(f"can_use_{tool}_tool") is True and sphere.get("tool") != tool:
+                return [GameAction("crystal_sphere_set_tool", tool=tool)]
+
+        return []
 
     def _indexed_actions(
         self,

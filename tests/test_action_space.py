@@ -188,11 +188,9 @@ def test_combat_candidates_expand_enemy_targets_and_filter_unplayable_cards():
                     "can_proceed": True,
                 },
             },
-            [
-                {"type": "crystal_sphere_set_tool", "tool": "big"},
-                {"type": "crystal_sphere_click_cell", "x": 4, "y": 7},
-                {"type": "crystal_sphere_proceed"},
-            ],
+            # The sphere is played by rule, so exactly one action comes
+            # back and leaving takes priority over playing on.
+            [{"type": "crystal_sphere_proceed"}],
         ),
     ],
 )
@@ -229,7 +227,7 @@ def test_full_potion_belt_excludes_new_potion_and_exposes_discard_actions():
     ]
 
 
-def test_crystal_sphere_requires_selecting_tool_before_clicking_cell():
+def test_the_sphere_picks_up_a_tool_before_it_can_click():
     state = {
         "state_type": "crystal_sphere",
         "crystal_sphere": {
@@ -240,9 +238,37 @@ def test_crystal_sphere_requires_selecting_tool_before_clicking_cell():
         },
     }
 
+    assert payloads(state) == [{"type": "crystal_sphere_set_tool", "tool": "big"}]
+
+
+def test_the_sphere_never_re_selects_the_tool_it_is_holding():
+    """Setting the tool already held changes nothing, so argmax would repeat it."""
+    state = {
+        "state_type": "crystal_sphere",
+        "crystal_sphere": {
+            "tool": "big",
+            "can_use_big_tool": True,
+            "can_use_small_tool": False,
+            "clickable_cells": [],
+        },
+    }
+
+    assert payloads(state) == []
+
+
+def test_the_sphere_uncovers_a_cell_once_it_holds_a_tool():
+    state = {
+        "state_type": "crystal_sphere",
+        "crystal_sphere": {
+            "tool": "small",
+            "can_use_big_tool": True,
+            "can_use_small_tool": True,
+            "clickable_cells": [{"x": 4, "y": 7}, {"x": 1, "y": 2}],
+        },
+    }
+
     assert payloads(state) == [
-        {"type": "crystal_sphere_set_tool", "tool": "big"},
-        {"type": "crystal_sphere_set_tool", "tool": "small"},
+        {"type": "crystal_sphere_click_cell", "x": 4, "y": 7}
     ]
 
 

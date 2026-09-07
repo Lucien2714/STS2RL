@@ -275,7 +275,13 @@ def test_crystal_actions_link_tools_and_cells_and_keep_semantic_coordinates(
             "can_use_small_tool": True,
         },
     }
-    candidates = LegalActionProvider().require_candidates(state)
+    # The action space plays the sphere by rule and returns a single move, so
+    # the candidates are built here: this is a tokenizer test.
+    candidates = (
+        GameAction("crystal_sphere_set_tool", tool="big"),
+        GameAction("crystal_sphere_set_tool", tool="small"),
+        GameAction("crystal_sphere_click_cell", x=4, y=7),
+    )
 
     decision = tokenizer.tokenize_decision(GameObservation(state), candidates)
 
