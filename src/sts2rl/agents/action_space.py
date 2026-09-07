@@ -112,15 +112,36 @@ class LegalActionProvider:
         return actions
 
     def _reward_actions(self, state: RawState) -> list[GameAction]:
+        """Return the claims, and offer to leave only once nothing is left.
+
+        ``proceed`` ends the screen and abandons everything still on it, and it
+        is immediately cheaper than claiming: leaving costs one step, while
+        taking a reward costs a step and still leaves the screen to leave.  The
+        payoff for claiming arrives many nodes later, if at all.  Offered side
+        by side, the agent learned the obvious lesson -- a traced policy took
+        ``proceed`` on 27 of 28 reward screens and reached the card-reward
+        screen not once in 925 decisions.
+
+        Walking away from gold, a relic, or a free potion is not a decision
+        worth offering.  The decision that *is* real -- which card to add, or
+        none -- lives on the ``card_reward`` screen the claim opens, where the
+        game itself provides ``skip_card_reward``.  Claiming a card reward is
+        how the agent gets to make it.
+
+        Nothing forces a claim that cannot be made: a potion with a full belt
+        is not offered, and when that leaves no claims at all, ``proceed``
+        comes back.
+        """
         rewards = self._mapping(state.get("rewards"))
-        actions = [
+        claims = [
             GameAction("claim_reward", index=index)
             for item in self._records(rewards.get("items"))
             if item.get("type") != "potion" or not self._potion_belt_is_full(state)
             for index in [self._index(item)]
             if index is not None
         ]
-        if rewards.get("can_proceed") is True:
+        actions = list(claims)
+        if not claims and rewards.get("can_proceed") is True:
             actions.append(GameAction("proceed"))
         actions.extend(self._discard_potion_actions(state))
         return actions

@@ -63,9 +63,9 @@ def test_combat_candidates_expand_enemy_targets_and_filter_unplayable_cards():
                 "rewards": {"items": [{"index": 1}], "can_proceed": True},
                 "player": {"potions": []},
             },
+            # Leaving is not offered while a reward is still there to take.
             [
                 {"type": "claim_reward", "index": 1},
-                {"type": "proceed"},
             ],
         ),
         (
@@ -222,9 +222,9 @@ def test_full_potion_belt_excludes_new_potion_and_exposes_discard_actions():
         },
     }
 
+    # The gold is still claimable, so leaving is not on offer yet.
     assert payloads(state) == [
         {"type": "claim_reward", "index": 0},
-        {"type": "proceed"},
         {"type": "discard_potion", "slot": 0},
     ]
 
@@ -456,3 +456,64 @@ def test_the_shop_follows_the_same_rule():
 
     assert [a for a in payloads(full) if a["type"] == "discard_potion"]
     assert not [a for a in payloads(roomy) if a["type"] == "discard_potion"]
+
+
+def test_leaving_a_reward_screen_is_not_offered_while_rewards_remain():
+    """proceed abandons the screen and is a step cheaper than claiming.
+
+    Offered side by side, a traced policy took proceed on 27 of 28 reward
+    screens and never once reached the card-reward screen behind them.
+    """
+    state = {
+        "state_type": "rewards",
+        "rewards": {
+            "items": [
+                {"index": 0, "type": "gold"},
+                {"index": 1, "type": "relic"},
+                {"index": 2, "type": "card"},
+            ],
+            "can_proceed": True,
+        },
+        "player": {"potions": []},
+    }
+
+    actions = payloads(state)
+
+    assert [a["type"] for a in actions] == ["claim_reward"] * 3
+
+
+def test_an_empty_reward_screen_may_be_left():
+    state = {
+        "state_type": "rewards",
+        "rewards": {"items": [], "can_proceed": True},
+        "player": {"potions": []},
+    }
+
+    assert payloads(state) == [{"type": "proceed"}]
+
+
+def test_a_screen_holding_only_an_unclaimable_potion_may_be_left():
+    """A full belt blocks the claim, so refusing to leave would strand it."""
+    state = {
+        "state_type": "rewards",
+        "rewards": {"items": [{"index": 0, "type": "potion"}], "can_proceed": True},
+        "player": {"potions": [{"slot": 0}], "max_potion_slots": 1},
+    }
+
+    actions = payloads(state)
+
+    assert {"type": "proceed"} in actions
+    assert not [a for a in actions if a["type"] == "claim_reward"]
+
+
+def test_the_card_choice_still_lives_on_its_own_screen():
+    """Claiming a card opens card_reward, where skipping is a real decision."""
+    state = {
+        "state_type": "card_reward",
+        "card_reward": {"cards": [{"index": 0}, {"index": 1}], "can_skip": True},
+    }
+
+    actions = payloads(state)
+
+    assert {"type": "skip_card_reward"} in actions
+    assert len([a for a in actions if a["type"] == "select_card_reward"]) == 2
