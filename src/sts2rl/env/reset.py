@@ -160,6 +160,7 @@ class ResetController:
 
     MAX_TRANSITIONS = 16
     START_POLL_ATTEMPTS = 20
+    MAX_RESET_ATTEMPTS = 4
     START_POLL_SECONDS = 0.25
     MAX_ASCENSION_STEPS = 30
     MAX_MODIFIER_STEPS = 40
@@ -170,6 +171,7 @@ class ResetController:
         dispatcher: ActionDispatcher,
         max_transitions: int = MAX_TRANSITIONS,
         start_poll_attempts: int = START_POLL_ATTEMPTS,
+        max_reset_attempts: int = MAX_RESET_ATTEMPTS,
         start_poll_seconds: float = START_POLL_SECONDS,
         max_ascension_steps: int = MAX_ASCENSION_STEPS,
         max_modifier_steps: int = MAX_MODIFIER_STEPS,
@@ -180,6 +182,9 @@ class ResetController:
         self.dispatcher = dispatcher
         self.max_transitions = max_transitions
         self.start_poll_attempts = start_poll_attempts
+        if max_reset_attempts < 1:
+            raise ValueError("max_reset_attempts must be at least 1")
+        self.max_reset_attempts = max_reset_attempts
         self.start_poll_seconds = start_poll_seconds
         self.max_ascension_steps = max_ascension_steps
         self.max_modifier_steps = max_modifier_steps
@@ -189,7 +194,29 @@ class ResetController:
         self.reused_active_run = False
 
     def reset(self, spec: ResetSpec) -> RawState:
-        """Start a new run, or explicitly reuse an active run when permitted."""
+        """Start a run, retrying the whole navigation if a screen outruns us.
+
+        Reset reads a screen, decides, and then clicks it, and the game moves
+        on its own in between.  Three separate races killed long runs at
+        episodes 374, 406 and 501, each in a different place, so guarding them
+        one at a time is chasing symptoms.  Re-walking the menus is what a
+        person would do, it is cheap next to losing hundreds of episodes, and
+        it covers the races nobody has hit yet.  A screen that is genuinely
+        broken still fails, once the attempts run out.
+        """
+        last_error: STS2ClientError | None = None
+        for attempt in range(self.max_reset_attempts):
+            try:
+                return self._reset_once(spec)
+            except STS2ClientError as exc:
+                last_error = exc
+                if attempt + 1 < self.max_reset_attempts:
+                    time.sleep(self.start_poll_seconds * (2**attempt))
+        assert last_error is not None
+        raise last_error
+
+    def _reset_once(self, spec: ResetSpec) -> RawState:
+        """Navigate the menus once, from wherever the game currently is."""
         character_id = GameCharacter.get(spec.character)
         if character_id is None:
             raise ValueError(f"Unsupported character index: {spec.character}")

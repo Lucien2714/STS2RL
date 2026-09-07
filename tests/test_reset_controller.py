@@ -102,12 +102,16 @@ class StaticMenuClient:
         return self.state
 
 
-def controller(client, max_transitions=10, start_poll_attempts=5):
+def controller(client, max_transitions=10, start_poll_attempts=5,
+               max_reset_attempts=1):
+    # One attempt by default: these tests are about a single navigation, and
+    # the retry is covered on its own below.
     return ResetController(
         client,
         ActionDispatcher(client),
         max_transitions=max_transitions,
         start_poll_attempts=start_poll_attempts,
+        max_reset_attempts=max_reset_attempts,
         start_poll_seconds=0.0,
     )
 
@@ -622,7 +626,7 @@ class CustomRunClient:
 
 
 def _custom_controller(client):
-    return ResetController(client, ActionDispatcher(client))
+    return ResetController(client, ActionDispatcher(client), max_reset_attempts=1)
 
 
 def test_custom_run_turns_off_modifiers_a_human_left_ticked():
@@ -682,7 +686,7 @@ def test_a_screen_reporting_no_selection_is_left_alone():
 def test_modifiers_that_never_settle_fail_loudly():
     client = CustomRunClient(ticked={"DRAFT"})
     controller = ResetController(
-        client, ActionDispatcher(client), max_modifier_steps=1
+        client, ActionDispatcher(client), max_modifier_steps=1, max_reset_attempts=1
     )
 
     with pytest.raises(STS2ClientError, match="modifiers"):
@@ -802,7 +806,7 @@ class AbandonSaveClient:
 def test_a_lagging_menu_after_abandoning_a_save_is_not_a_stall():
     client = AbandonSaveClient(stale_confirms=1)
     controller = ResetController(
-        client, ActionDispatcher(client), start_poll_seconds=0.0
+        client, ActionDispatcher(client), start_poll_seconds=0.0, max_reset_attempts=1
     )
 
     state = controller.reset(ResetSpec())
@@ -834,7 +838,11 @@ def test_a_menu_that_never_moves_is_still_a_stall():
     """The settle retry must not turn a real stall into an infinite loop."""
     client = StuckMenuClient()
     controller = ResetController(
-        client, ActionDispatcher(client), start_poll_seconds=0.0, start_poll_attempts=2
+        client,
+        ActionDispatcher(client),
+        start_poll_seconds=0.0,
+        start_poll_attempts=2,
+        max_reset_attempts=1,
     )
 
     with pytest.raises(STS2ClientError, match="stopped making progress"):
@@ -871,7 +879,7 @@ def test_a_click_rejected_because_the_game_moved_on_is_progress():
     """game_over dismisses itself; the click loses the race but we wanted that."""
     client = MovedOnClient(recovers=True)
     controller = ResetController(
-        client, ActionDispatcher(client), start_poll_seconds=0.0
+        client, ActionDispatcher(client), start_poll_seconds=0.0, max_reset_attempts=1
     )
 
     state = controller.reset(ResetSpec())
@@ -884,8 +892,79 @@ def test_a_rejected_click_on_a_screen_that_never_moves_still_fails():
     """Otherwise a genuinely broken menu would loop until the budget ran out."""
     client = MovedOnClient(recovers=False)
     controller = ResetController(
-        client, ActionDispatcher(client), start_poll_seconds=0.0, start_poll_attempts=2
+        client,
+        ActionDispatcher(client),
+        start_poll_seconds=0.0,
+        start_poll_attempts=2,
+        max_reset_attempts=1,
     )
 
     with pytest.raises(STS2ClientError, match="Not on a menu screen"):
         controller.reset(ResetSpec())
+
+
+class FlakyResetClient:
+    """A menu that loses the race a fixed number of times, then behaves."""
+
+    def __init__(self, failures: int):
+        self.remaining = failures
+        self.attempts = 0
+        self.calls = []
+
+    def get_state(self):
+        return {
+            "state_type": "menu",
+            "menu_screen": "main",
+            "options": ["singleplayer"],
+        }
+
+    def menu_select(self, option, seed=None):
+        self.calls.append((option, seed))
+        if option == "singleplayer":
+            self.attempts += 1
+            if self.remaining:
+                self.remaining -= 1
+                raise STS2ClientError("Not on a menu screen")
+            return {"state": {"state_type": "menu", "menu_screen": "singleplayer",
+                              "options": ["standard", "back"]}}
+        if option == "standard":
+            return {"state": {"state_type": "menu",
+                              "menu_screen": "character_select",
+                              "characters": [{"id": "IRONCLAD", "selected": True}],
+                              "options": [{"name": "IRONCLAD", "enabled": True},
+                                          {"name": "confirm", "enabled": True}]}}
+        if option == "confirm":
+            return {"state": {"state_type": "map", "run": {"floor": 0}}}
+        raise AssertionError(f"unexpected option {option}")
+
+
+def test_a_lost_race_is_retried_from_the_top():
+    """Three separate races killed long runs; re-walking the menus covers them."""
+    client = FlakyResetClient(failures=2)
+    reset = ResetController(
+        client, ActionDispatcher(client), start_poll_seconds=0.0,
+        start_poll_attempts=1, max_reset_attempts=4,
+    )
+
+    state = reset.reset(ResetSpec())
+
+    assert state["state_type"] == "map"
+    assert client.attempts == 3
+
+
+def test_a_reset_that_never_works_still_fails():
+    client = FlakyResetClient(failures=99)
+    reset = ResetController(
+        client, ActionDispatcher(client), start_poll_seconds=0.0,
+        start_poll_attempts=1, max_reset_attempts=3,
+    )
+
+    with pytest.raises(STS2ClientError, match="Not on a menu screen"):
+        reset.reset(ResetSpec())
+
+    assert client.attempts == 3
+
+
+def test_at_least_one_attempt_is_required():
+    with pytest.raises(ValueError, match="max_reset_attempts"):
+        ResetController(object(), None, max_reset_attempts=0)
