@@ -73,14 +73,15 @@ def test_checkpoint_round_trip_restores_agent_rng_and_latest(tmp_path: Path):
     training = _training_state()
     torch.manual_seed(123)
 
-    path = manager.save_episode(agent, plan, training, "tensorboard")
+    path = manager.save_progress(agent, plan, training, "tensorboard")
     expected_random = torch.rand(4)
     loaded = manager.load("latest")
     restored = _agent(vocabulary, plan)
     torch.manual_seed(999)
     manager.restore_agent(loaded, restored, plan)
 
-    assert path.name == "episode_000002.pt"
+    # Named by optimizer updates, which are a fixed amount of training.
+    assert path.name == "update_000004.pt"
     assert manager.resolve("latest") == path
     assert torch.equal(torch.rand(4), expected_random)
     assert restored.environment_steps == 25
@@ -103,7 +104,7 @@ def test_checkpoint_rejects_vocabulary_and_model_config_mismatch(tmp_path: Path)
     agent.environment_steps = 25
     agent.optimizer_updates = 4
     training = _training_state()
-    manager.save_episode(agent, plan, training, "tensorboard")
+    manager.save_progress(agent, plan, training, "tensorboard")
 
     other_data = tmp_path / "other-data"
     other_data.mkdir()
@@ -136,7 +137,7 @@ def test_counters_are_stored_once_and_restored_onto_the_agent(tmp_path: Path):
     agent = _agent(vocabulary, plan)
     agent.environment_steps = 25
     agent.optimizer_updates = 4
-    manager.save_episode(agent, plan, _training_state(), "tensorboard")
+    manager.save_progress(agent, plan, _training_state(), "tensorboard")
 
     loaded = manager.load("latest")
     restored = _agent(vocabulary, plan)
@@ -193,7 +194,7 @@ def test_failed_save_keeps_previous_latest_and_removes_temporary_file(
     agent.environment_steps = 25
     agent.optimizer_updates = 4
     training = _training_state()
-    original = manager.save_episode(agent, plan, training, "tensorboard")
+    original = manager.save_progress(agent, plan, training, "tensorboard")
     monkeypatch.setattr(torch, "save", lambda *args, **kwargs: _raise_disk_error())
 
     with pytest.raises(CheckpointError, match="failed to save"):

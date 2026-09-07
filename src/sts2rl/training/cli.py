@@ -36,7 +36,11 @@ def create_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--run-dir", type=Path, required=True)
     parser.add_argument("--total-episodes", type=int)
-    parser.add_argument("--checkpoint-every", type=int)
+    parser.add_argument(
+        "--checkpoint-every",
+        type=int,
+        help="Optimizer updates between checkpoints (not episodes).",
+    )
     parser.add_argument("--resume", nargs="?", const="latest")
     parser.add_argument("--base-url")
     parser.add_argument("--timeout", type=float)

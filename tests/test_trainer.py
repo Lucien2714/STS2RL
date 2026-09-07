@@ -77,7 +77,7 @@ class FakeCheckpointManager:
         self.episodes: list[dict[str, int]] = []
         self.recoveries: list[tuple[str, dict[str, int]]] = []
 
-    def save_episode(
+    def save_progress(
         self,
         agent: object,
         plan: object,
@@ -482,13 +482,13 @@ def test_a_checkpoint_drains_every_client_first():
         SlowFakeRunner(agent, ledger, "b", 0.02),
     ]
     trainer = _parallel_trainer(runners, _plan(total=4, checkpoint_every=2))
-    original = trainer._save_episode_checkpoint
+    original = trainer._save_checkpoint
 
     def recording_save() -> None:
         ledger.append(("checkpoint", "-"))
         original()
 
-    trainer._save_episode_checkpoint = recording_save  # type: ignore[method-assign]
+    trainer._save_checkpoint = recording_save  # type: ignore[method-assign]
     trainer.train()
 
     depth = 0
@@ -638,3 +638,81 @@ def test_a_programming_error_is_still_fatal_immediately():
 
     with pytest.raises(TypeError, match="bug in our code"):
         trainer.train()
+
+
+class UpdatingRunner(FakeRunner):
+    """A runner whose episodes produce a controllable number of updates."""
+
+    def __init__(self, agent, updates_per_episode: int):
+        super().__init__(agent)
+        self.updates_per_episode = updates_per_episode
+
+    def run(self, reset_spec: object) -> EpisodeResult:
+        self.reset_specs.append(reset_spec)
+        self.calls += 1
+        self.agent.environment_steps += self.steps
+        for _ in range(self.updates_per_episode):
+            self.agent.optimizer_updates += 1
+            self.agent.updates.append(
+                {
+                    "environment_steps": float(self.agent.environment_steps),
+                    "optimizer_update": float(self.agent.optimizer_updates),
+                    "loss": 0.5,
+                    "rollout_steps": 256.0,
+                }
+            )
+        return _result(self.steps, action_error=False)
+
+
+def test_checkpoints_are_spaced_by_optimizer_updates_not_episodes():
+    """Episode length quadruples over a run; an update is a fixed amount."""
+    agent = FakeAgent()
+    runner = UpdatingRunner(agent, updates_per_episode=1)
+    checkpoints = FakeCheckpointManager()
+    trainer = Trainer(
+        runner,  # type: ignore[arg-type]
+        agent,  # type: ignore[arg-type]
+        checkpoints,  # type: ignore[arg-type]
+        FakeMetricsWriter(),  # type: ignore[arg-type]
+        _plan(total=9, checkpoint_every=3),
+    )
+
+    trainer.train()
+
+    # Updates 3, 6 and 9 -- and no extra save at the end, since 9 landed there.
+    assert len(checkpoints.episodes) == 3
+
+
+def test_an_episode_that_spans_several_updates_saves_once():
+    agent = FakeAgent()
+    runner = UpdatingRunner(agent, updates_per_episode=5)
+    checkpoints = FakeCheckpointManager()
+    trainer = Trainer(
+        runner,  # type: ignore[arg-type]
+        agent,  # type: ignore[arg-type]
+        checkpoints,  # type: ignore[arg-type]
+        FakeMetricsWriter(),  # type: ignore[arg-type]
+        _plan(total=2, checkpoint_every=2),
+    )
+
+    trainer.train()
+
+    assert len(checkpoints.episodes) == 2
+
+
+def test_a_run_that_never_updates_still_saves_once_at_the_end():
+    """Otherwise a short run would finish with nothing on disk."""
+    agent = FakeAgent()
+    runner = UpdatingRunner(agent, updates_per_episode=0)
+    checkpoints = FakeCheckpointManager()
+    trainer = Trainer(
+        runner,  # type: ignore[arg-type]
+        agent,  # type: ignore[arg-type]
+        checkpoints,  # type: ignore[arg-type]
+        FakeMetricsWriter(),  # type: ignore[arg-type]
+        _plan(total=3, checkpoint_every=5),
+    )
+
+    trainer.train()
+
+    assert len(checkpoints.episodes) >= 1

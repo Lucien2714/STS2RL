@@ -43,6 +43,9 @@ class TrainingConfig:
     """Operational settings that do not define model tensor shapes."""
 
     total_episodes: int = 100
+    # Optimizer updates between checkpoints, not episodes: an update is a
+    # fixed rollout of transitions, while episode length here grows about
+    # fourfold over a run, so counting episodes silently changes the interval.
     checkpoint_every: int = 10
     max_steps_per_episode: int = 10_000
     max_state_refreshes: int = MAX_STATE_REFRESHES

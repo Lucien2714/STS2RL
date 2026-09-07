@@ -101,7 +101,8 @@ class Trainer:
         if len(self.runners) > 1:
             return self._train_parallel(target)
 
-        last_saved_episode: int | None = None
+        last_saved_update = self.state.optimizer_updates
+        last_saved_episode = self.state.completed_episodes
         consecutive_failures = 0
         try:
             while self.state.completed_episodes < target:
@@ -143,14 +144,17 @@ class Trainer:
                     self.reporter(episode_metrics)
 
                 if (
-                    self.state.completed_episodes % self.plan.training.checkpoint_every
-                    == 0
+                    self.state.optimizer_updates - last_saved_update
+                    >= self.plan.training.checkpoint_every
                 ):
-                    self._save_episode_checkpoint()
+                    self._save_checkpoint()
+                    last_saved_update = self.state.optimizer_updates
                     last_saved_episode = self.state.completed_episodes
 
-            if last_saved_episode != self.state.completed_episodes:
-                self._save_episode_checkpoint()
+            # Episodes can finish without ever filling a rollout, and a run
+            # that ends with nothing on disk has lost all of its work.
+            if self.state.completed_episodes != last_saved_episode:
+                self._save_checkpoint()
             return self.state
         except KeyboardInterrupt as exc:
             self._recover("interrupted", exc)
@@ -170,12 +174,13 @@ class Trainer:
         bookkeeping = threading.Lock()
         checkpointing = threading.Lock()
         in_flight = 0
-        last_saved_episode: int | None = None
+        last_saved_update = self.state.optimizer_updates
+        last_saved_episode = self.state.completed_episodes
         failure: list[BaseException] = []
         retired: dict[int, BaseException] = {}
 
         def worker(runner: EpisodeRunner, lane: int) -> None:
-            nonlocal in_flight, last_saved_episode
+            nonlocal in_flight, last_saved_update, last_saved_episode
             consecutive_failures = 0
             while True:
                 with bookkeeping:
@@ -241,10 +246,10 @@ class Trainer:
                     self._log_action_errors(result)
                     if self.reporter is not None:
                         self.reporter(episode_metrics)
-                    completed = self.state.completed_episodes
                     due = (
-                        completed % self.plan.training.checkpoint_every == 0
-                        or completed >= target
+                        self.state.optimizer_updates - last_saved_update
+                        >= self.plan.training.checkpoint_every
+                        or self.state.completed_episodes >= target
                     )
 
                 if due:
@@ -252,7 +257,8 @@ class Trainer:
                         if last_saved_episode != self.state.completed_episodes:
                             gate.close_and_drain()
                             try:
-                                self._save_episode_checkpoint()
+                                self._save_checkpoint()
+                                last_saved_update = self.state.optimizer_updates
                                 last_saved_episode = self.state.completed_episodes
                             finally:
                                 gate.open()
@@ -297,22 +303,23 @@ class Trainer:
             self._recover(kind, error)
             raise error
 
-        if last_saved_episode != self.state.completed_episodes:
-            self._save_episode_checkpoint()
+        if self.state.completed_episodes != last_saved_episode:
+            self._save_checkpoint()
         return self.state
 
-    def _save_episode_checkpoint(self) -> None:
+    def _save_checkpoint(self) -> None:
         """Flush the rollout, then save; a checkpoint needs a clean boundary.
 
         The agent accumulates across episodes, so this is the one place that
-        forces a possibly-short update — every ``checkpoint_every`` episodes
-        rather than every episode.
+        forces a possibly-short update.  It fires every ``checkpoint_every``
+        optimizer updates, which is a fixed amount of training, rather than
+        every N episodes, whose length quadruples over a run.
         """
         self.agent.update()
         self._adopt_agent_counters()
         self._log_pending_updates()
         self.metrics_writer.flush()
-        self.checkpoint_manager.save_episode(
+        self.checkpoint_manager.save_progress(
             self.agent,
             self.plan,
             self.state,

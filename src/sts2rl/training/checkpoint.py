@@ -115,16 +115,23 @@ class CheckpointManager:
             raise CheckpointError(f"latest checkpoint does not exist: {path}")
         return path
 
-    def save_episode(
+    def save_progress(
         self,
         agent: CandidatePPOAgent,
         plan: TrainingPlan,
         training_state: TrainingState,
         tensorboard_log_dir: str,
     ) -> Path:
-        """Save a numbered checkpoint after a completed episode."""
+        """Save a checkpoint named by how much training it contains.
+
+        Optimizer updates are the unit, not episodes: episode length here grows
+        from about 35 steps to about 140 as the policy improves, so "every 50
+        episodes" quietly means four times as much training late in a run as
+        early.  Updates are a fixed 256 transitions each, so the number in the
+        filename is comparable between checkpoints and between runs.
+        """
         return self.save(
-            f"episode_{training_state.completed_episodes:06d}.pt",
+            f"update_{training_state.optimizer_updates:06d}.pt",
             agent,
             plan,
             training_state,
