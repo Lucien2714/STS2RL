@@ -158,7 +158,7 @@ def selected_character_id(raw_state: RawState) -> str | None:
 class ResetController:
     """Drive the STS2MCP menu state machine until a run becomes active."""
 
-    MAX_TRANSITIONS = 10
+    MAX_TRANSITIONS = 16
     START_POLL_ATTEMPTS = 20
     START_POLL_SECONDS = 0.25
     MAX_ASCENSION_STEPS = 30
@@ -218,9 +218,17 @@ class ResetController:
 
             signature = self._menu_signature(raw_state)
             if signature in seen_states:
-                raise STS2ClientError(
-                    f"Reset menu stopped making progress: {raw_state}"
-                )
+                # A screen we have seen before is not proof of a stall: the
+                # menu can simply not have caught up.  Confirming an abandoned
+                # run returns the pre-abandon main menu often enough to kill a
+                # long training run, and that screen is one we just came from.
+                # Only a repeat that survives settling is a real stall.
+                raw_state = self._await_stable_state(raw_state)
+                signature = self._menu_signature(raw_state)
+                if signature in seen_states:
+                    raise STS2ClientError(
+                        f"Reset menu stopped making progress: {raw_state}"
+                    )
             seen_states.add(signature)
 
             if state_type == "game_over":

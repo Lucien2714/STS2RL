@@ -723,3 +723,122 @@ def test_a_reset_that_started_its_own_run_is_not_flagged():
     controller.reset(ResetSpec(game_mode="custom", run_seed="AAA"))
 
     assert controller.reused_active_run is False
+
+
+class AbandonSaveClient:
+    """A main menu that offers abandon_run, and lags after confirming it.
+
+    Confirming the abandon can return the pre-abandon main menu -- a screen
+    reset has already visited -- which is a lagging menu, not a stall.
+    """
+
+    def __init__(self, stale_confirms: int = 1):
+        self.calls = []
+        self.stale_confirms = stale_confirms
+        self.save_present = True
+        self.pending_refresh = False
+        self.screen = "main"
+
+    def _main(self):
+        options = ["continue", "abandon_run"] if self.save_present else ["singleplayer"]
+        return {
+            "state_type": "menu",
+            "menu_screen": "main",
+            "options": options + ["settings", "quit"],
+        }
+
+    def get_state(self):
+        if self.screen == "main":
+            if self.pending_refresh:
+                self.pending_refresh = False
+                self.save_present = False
+            return self._main()
+        if self.screen == "popup":
+            return {
+                "state_type": "menu",
+                "menu_screen": "popup",
+                "options": ["yes", "no"],
+            }
+        if self.screen == "singleplayer":
+            return {
+                "state_type": "menu",
+                "menu_screen": "singleplayer",
+                "options": ["standard", "custom", "back"],
+            }
+        if self.screen == "character_select":
+            return {
+                "state_type": "menu",
+                "menu_screen": "character_select",
+                "characters": [{"id": "IRONCLAD", "selected": True}],
+                "options": [{"name": "IRONCLAD", "enabled": True},
+                            {"name": "confirm", "enabled": True}],
+            }
+        return {"state_type": "map", "run": {"floor": 0}}
+
+    def menu_select(self, option, seed=None):
+        self.calls.append((option, seed))
+        if option == "abandon_run":
+            self.screen = "popup"
+        elif option == "yes":
+            self.screen = "main"
+            if self.stale_confirms:
+                # The save is gone but the menu has not refreshed yet; the
+                # next read is what catches up.
+                self.stale_confirms -= 1
+                self.pending_refresh = True
+                return {"state": self._main()}
+            self.save_present = False
+        elif option == "singleplayer":
+            self.screen = "singleplayer"
+        elif option == "standard":
+            self.screen = "character_select"
+        elif option == "confirm":
+            self.screen = "run"
+        else:
+            raise AssertionError(f"unexpected menu option {option}")
+        return {"state": self.get_state()}
+
+
+def test_a_lagging_menu_after_abandoning_a_save_is_not_a_stall():
+    client = AbandonSaveClient(stale_confirms=1)
+    controller = ResetController(
+        client, ActionDispatcher(client), start_poll_seconds=0.0
+    )
+
+    state = controller.reset(ResetSpec())
+
+    assert state["state_type"] == "map"
+    assert ("abandon_run", None) in client.calls
+    assert ("yes", None) in client.calls
+
+
+class StuckMenuClient:
+    """A main menu that accepts the action and never changes."""
+
+    def __init__(self):
+        self.calls = []
+
+    def get_state(self):
+        return {
+            "state_type": "menu",
+            "menu_screen": "main",
+            "options": ["continue", "abandon_run", "settings", "quit"],
+        }
+
+    def menu_select(self, option, seed=None):
+        self.calls.append((option, seed))
+        return {"state": self.get_state()}
+
+
+def test_a_menu_that_never_moves_is_still_a_stall():
+    """The settle retry must not turn a real stall into an infinite loop."""
+    client = StuckMenuClient()
+    controller = ResetController(
+        client, ActionDispatcher(client), start_poll_seconds=0.0, start_poll_attempts=2
+    )
+
+    with pytest.raises(STS2ClientError, match="stopped making progress"):
+        controller.reset(ResetSpec())
+
+    # It tried the menu's own option before giving up.
+    assert ("abandon_run", None) in client.calls
