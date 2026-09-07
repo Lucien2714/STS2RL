@@ -87,6 +87,11 @@ def create_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--max-steps", type=int)
     parser.add_argument("--max-state-refreshes", type=int)
+    parser.add_argument(
+        "--max-episode-failures",
+        type=int,
+        help="Consecutive failed episodes before a client is given up on.",
+    )
     parser.add_argument("--hidden-dim", type=int)
     parser.add_argument("--entity-layers", type=int)
     parser.add_argument("--entity-heads", type=int)
@@ -191,6 +196,7 @@ def run_training(args: argparse.Namespace) -> int:
                 state,
                 reporter=_report_episode,
                 tensorboard_log_dir=tensorboard_log_dir,
+                max_episode_failures=plan.training.max_episode_failures,
             )
             trainer.train()
     return 0
@@ -214,6 +220,9 @@ def _new_plan(args: argparse.Namespace) -> TrainingPlan:
             ),
             max_state_refreshes=_or_default(
                 args.max_state_refreshes, training_defaults.max_state_refreshes
+            ),
+            max_episode_failures=_or_default(
+                args.max_episode_failures, training_defaults.max_episode_failures
             ),
             base_url=_or_default(args.base_url, training_defaults.base_url),
             timeout=_or_default(args.timeout, training_defaults.timeout),

@@ -25,6 +25,11 @@ from sts2rl.env import DEFAULT_ACTION_DELAY_SECONDS, ResetSpec
 # A pool, not one seed: a single seed is memorized as an action sequence.  The
 # holdout seeds are never trained on, so evaluating on them is what separates
 # "learned to climb" from "learned these twelve maps".
+# Consecutive failed episodes before a client is considered gone rather than
+# unlucky.  A crashed game should cost its own episodes, not the whole job, but
+# a client that never comes back must stop consuming the episode budget.
+MAX_EPISODE_FAILURES = 3
+
 DEFAULT_SEED_POOL = (
     "7NKRVDBV", "TJWVA3B8", "GJ677ZKE", "DDY7BHHQ",
     "7PFC7NZR", "CSJ92XBT", "SQFNH36F", "ZU9GBB22",
@@ -41,6 +46,7 @@ class TrainingConfig:
     checkpoint_every: int = 10
     max_steps_per_episode: int = 10_000
     max_state_refreshes: int = MAX_STATE_REFRESHES
+    max_episode_failures: int = MAX_EPISODE_FAILURES
     base_url: str = "http://localhost:15526/api/v1"
     timeout: float = 20.0
     action_delay_seconds: float = DEFAULT_ACTION_DELAY_SECONDS
@@ -58,6 +64,7 @@ class TrainingConfig:
             "total_episodes",
             "checkpoint_every",
             "max_steps_per_episode",
+            "max_episode_failures",
             "tensorboard_flush_secs",
         ):
             value = getattr(self, name)

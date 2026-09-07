@@ -10,6 +10,7 @@ import pytest
 from sts2rl.actions import GameAction
 from sts2rl.agents import EpisodeResult, Transition
 from sts2rl.env import GameObservation, ResetSpec
+from sts2rl.env.mcp_client import STS2ClientError
 from sts2rl.training import EpisodeMetrics, TrainingConfig, TrainingPlan, TrainingState
 from sts2rl.training.trainer import Trainer
 
@@ -528,3 +529,112 @@ def test_a_failing_client_stops_training_without_hanging_the_others():
         trainer.train()
 
     assert trainer.checkpoint_manager.recoveries
+
+
+class CrashingRunner(FakeRunner):
+    """A runner whose client dies for a fixed number of episodes."""
+
+    def __init__(self, agent, failures: int, delay: float = 0.0):
+        super().__init__(agent)
+        self.failures = failures
+        self.delay = delay
+
+    def run(self, reset_spec: object) -> EpisodeResult:
+        self.reset_specs.append(reset_spec)
+        if self.delay:
+            time.sleep(self.delay)
+        if self.failures:
+            self.failures -= 1
+            raise STS2ClientError("client crashed")
+        return super().run(reset_spec)
+
+
+class LaneTrackingAgent(FakeAgent):
+    def __init__(self) -> None:
+        super().__init__()
+        self.aborted_lanes: list[int] = []
+
+    def abort_lane(self, lane: int) -> None:
+        self.aborted_lanes.append(lane)
+
+
+def _crash_trainer(runners, plan, agent, **kwargs):
+    return Trainer(
+        runners,  # type: ignore[arg-type]
+        agent,  # type: ignore[arg-type]
+        FakeCheckpointManager(),  # type: ignore[arg-type]
+        FakeMetricsWriter(),  # type: ignore[arg-type]
+        plan,
+        **kwargs,
+    )
+
+
+def test_a_crashed_client_costs_its_episode_not_the_job():
+    """Both clients are slow enough that both are certain to be dispatched."""
+    agent = LaneTrackingAgent()
+    first = CrashingRunner(agent, failures=1, delay=0.02)
+    second = CrashingRunner(agent, failures=1, delay=0.02)
+    trainer = _crash_trainer(
+        [first, second], _plan(total=6, checkpoint_every=6), agent
+    )
+
+    state = trainer.train()
+
+    assert state.completed_episodes == 6
+    # Each client dropped the decision left in flight by its crash.
+    assert sorted(agent.aborted_lanes) == [0, 1]
+
+
+def test_a_failed_episode_does_not_consume_the_target():
+    """Counting a crash as an episode would end training short of the target."""
+    agent = LaneTrackingAgent()
+    crashy = CrashingRunner(agent, failures=2, delay=0.01)
+    trainer = _crash_trainer(
+        [crashy, CrashingRunner(agent, failures=0, delay=0.01)],
+        _plan(total=4, checkpoint_every=4),
+        agent,
+    )
+
+    state = trainer.train()
+
+    assert state.completed_episodes == 4
+    assert len(trainer.metrics_writer.episodes) == 4
+
+
+def test_a_client_that_never_recovers_is_given_up_on():
+    agent = LaneTrackingAgent()
+    broken = CrashingRunner(agent, failures=999)
+    trainer = _crash_trainer(
+        [broken], _plan(total=5, checkpoint_every=5), agent, max_episode_failures=2
+    )
+
+    with pytest.raises(STS2ClientError, match="client crashed"):
+        trainer.train()
+
+    assert len(broken.reset_specs) == 2
+
+
+def test_the_other_clients_finish_when_one_is_given_up_on():
+    agent = LaneTrackingAgent()
+    broken = CrashingRunner(agent, failures=999)
+    healthy = CrashingRunner(agent, failures=0, delay=0.01)
+    trainer = _crash_trainer(
+        [broken, healthy], _plan(total=5, checkpoint_every=5), agent,
+        max_episode_failures=2,
+    )
+
+    state = trainer.train()
+
+    assert state.completed_episodes == 5
+    assert healthy.calls == 5
+
+
+def test_a_programming_error_is_still_fatal_immediately():
+    """Only the game boundary is treated as flaky; our own bugs are not."""
+    agent = LaneTrackingAgent()
+    broken = FakeRunner(agent)
+    broken.failure = TypeError("bug in our code")
+    trainer = _crash_trainer([broken, FakeRunner(agent)], _plan(total=20, checkpoint_every=20), agent)
+
+    with pytest.raises(TypeError, match="bug in our code"):
+        trainer.train()

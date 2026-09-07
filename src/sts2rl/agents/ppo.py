@@ -306,6 +306,19 @@ class CandidatePPOAgent(Agent):
         self._completed_update_metrics.clear()
         return metrics
 
+    def abort_lane(self, lane: int) -> None:
+        """Drop one environment's in-flight decision after its episode failed.
+
+        The steps that lane already recorded are real experience whose rewards
+        the environment actually paid, so they stay in the rollout; only the
+        decision waiting on an observation that will never arrive is dropped.
+        Clearing the whole agent here would throw away the other clients' work.
+        """
+        entry = self._lane(lane)
+        entry.pending = None
+        entry.forced_action = False
+        entry.carried_reward = 0.0
+
     def abort_episode(self) -> None:
         """Discard incomplete actions and rollouts without undoing prior updates."""
         with self._lock:

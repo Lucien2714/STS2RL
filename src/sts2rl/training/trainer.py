@@ -10,7 +10,12 @@ from time import monotonic
 from sts2rl.agents import CandidatePPOAgent, EpisodeResult, EpisodeRunner
 from sts2rl.training.checkpoint import CheckpointManager
 from sts2rl.env import ResetSpec
-from sts2rl.training.config import TrainingPlan, TrainingState
+from sts2rl.env.mcp_client import STS2ClientError
+from sts2rl.training.config import (
+    MAX_EPISODE_FAILURES,
+    TrainingPlan,
+    TrainingState,
+)
 from sts2rl.training.metrics import EpisodeMetrics, TrainingMetricsWriter
 
 
@@ -64,6 +69,7 @@ class Trainer:
         state: TrainingState | None = None,
         reporter: Callable[[EpisodeMetrics], None] | None = None,
         tensorboard_log_dir: str = "tensorboard",
+        max_episode_failures: int = MAX_EPISODE_FAILURES,
     ) -> None:
         self.runners: tuple[EpisodeRunner, ...] = (
             tuple(runner) if isinstance(runner, Sequence) else (runner,)
@@ -78,6 +84,9 @@ class Trainer:
         self.state = state or TrainingState()
         self.reporter = reporter
         self.tensorboard_log_dir = tensorboard_log_dir
+        if max_episode_failures < 1:
+            raise ValueError("max_episode_failures must be at least 1")
+        self.max_episode_failures = max_episode_failures
 
     def train(self) -> TrainingState:
         """Train until the configured cumulative episode target is reached."""
@@ -93,11 +102,33 @@ class Trainer:
             return self._train_parallel(target)
 
         last_saved_episode: int | None = None
+        consecutive_failures = 0
         try:
             while self.state.completed_episodes < target:
                 started_at = monotonic()
                 reset_spec = self._episode_reset_spec()
-                result = self.runner.run(reset_spec)
+                try:
+                    result = self.runner.run(reset_spec)
+                except STS2ClientError as exc:
+                    # The game is external and does crash.  Losing the episode
+                    # it died in is the price; losing the job is not.
+                    consecutive_failures += 1
+                    self.agent.abort_lane(0)
+                    self.metrics_writer.log_event(
+                        "episode_failed",
+                        {
+                            "lane": 0,
+                            "seed": reset_spec.run_seed,
+                            "consecutive_failures": consecutive_failures,
+                            "error_type": type(exc).__name__,
+                            "error": str(exc),
+                        },
+                        self.state.environment_steps,
+                    )
+                    if consecutive_failures >= self.max_episode_failures:
+                        raise
+                    continue
+                consecutive_failures = 0
                 self._adopt_agent_counters()
                 self.state.completed_episodes += 1
                 self._log_pending_updates()
@@ -138,29 +169,66 @@ class Trainer:
         gate = _EpisodeGate()
         bookkeeping = threading.Lock()
         checkpointing = threading.Lock()
-        dispatched = self.state.completed_episodes
+        in_flight = 0
         last_saved_episode: int | None = None
         failure: list[BaseException] = []
+        retired: dict[int, BaseException] = {}
 
-        def worker(runner: EpisodeRunner) -> None:
-            nonlocal dispatched, last_saved_episode
+        def worker(runner: EpisodeRunner, lane: int) -> None:
+            nonlocal in_flight, last_saved_episode
+            consecutive_failures = 0
             while True:
                 with bookkeeping:
-                    if failure or dispatched >= target:
+                    if failure or self.state.completed_episodes + in_flight >= target:
                         return
                     # The seed is claimed at dispatch, not on completion, so
                     # two clients never play the same seed at the same time.
-                    reset_spec = self._episode_reset_spec(dispatched)
-                    dispatched += 1
+                    reset_spec = self._episode_reset_spec(
+                        self.state.completed_episodes + in_flight
+                    )
+                    in_flight += 1
 
                 gate.enter()
+                error: STS2ClientError | None = None
                 try:
                     started_at = monotonic()
                     result = runner.run(reset_spec)
+                except STS2ClientError as exc:
+                    # The game is external and does crash.  Its client dying is
+                    # a reason to start another run, not to end a job that has
+                    # cost hours.  Anything else is our own bug and stays fatal.
+                    error = exc
                 finally:
                     gate.leave()
 
+                if error is not None:
+                    self.agent.abort_lane(lane)
+                    with bookkeeping:
+                        in_flight -= 1
+                        consecutive_failures += 1
+                        self.metrics_writer.log_event(
+                            "episode_failed",
+                            {
+                                "lane": lane,
+                                "seed": reset_spec.run_seed,
+                                "consecutive_failures": consecutive_failures,
+                                "error_type": type(error).__name__,
+                                "error": str(error),
+                            },
+                            self.state.environment_steps,
+                        )
+                        exhausted = (
+                            consecutive_failures >= self.max_episode_failures
+                        )
+                        if exhausted:
+                            retired[lane] = error
+                    if exhausted:
+                        return
+                    continue
+
+                consecutive_failures = 0
                 with bookkeeping:
+                    in_flight -= 1
                     self._adopt_agent_counters()
                     self.state.completed_episodes += 1
                     self._log_pending_updates()
@@ -189,9 +257,9 @@ class Trainer:
                             finally:
                                 gate.open()
 
-        def guarded(runner: EpisodeRunner) -> None:
+        def guarded(runner: EpisodeRunner, lane: int) -> None:
             try:
-                worker(runner)
+                worker(runner, lane)
             except BaseException as exc:  # noqa: BLE001 - re-raised on the main thread
                 with bookkeeping:
                     failure.append(exc)
@@ -199,8 +267,12 @@ class Trainer:
                 gate.open()
 
         threads = [
-            threading.Thread(target=guarded, args=(runner,), daemon=True)
-            for runner in self.runners
+            threading.Thread(
+                target=guarded,
+                args=(runner, getattr(getattr(runner, "agent", None), "lane", index)),
+                daemon=True,
+            )
+            for index, runner in enumerate(self.runners)
         ]
         try:
             for thread in threads:
@@ -212,6 +284,10 @@ class Trainer:
             gate.open()
             for thread in threads:
                 thread.join()
+
+        if not failure and retired and self.state.completed_episodes < target:
+            # Every client gave up before the target; that is a real failure.
+            failure.append(next(iter(retired.values())))
 
         if failure:
             error = failure[0]
