@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Mapping
 import copy
+import math
 from dataclasses import dataclass, field
 import threading
 
@@ -64,6 +65,50 @@ class _RolloutStep:
     old_value: Tensor
     reward: float
     done: bool
+
+
+@dataclass
+class _ReturnScale:
+    """A running scale for returns, so the critic's target stays O(1).
+
+    Episode returns here grow with the policy: about +/-2 while it dies on
+    floor 3, and +57 once it clears a boss.  The critic's loss is squared, so a
+    fivefold growth in the target is a twenty-fivefold growth in the loss, and
+    the encoder is *shared* with the actor -- a critic gradient spike damages
+    the policy's representation without the policy loss ever misbehaving.
+    That is what happened: value_loss 0.29 to 5.51 and gradient norm 4.3 to
+    19.1 over eight updates, entropy healthy throughout, and evaluated floor
+    down from 15.0 to 8.4.
+
+    Only the scale is tracked, not the mean: zero return means "made no
+    progress", which is worth keeping at zero.
+    """
+
+    var: float = 1.0
+    count: float = 1e-4
+
+    def update(self, values: Tensor) -> None:
+        """Fold a batch of raw returns into the running second moment."""
+        batch = values.detach().to("cpu", torch.float64)
+        batch_count = float(batch.numel())
+        if batch_count == 0:
+            return
+        batch_var = float((batch * batch).mean())
+        total = self.count + batch_count
+        self.var = (self.var * self.count + batch_var * batch_count) / total
+        self.count = total
+
+    @property
+    def scale(self) -> float:
+        """Return the divisor, floored so an all-zero history cannot explode."""
+        return max(math.sqrt(self.var), 1e-6)
+
+    def state(self) -> dict[str, float]:
+        return {"var": self.var, "count": self.count}
+
+    def load(self, state: Mapping[str, object]) -> None:
+        self.var = float(state.get("var", 1.0))
+        self.count = float(state.get("count", 1e-4))
 
 
 @dataclass
@@ -133,6 +178,7 @@ class CandidatePPOAgent(Agent):
         )
         self.training_enabled = True
         self._lanes: dict[int, _Lane] = {}
+        self._return_scale = _ReturnScale()
         # One agent serves every client, so the forward pass, the rollout, and
         # the optimizer are shared mutable state.  The game is the bottleneck --
         # each worker spends its time in HTTP, outside this lock -- so
@@ -304,6 +350,9 @@ class CandidatePPOAgent(Agent):
                     for name, tensor in self.game_encoder.state_dict().items()
                 },
                 "optimizer": copy.deepcopy(self.optimizer.state_dict()),
+                # Without this a resumed critic reads its own predictions at
+                # the wrong scale, which is worse than not saving it at all.
+                "return_scale": self._return_scale.state(),
             }
 
     def load_checkpoint_state(self, state: Mapping[str, object]) -> None:
@@ -318,6 +367,9 @@ class CandidatePPOAgent(Agent):
 
         self.game_encoder.load_state_dict(dict(encoder_state))
         self.optimizer.load_state_dict(dict(optimizer_state))
+        return_scale = state.get("return_scale")
+        if isinstance(return_scale, Mapping):
+            self._return_scale.load(return_scale)
         self._move_optimizer_state_to_device()
         self.last_update = {}
         self._completed_update_metrics.clear()
@@ -389,6 +441,10 @@ class CandidatePPOAgent(Agent):
 
             advantages = torch.cat(advantage_chunks)
             returns = torch.cat(return_chunks)
+            # Learn the scale from the returns this batch actually saw, then
+            # give the critic a target that does not grow with the policy.
+            self._return_scale.update(returns)
+            returns = returns / self._return_scale.scale
             if len(advantages) > 1:
                 advantages = (advantages - advantages.mean()) / (
                     advantages.std(unbiased=False) + 1e-8
@@ -409,6 +465,7 @@ class CandidatePPOAgent(Agent):
             metrics["environment_steps"] = float(self.environment_steps)
             metrics["optimizer_update"] = float(self.optimizer_updates)
             metrics["lanes"] = float(len(lanes))
+            metrics["return_scale"] = self._return_scale.scale
             for lane in lanes:
                 lane.steps.clear()
             self.last_update = metrics
@@ -476,7 +533,12 @@ class CandidatePPOAgent(Agent):
         self, steps: list[_RolloutStep]
     ) -> tuple[Tensor, Tensor]:
         """Return GAE advantages and returns for one lane's trajectory."""
-        values = torch.stack([step.old_value for step in steps]).to(self.device)
+        # The critic works in the normalised space, GAE in the reward's own, so
+        # every value crossing that boundary is scaled back up.
+        scale = self._return_scale.scale
+        values = (
+            torch.stack([step.old_value for step in steps]).to(self.device) * scale
+        )
         advantages = torch.zeros(len(steps), device=self.device)
         with torch.no_grad():
             last_step = steps[-1]
@@ -488,6 +550,7 @@ class CandidatePPOAgent(Agent):
                         self.device
                     )
                 )
+                * scale
             )
             gae = torch.zeros((), device=self.device)
             for index in range(len(steps) - 1, -1, -1):

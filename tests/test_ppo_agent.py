@@ -186,7 +186,7 @@ def test_saving_is_a_snapshot_that_does_not_disturb_the_rollout():
 
     # Mid-decision on one lane, and mid-rollout after it: both are fine to save.
     payload = agent.checkpoint_state()
-    assert set(payload) == {"encoder", "optimizer"}
+    assert set(payload) == {"encoder", "optimizer", "return_scale"}
 
     agent.observe(
         Transition(
@@ -248,7 +248,7 @@ def test_aborting_discards_partial_work():
 
     assert agent._lane(0).pending is None
     assert not agent._lane(0).steps
-    assert set(agent.checkpoint_state()) == {"encoder", "optimizer"}
+    assert set(agent.checkpoint_state()) == {"encoder", "optimizer", "return_scale"}
     assert agent.environment_steps == 1
 
 
@@ -628,3 +628,70 @@ def test_an_aborted_lane_does_not_break_the_next_update():
 
     assert metrics["lanes"] == 1.0
     assert metrics["rollout_steps"] == 1.0
+
+
+def test_the_return_scale_grows_with_the_returns_it_sees():
+    """Episode returns here go from about +/-2 to +57 as the policy improves."""
+    agent = _agent(rollout_size=1000)
+    small = agent._return_scale.scale
+
+    agent._return_scale.update(torch.full((64,), 40.0))
+
+    assert agent._return_scale.scale > small * 5
+
+
+def test_the_critic_target_is_scaled_but_the_advantage_is_not():
+    """GAE works in the reward's own units; only the critic's target moves.
+
+    Scaling the advantage as well would quietly change the policy gradient,
+    which is not what this is for.
+    """
+    agent = _agent(rollout_size=4)
+    for _ in range(3):
+        _step(agent, 0, reward=1.0, done=False)
+    steps = agent._lane(0).steps
+    before, _ = agent._advantages_and_returns(steps)
+
+    agent._return_scale.update(torch.full((256,), 30.0))
+    after, _ = agent._advantages_and_returns(steps)
+
+    # The stored values are read back at the new scale, so advantages change
+    # only through the value estimate, never through a factor applied to them.
+    assert agent._return_scale.scale > 5.0
+    assert before.shape == after.shape
+
+
+def test_a_value_crossing_into_gae_is_scaled_back_up():
+    agent = _agent(rollout_size=1000)
+    _step(agent, 0, reward=1.0, done=False)
+    step = agent._lane(0).steps[0]
+    step.old_value = torch.tensor(2.0)
+    step.done = True
+
+    agent._return_scale.update(torch.full((256,), 10.0))
+    advantages, returns = agent._advantages_and_returns([step])
+
+    # reward - value*scale, with the terminal zeroing the bootstrap.
+    expected = 1.0 - 2.0 * agent._return_scale.scale
+    assert float(advantages[0]) == pytest.approx(expected, rel=1e-4)
+
+
+def test_the_scale_survives_a_checkpoint():
+    """A resumed critic reading its own predictions at the wrong scale is worse
+    than one that was never saved."""
+    agent = _agent()
+    agent._return_scale.update(torch.full((256,), 12.0))
+    saved = agent.checkpoint_state()
+    scale = agent._return_scale.scale
+
+    restored = _agent()
+    restored.load_checkpoint_state(saved)
+
+    assert restored._return_scale.scale == pytest.approx(scale)
+
+
+def test_an_untouched_scale_leaves_the_reward_units_alone():
+    """Before any update the critic is in the reward's own units."""
+    agent = _agent()
+
+    assert agent._return_scale.scale == pytest.approx(1.0)

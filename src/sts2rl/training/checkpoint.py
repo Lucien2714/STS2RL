@@ -46,7 +46,7 @@ class LoadedCheckpoint:
 class CheckpointManager:
     """Save and load checkpoints relative to one experiment directory."""
 
-    FORMAT_VERSION = 2
+    FORMAT_VERSION = 3
 
     def __init__(self, run_dir: str | Path, vocabulary: GameVocabulary) -> None:
         self.run_dir = Path(run_dir)
