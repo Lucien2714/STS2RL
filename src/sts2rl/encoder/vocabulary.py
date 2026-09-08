@@ -8,7 +8,7 @@ import json
 import re
 from pathlib import Path
 from types import MappingProxyType
-from typing import ClassVar, Iterable, Mapping
+from typing import ClassVar, Iterable, Mapping, Sequence
 
 from sts2rl.data.loader import DEFAULT_DATA_DIR, normalize_data_type
 
@@ -25,6 +25,27 @@ _CAMEL_BOUNDARY = re.compile(r"(?<=[a-z0-9])(?=[A-Z])")
 def normalize_token(value: str) -> str:
     """Normalize a categorical value for case-insensitive lookup."""
     return value.strip().casefold()
+
+
+def parse_text_key(text_key: str) -> tuple[str | None, str | None, str | None]:
+    """Split an event option's ``text_key`` into event, page and option ids.
+
+    ``TRASH_HEAP.pages.INITIAL.options.DIVE_IN`` names the event, the page the
+    option is offered on, and the option itself; a key without a ``pages``
+    segment names an option offered outside any page.  A key of any other shape
+    yields ``None`` for the parts it does not carry, so an unfamiliar spelling
+    degrades to ``<unknown>`` rather than being sliced into nonsense.
+    """
+    parts = str(text_key).split(".")
+    event = parts[0].strip() if parts and parts[0].strip() else None
+    return event, _segment_after(parts, "pages"), _segment_after(parts, "options")
+
+
+def _segment_after(parts: Sequence[str], marker: str) -> str | None:
+    for position, part in enumerate(parts[:-1]):
+        if normalize_token(part) == marker:
+            return parts[position + 1].strip() or None
+    return None
 
 
 def snake_variant(value: str) -> str:
@@ -103,24 +124,54 @@ class TokenVocabulary:
 
 @dataclass(frozen=True)
 class EventOptionVocabulary:
-    """Stable indices for event options identified by event and visible title."""
+    """Stable indices for event options identified by event and option id.
+
+    The API identifies an option by ``text_key``
+    (``TRASH_HEAP.pages.INITIAL.options.DIVE_IN``), which is what the option
+    *is*; ``title`` is display text that changes with the player's language and
+    is not always distinctive — eleven events title every locked option
+    "Locked", so a title-keyed table cannot tell "Requires 100 Gold" from "You
+    have no Exhaust cards".
+
+    The page is deliberately not part of the key.  ABYSSAL_BATHS offers
+    ``LINGER`` on twelve pages, and one row that sees all twelve is worth more
+    than twelve rows that see one each; the page travels as its own column so
+    the model still knows how far into the event it is.
+
+    ``title`` stays as a fallback for a ``text_key`` the game left unset, but
+    only where it names exactly one option.  An ambiguous title is dropped
+    rather than guessed, the same rule the display-name aliases follow.
+    """
 
     pairs: tuple[tuple[str, str], ...]
     _indices: Mapping[tuple[str, str], int] = field(repr=False, compare=False)
+    _titles: Mapping[tuple[str, str], int] = field(repr=False, compare=False)
 
     @classmethod
-    def from_pairs(
+    def from_options(
         cls,
-        pairs: Iterable[tuple[str, str]],
+        options: Iterable[tuple[object, object, object]],
     ) -> EventOptionVocabulary:
-        """Build a deterministic table of normalized event/title pairs."""
+        """Build a deterministic table from (event, option, title) records."""
         canonical_by_key: dict[tuple[str, str], tuple[str, str]] = {}
-        for event_id, title in sorted(
-            (str(event_id), str(title)) for event_id, title in pairs
+        keys_by_title: dict[tuple[str, str], set[tuple[str, str]]] = {}
+        for event_id, option_id, title in sorted(
+            (
+                str(event_id),
+                str(option_id),
+                "" if title is None else str(title),
+            )
+            for event_id, option_id, title in options
+            if event_id is not None and option_id is not None
         ):
-            key = (normalize_token(event_id), normalize_token(title))
-            if all(key):
-                canonical_by_key.setdefault(key, (event_id, title))
+            key = (normalize_token(event_id), normalize_token(option_id))
+            if not all(key):
+                continue
+            canonical_by_key.setdefault(key, (event_id, option_id))
+            if title.strip():
+                keys_by_title.setdefault(
+                    (normalize_token(event_id), normalize_token(title)), set()
+                ).add(key)
 
         ordered = tuple(canonical_by_key[key] for key in sorted(canonical_by_key))
         indexed_pairs = (
@@ -129,21 +180,56 @@ class EventOptionVocabulary:
             *ordered,
         )
         indices = {
-            (normalize_token(event_id), normalize_token(title)): index
-            for index, (event_id, title) in enumerate(indexed_pairs)
+            (normalize_token(event_id), normalize_token(option_id)): index
+            for index, (event_id, option_id) in enumerate(indexed_pairs)
         }
-        return cls(indexed_pairs, MappingProxyType(indices))
+        titles = {
+            title_key: indices[next(iter(keys))]
+            for title_key, keys in keys_by_title.items()
+            if len(keys) == 1
+        }
+        return cls(indexed_pairs, MappingProxyType(indices), MappingProxyType(titles))
 
-    def lookup(self, event_id: str | None, title: str | None) -> int:
-        """Look up a visible event option without depending on letter case."""
-        if event_id is None or title is None:
+    def lookup(
+        self,
+        event_id: str | None,
+        text_key: str | None = None,
+        title: str | None = None,
+    ) -> int:
+        """Resolve an option by its text key, falling back to its title.
+
+        The text key carries its own event id, which is preferred over the one
+        the screen reports: they agree, and the key is the identity.
+        """
+        if text_key is not None:
+            key_event, _, option_id = parse_text_key(text_key)
+            resolved_event = key_event if key_event is not None else event_id
+            if resolved_event is not None and option_id is not None:
+                index = self._indices.get(
+                    (
+                        normalize_token(str(resolved_event)),
+                        normalize_token(str(option_id)),
+                    )
+                )
+                if index is not None:
+                    return index
+        if event_id is not None and title is not None:
+            index = self._titles.get(
+                (normalize_token(str(event_id)), normalize_token(str(title)))
+            )
+            if index is not None:
+                return index
+        if text_key is None and title is None:
             return PAD_INDEX
-        key = (normalize_token(str(event_id)), normalize_token(str(title)))
-        return self._indices.get(key, UNKNOWN_INDEX)
+        return UNKNOWN_INDEX
 
     def pair(self, index: int) -> tuple[str, str]:
-        """Return the canonical event and title stored at an index."""
+        """Return the canonical event and option stored at an index."""
         return self.pairs[index]
+
+    def titles(self) -> Mapping[tuple[str, str], int]:
+        """Return the unambiguous (event, title) fallbacks, for fingerprinting."""
+        return self._titles
 
     def __len__(self) -> int:
         return len(self.pairs)
@@ -348,7 +434,7 @@ class GameVocabulary:
         compare=False,
     )
 
-    FINGERPRINT_VERSION: ClassVar[int] = 2
+    FINGERPRINT_VERSION: ClassVar[int] = 3
 
     @classmethod
     def from_bundled_data(
@@ -372,13 +458,20 @@ class GameVocabulary:
                 str(item["id"]) for item in records if "id" in item
             ]
 
-        table_tokens = {**id_tokens, **cls.FIXED_TOKENS}
+        # ``event_pages`` is derived rather than read: pages are nested inside
+        # the events table, and the API never names the page directly -- it is
+        # read back out of each option's text key.
+        table_tokens = {
+            **id_tokens,
+            "event_pages": list(cls._event_page_ids(raw_tables.get("events", []))),
+            **cls.FIXED_TOKENS,
+        }
         tables = {
             name: TokenVocabulary.from_tokens(tokens)
             for name, tokens in sorted(table_tokens.items())
         }
-        event_options = EventOptionVocabulary.from_pairs(
-            cls._event_option_pairs(raw_tables.get("events", []))
+        event_options = EventOptionVocabulary.from_options(
+            cls._event_option_records(raw_tables.get("events", []))
         )
         aliases: dict[str, Mapping[str, int]] = {}
         for name, records in raw_tables.items():
@@ -454,7 +547,7 @@ class GameVocabulary:
     def size(self, table_name: str) -> int:
         """Return the embedding table size including PAD and UNKNOWN.
 
-        ``event_options`` is keyed by (event, title) pairs rather than by a
+        ``event_options`` is keyed by (event, option) pairs rather than by a
         single token, so it is resolved here instead of by every caller.
         """
         if normalize_data_type(table_name) == "event_options":
@@ -464,10 +557,11 @@ class GameVocabulary:
     def event_option_index(
         self,
         event_id: str | None,
-        title: str | None,
+        text_key: str | None = None,
+        title: str | None = None,
     ) -> int:
-        """Return a stable index for a visible event option."""
-        return self.event_options.lookup(event_id, title)
+        """Return a stable index for an event option, keyed by its text key."""
+        return self.event_options.lookup(event_id, text_key, title)
 
     def fingerprint(self) -> str:
         """Return a stable digest of every model-visible categorical index.
@@ -486,9 +580,13 @@ class GameVocabulary:
                 for name, spellings in sorted(API_SPELLINGS.items())
             },
             "event_options": [
-                [normalize_token(event_id), normalize_token(title)]
-                for event_id, title in self.event_options.pairs
+                [normalize_token(event_id), normalize_token(option_id)]
+                for event_id, option_id in self.event_options.pairs
             ],
+            "event_option_titles": sorted(
+                [event_id, title, index]
+                for (event_id, title), index in self.event_options.titles().items()
+            ),
             "aliases": {
                 name: sorted((alias, index) for alias, index in aliases.items())
                 for name, aliases in sorted(self.aliases.items())
@@ -503,31 +601,42 @@ class GameVocabulary:
         return hashlib.sha256(serialized).hexdigest()
 
     @staticmethod
-    def _event_option_pairs(
+    def _event_option_records(
         events: Iterable[Mapping[str, object]],
-    ) -> Iterable[tuple[str, str]]:
+    ) -> Iterable[tuple[object, object, object]]:
         for event in events:
             event_id = event.get("id")
             if event_id is None:
                 continue
 
             yield from GameVocabulary._options_in(event_id, event.get("options"))
-            pages = event.get("pages")
-            if isinstance(pages, list):
-                for page in pages:
-                    if isinstance(page, dict):
-                        yield from GameVocabulary._options_in(
-                            event_id,
-                            page.get("options"),
-                        )
+            for page in GameVocabulary._pages_in(event):
+                yield from GameVocabulary._options_in(event_id, page.get("options"))
 
     @staticmethod
     def _options_in(
         event_id: object,
         options: object,
-    ) -> Iterable[tuple[str, str]]:
+    ) -> Iterable[tuple[object, object, object]]:
         if not isinstance(options, list):
             return
         for option in options:
-            if isinstance(option, dict) and option.get("title") is not None:
-                yield str(event_id), str(option["title"])
+            if isinstance(option, dict) and option.get("id") is not None:
+                yield event_id, option["id"], option.get("title")
+
+    @staticmethod
+    def _event_page_ids(events: Iterable[Mapping[str, object]]) -> Iterable[str]:
+        for event in events:
+            for page in GameVocabulary._pages_in(event):
+                page_id = page.get("id")
+                if page_id is not None:
+                    yield str(page_id)
+
+    @staticmethod
+    def _pages_in(event: Mapping[str, object]) -> Iterable[Mapping[str, object]]:
+        pages = event.get("pages")
+        if not isinstance(pages, list):
+            return
+        for page in pages:
+            if isinstance(page, dict):
+                yield page

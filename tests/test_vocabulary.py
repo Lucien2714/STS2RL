@@ -63,35 +63,150 @@ def test_vocabulary_indices_do_not_depend_on_json_record_order(tmp_path):
     assert first.lookup("cards", "zeta") == 4
 
 
-def test_event_options_include_top_level_and_page_options(tmp_path):
-    events = [
+def _event_table() -> list[dict[str, object]]:
+    return [
         {
             "id": "TEST_EVENT",
             "options": [{"id": "FIRST", "title": "Take Gold"}],
             "pages": [
                 {
-                    "id": "NEXT",
+                    "id": "INITIAL",
                     "options": [
                         {"id": "SECOND", "title": "Leave"},
                         {"id": "THIRD", "title": "TAKE GOLD"},
+                        {"id": "RICH_LOCKED", "title": "Locked"},
+                        {"id": "STRONG_LOCKED", "title": "Locked"},
                     ],
-                }
+                },
+                {"id": "DONE", "options": [{"id": "SECOND", "title": "Leave"}]},
             ],
         }
     ]
-    (tmp_path / "events.json").write_text(json.dumps(events), encoding="utf-8")
 
-    vocabulary = GameVocabulary.from_bundled_data(tmp_path)
-    take_gold = vocabulary.event_option_index("TEST_EVENT", "Take Gold")
 
-    assert take_gold >= 2
-    assert vocabulary.event_option_index(" test_event ", " take gold ") == take_gold
-    assert vocabulary.event_option_index("TEST_EVENT", "Leave") >= 2
-    assert len(vocabulary.event_options) == 4
-    assert vocabulary.event_option_index(None, "Leave") == PAD_INDEX
-    assert (
-        vocabulary.event_option_index("TEST_EVENT", "Unknown option") == UNKNOWN_INDEX
+def _event_vocabulary(tmp_path) -> GameVocabulary:
+    (tmp_path / "events.json").write_text(
+        json.dumps(_event_table()),
+        encoding="utf-8",
     )
+    return GameVocabulary.from_bundled_data(tmp_path)
+
+
+def test_event_options_are_keyed_by_text_key_across_pages(tmp_path):
+    """The same option on two pages is one row; the page is its own column."""
+    vocabulary = _event_vocabulary(tmp_path)
+
+    leave = vocabulary.event_option_index(
+        "TEST_EVENT", "TEST_EVENT.pages.INITIAL.options.SECOND"
+    )
+
+    assert leave >= 2
+    assert vocabulary.event_options.pair(leave) == ("TEST_EVENT", "SECOND")
+    assert (
+        vocabulary.event_option_index(
+            "TEST_EVENT", "TEST_EVENT.pages.DONE.options.SECOND"
+        )
+        == leave
+    )
+    # top-level options carry no page segment
+    assert (
+        vocabulary.event_option_index("TEST_EVENT", "TEST_EVENT.options.FIRST") >= 2
+    )
+    assert vocabulary.size("event_options") == 5 + 2
+    assert vocabulary.lookup("event_pages", "INITIAL") >= 2
+    assert vocabulary.lookup("event_pages", "DONE") >= 2
+
+
+def test_a_text_key_beats_the_localized_title(tmp_path):
+    """Two options titled "Locked" are two different options."""
+    vocabulary = _event_vocabulary(tmp_path)
+
+    rich = vocabulary.event_option_index(
+        "TEST_EVENT",
+        "TEST_EVENT.pages.INITIAL.options.RICH_LOCKED",
+        "Locked",
+    )
+    strong = vocabulary.event_option_index(
+        "TEST_EVENT",
+        "TEST_EVENT.pages.INITIAL.options.STRONG_LOCKED",
+        "Locked",
+    )
+
+    assert rich >= 2
+    assert strong >= 2
+    assert rich != strong
+
+
+def test_a_title_resolves_only_while_it_names_one_option(tmp_path):
+    """text_key can be unset, but a title that names two options names none."""
+    vocabulary = _event_vocabulary(tmp_path)
+
+    assert vocabulary.event_option_index(
+        " test_event ", None, " leave "
+    ) == vocabulary.event_option_index(
+        "TEST_EVENT", "TEST_EVENT.pages.DONE.options.SECOND"
+    )
+    # two options, one title: on the bundled data this is every locked option
+    assert vocabulary.event_option_index("TEST_EVENT", None, "Locked") == UNKNOWN_INDEX
+    # ...and case is not what distinguishes them either
+    assert vocabulary.event_option_index("TEST_EVENT", None, "Take Gold") == UNKNOWN_INDEX
+
+
+def test_an_unresolvable_event_option_separates_absent_from_unrecognized(tmp_path):
+    vocabulary = _event_vocabulary(tmp_path)
+
+    assert vocabulary.event_option_index("TEST_EVENT") == PAD_INDEX
+    assert vocabulary.event_option_index(None, None, None) == PAD_INDEX
+    assert vocabulary.event_option_index("TEST_EVENT", None, "Nope") == UNKNOWN_INDEX
+    assert (
+        vocabulary.event_option_index("TEST_EVENT", "TEST_EVENT.options.NOPE")
+        == UNKNOWN_INDEX
+    )
+    # a key of an unfamiliar shape is not sliced into nonsense
+    assert vocabulary.event_option_index("TEST_EVENT", "SECOND") == UNKNOWN_INDEX
+
+
+def test_parse_text_key_reads_the_parts_it_carries():
+    assert vocabulary_module.parse_text_key(
+        "TRASH_HEAP.pages.INITIAL.options.DIVE_IN"
+    ) == ("TRASH_HEAP", "INITIAL", "DIVE_IN")
+    assert vocabulary_module.parse_text_key("TRASH_HEAP.options.DIVE_IN") == (
+        "TRASH_HEAP",
+        None,
+        "DIVE_IN",
+    )
+    assert vocabulary_module.parse_text_key("nonsense") == ("nonsense", None, None)
+    assert vocabulary_module.parse_text_key("") == (None, None, None)
+
+
+def test_the_fingerprint_covers_the_event_option_title_fallbacks(tmp_path):
+    """A retitled option reroutes a live screen onto a different row."""
+    before = _event_vocabulary(tmp_path).fingerprint()
+    retitled = _event_table()
+    retitled[0]["options"][0]["title"] = "Take The Gold"
+    (tmp_path / "events.json").write_text(json.dumps(retitled), encoding="utf-8")
+
+    after = GameVocabulary.from_bundled_data(tmp_path).fingerprint()
+
+    assert before != after
+
+
+def test_the_bundled_events_keep_their_pages_and_options_apart():
+    vocabulary = GameVocabulary.from_bundled_data()
+
+    linger = vocabulary.event_option_index(
+        "ABYSSAL_BATHS", "ABYSSAL_BATHS.pages.INITIAL.options.LINGER"
+    )
+
+    assert linger >= 2
+    # twelve pages offer LINGER; they share one row and differ by page
+    assert (
+        vocabulary.event_option_index(
+            "ABYSSAL_BATHS", "ABYSSAL_BATHS.pages.LINGER_2.options.LINGER"
+        )
+        == linger
+    )
+    assert vocabulary.lookup("event_pages", "INITIAL") >= 2
 
 
 def test_fixed_categories_are_case_insensitive_and_have_unknown_fallback():

@@ -22,6 +22,38 @@ GLOBAL_CATEGORICAL: tuple[tuple[str, str], ...] = (
 
 ACTION_NUMERIC_FIELDS = ("x", "y")
 
+# What an event option's interpolated numbers are, one column each.
+#
+# The game declares an event's numbers as named variables and its localized
+# text interpolates them -- "Lose {HpLoss} HP", "Pay {MysteryBoxCost} Gold" --
+# and the mod hands back the ones that option's own text references, keyed by
+# the variable name in snake_case.  Those names are per-event and open-ended:
+# the English event strings alone use 92 of them, most appearing exactly once
+# (``prickly_sponge_gold``, ``uncover_future_cost``), so one column per name is
+# not a table, it is a long tail of columns that are zero.
+#
+# They are bucketed by what the name says the number *is*.  The bucket is
+# approximate -- the game names one Max HP loss ``HpLoss`` -- but it is stable,
+# which is what matters: a known option always puts its number in the same
+# column, and its identity embedding already carries what the number means.
+# The bucket is what lets an option the vocabulary has never seen still say how
+# much it costs.  ``other`` catches the rest, so no number is silently dropped.
+#
+# ``game_tokenizer._EFFECT_RULES`` holds the matching order; the two are pinned
+# together by ``tests/test_schema.py``.
+EVENT_EFFECT_KEYS = (
+    "max_hp_loss",
+    "hp_loss",
+    "max_hp",
+    "heal",
+    "gold",
+    "cost",
+    "damage",
+    "cards",
+    "other",
+)
+EVENT_EFFECT_FIELDS = tuple(f"effect_{key}" for key in EVENT_EFFECT_KEYS)
+
 MAP_CATEGORICAL_FIELDS = ("node_type",)
 MAP_NUMERIC_FIELDS = (
     "col",
@@ -136,7 +168,11 @@ ENTITY_CATEGORICAL: Mapping[str, tuple[tuple[str, str], ...]] = MappingProxyType
         ),
         "event_option": (
             ("event_id", "events"),
+            ("event_page", "event_pages"),
             ("event_option", "event_options"),
+            ("card_id", "cards"),
+            ("card_type", "card_types"),
+            ("rarity", "rarities"),
             ("entity_zone", "entity_zones"),
         ),
         "rest_option": (
@@ -192,7 +228,10 @@ ENTITY_NUMERIC_FIELDS: Mapping[str, tuple[str, ...]] = MappingProxyType(
             "is_locked",
             "is_proceed",
             "was_chosen",
-        ),
+            "will_kill_player",
+            "card_count",
+        )
+        + EVENT_EFFECT_FIELDS,
         "rest_option": ("is_enabled",),
         "bundle": ("card_count",),
         "crystal_cell": (

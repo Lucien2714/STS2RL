@@ -20,6 +20,7 @@ from sts2rl.encoder.schema import (
     ENTITY_CATEGORICAL_FIELDS,
     ENTITY_KINDS,
     ENTITY_NUMERIC_FIELDS,
+    EVENT_EFFECT_KEYS,
     GLOBAL_CATEGORICAL,
     MAP_CATEGORICAL_FIELDS,
     MAP_NUMERIC_FIELDS,
@@ -39,7 +40,12 @@ from sts2rl.encoder.tokens import (
     TokenizedMap,
     TokenizedState,
 )
-from sts2rl.encoder.vocabulary import GameVocabulary, UNKNOWN_INDEX
+from sts2rl.encoder.vocabulary import (
+    GameVocabulary,
+    UNKNOWN_INDEX,
+    parse_text_key,
+    snake_variant,
+)
 from sts2rl.env.types import GameObservation
 
 
@@ -726,16 +732,38 @@ class GameTokenizer:
         event_id = _text(event.get("event_id"))
         for option in _records(event.get("options")):
             locked = option.get("is_locked")
+            text_key = _text(option.get("text_key"))
+            # The screen never names its page; the option's text key does.
+            _, page, _ = parse_text_key(text_key) if text_key else (None, None, None)
+            cards = _records(option.get("cards"))
+            card = cards[0] if cards else {}
+            effects = _effect_values(option.get("effects"))
             index = rows["event_option"].append(
                 [
                     self.vocabulary.lookup("events", event_id),
-                    self.vocabulary.event_option_index(event_id, _text(option.get("title"))),
+                    self.vocabulary.lookup("event_pages", page),
+                    self.vocabulary.event_option_index(
+                        event_id,
+                        text_key,
+                        _text(option.get("title")),
+                    ),
+                    self.vocabulary.lookup_first("cards", _identity_keys(card)),
+                    self.vocabulary.lookup("card_types", _text(card.get("type"))),
+                    self.vocabulary.lookup("rarities", _text(card.get("rarity"))),
                     self.vocabulary.lookup("entity_zones", "event"),
                 ],
                 [
                     _bool_feature(locked),
                     _bool_feature(option.get("is_proceed")),
                     _bool_feature(option.get("was_chosen")),
+                    # null is not false here: the option defines no lethality
+                    # check, which the presence mask says and a 0 would not.
+                    _bool_feature(option.get("will_kill_player")),
+                    linear_feature(len(cards)),
+                    *(
+                        effects.get(key, NumericFeature.missing())
+                        for key in EVENT_EFFECT_KEYS
+                    ),
                 ],
                 activity=(not locked, True) if isinstance(locked, bool) else (False, False),
             )
@@ -1279,6 +1307,58 @@ def _integer(value: object) -> int | None:
         return int(value)  # type: ignore[arg-type]
     except (OverflowError, TypeError, ValueError):
         return None
+
+
+# What an interpolated number is, read off the variable the game named it
+# after; first match wins, and the last rule catches everything else so no
+# number is dropped.  ``EVENT_EFFECT_KEYS`` lists the same keys in the same
+# order, and ``tests/test_schema.py`` pins the two together.
+#
+# The names are the game's: eight of them end in ``hp_loss`` (one of which is
+# a Max HP loss), nine in ``cost``, seven in ``gold``.  Matching the name is
+# therefore approximate but stable, which is what an embedding needs.
+_EFFECT_RULES: tuple[tuple[str, Callable[[str], bool]], ...] = (
+    # Max HP is a different resource from HP and is spent in both directions,
+    # so a max-HP loss gets its own column rather than joining either the HP
+    # losses or the max-HP gains -- one column carrying gains and losses with
+    # no sign between them would be worth less than no column.
+    ("max_hp_loss", lambda key: "max_hp_loss" in key),
+    ("hp_loss", lambda key: "hp_loss" in key),
+    ("max_hp", lambda key: "max_hp" in key),
+    ("heal", lambda key: "heal" in key),
+    ("gold", lambda key: key.endswith("gold")),
+    ("cost", lambda key: key.endswith("cost")),
+    ("damage", lambda key: "damage" in key),
+    ("cards", lambda key: "cards" in key or key.endswith("count")),
+    ("other", lambda key: True),
+)
+
+
+def _effect_values(value: object) -> Mapping[str, NumericFeature]:
+    """Bucket an option's interpolated numbers by what each one is.
+
+    Text placeholders — a relic's name, a curse's title — arrive in the same
+    payload and are not numbers; they drop out here rather than occupying a
+    column.  Two numbers in one bucket keep the larger, which is the one worth
+    knowing about.
+    """
+    buckets: dict[str, NumericFeature] = {}
+    for name, number in _mapping(value).items():
+        feature = signed_log_feature(number)
+        if not feature.present:
+            continue
+        key = _effect_key(snake_variant(str(name)))
+        existing = buckets.get(key)
+        if existing is None or abs(feature.value) > abs(existing.value):
+            buckets[key] = feature
+    return buckets
+
+
+def _effect_key(name: str) -> str:
+    for key, matches in _EFFECT_RULES:
+        if matches(name):
+            return key
+    return "other"
 
 
 def _bool_feature(value: object) -> NumericFeature:

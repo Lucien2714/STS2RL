@@ -254,8 +254,18 @@ def test_rewards_shop_event_and_rest_options_have_semantic_ids(
         "event": {
             "event_id": "ABYSSAL_BATHS",
             "options": [
-                {"index": 4, "title": "Immerse", "is_locked": False},
-                {"index": 5, "title": "Runtime-only option", "is_locked": True},
+                {
+                    "index": 4,
+                    "text_key": "ABYSSAL_BATHS.pages.INITIAL.options.IMMERSE",
+                    "title": "Immerse",
+                    "is_locked": False,
+                },
+                {
+                    "index": 5,
+                    "text_key": "ABYSSAL_BATHS.pages.INITIAL.options.NOT_SHIPPED",
+                    "title": "Runtime-only option",
+                    "is_locked": True,
+                },
             ],
         },
         "rest_site": {
@@ -278,13 +288,100 @@ def test_rewards_shop_event_and_rest_options_have_semantic_ids(
     assert shop.categorical[0, 1].item() == vocabulary.lookup("cards", "UPPERCUT")
     card_cost = _column(ENTITY_NUMERIC_FIELDS["shop_item"], "card_cost")
     assert shop.numeric[0, card_cost].item() == -1
-    assert events.categorical[0, 1].item() == vocabulary.event_option_index(
-        "ABYSSAL_BATHS", "Immerse"
+    option_col = _column(ENTITY_CATEGORICAL_FIELDS["event_option"], "event_option")
+    page_col = _column(ENTITY_CATEGORICAL_FIELDS["event_option"], "event_page")
+    assert events.categorical[0, option_col].item() == vocabulary.event_option_index(
+        "ABYSSAL_BATHS", "ABYSSAL_BATHS.pages.INITIAL.options.IMMERSE"
     )
-    assert events.categorical[1, 1].item() == UNKNOWN_INDEX
+    assert events.categorical[1, option_col].item() == UNKNOWN_INDEX
+    assert events.categorical[0, page_col].item() == vocabulary.lookup(
+        "event_pages", "INITIAL"
+    )
     assert events.active.tolist() == [True, False]
     assert rest.categorical[1, 0].item() == UNKNOWN_INDEX
     assert rest.active.tolist() == [True, False]
+
+
+def test_event_options_carry_lethality_effects_and_their_cards(
+    tokenizer: GameTokenizer,
+    vocabulary: GameVocabulary,
+):
+    """A null lethality check is not a safe one, and the mask is what says so."""
+    state = {
+        "state_type": "event",
+        "player": _base_player(),
+        "event": {
+            "event_id": "TRASH_HEAP",
+            "options": [
+                {
+                    "index": 0,
+                    "text_key": "TRASH_HEAP.pages.INITIAL.options.DIVE_IN",
+                    "title": "Dive In",
+                    "is_locked": False,
+                    "will_kill_player": True,
+                    "effects": {
+                        "hp_loss": 8,
+                        "decipher_max_hp_loss": 3,
+                        "prize1": 42,
+                    },
+                },
+                {
+                    "index": 1,
+                    "text_key": "TRASH_HEAP.pages.INITIAL.options.GRAB",
+                    "title": "Grab Random Junk",
+                    "is_locked": False,
+                    "will_kill_player": False,
+                    # every event names its own variables; the name says what
+                    # the number is, and text placeholders are not numbers
+                    "effects": {
+                        "prickly_sponge_gold": 100,
+                        "mystery_box_cost": 75,
+                        "small_chest_gold": 20,
+                        "relic_name": "Strawberry",
+                    },
+                    "cards": [_card(id="ABRASIVE", name="Abrasive")],
+                },
+                {
+                    "index": 2,
+                    "text_key": "TRASH_HEAP.pages.INITIAL.options.LEAVE",
+                    "title": "Leave",
+                    "is_locked": False,
+                    "will_kill_player": None,
+                },
+            ],
+        },
+    }
+
+    events = tokenizer.tokenize_state(GameObservation(state)).entities["event_option"]
+    lethal = _column(ENTITY_NUMERIC_FIELDS["event_option"], "will_kill_player")
+    hp_loss = _column(ENTITY_NUMERIC_FIELDS["event_option"], "effect_hp_loss")
+    max_hp_loss = _column(ENTITY_NUMERIC_FIELDS["event_option"], "effect_max_hp_loss")
+    gold = _column(ENTITY_NUMERIC_FIELDS["event_option"], "effect_gold")
+    cost = _column(ENTITY_NUMERIC_FIELDS["event_option"], "effect_cost")
+    other = _column(ENTITY_NUMERIC_FIELDS["event_option"], "effect_other")
+    count = _column(ENTITY_NUMERIC_FIELDS["event_option"], "card_count")
+    card_col = _column(ENTITY_CATEGORICAL_FIELDS["event_option"], "card_id")
+
+    assert events.numeric[0, lethal].item() == 1.0
+    assert events.numeric[1, lethal].item() == 0.0
+    assert events.numeric_mask[:, lethal].tolist() == [True, True, False]
+    assert events.numeric[0, hp_loss].item() == pytest.approx(math.log1p(8))
+    # max HP is a different resource: a loss of it is not an HP loss, and the
+    # column it does land in holds only gains
+    assert events.numeric[0, max_hp_loss].item() == pytest.approx(math.log1p(3))
+    # a name no rule reads still reaches the model as a magnitude
+    assert events.numeric[0, other].item() == pytest.approx(math.log1p(42))
+    # two golds in one option keep the larger; a cost is not a gain
+    assert events.numeric[1, gold].item() == pytest.approx(math.log1p(100))
+    assert events.numeric[1, cost].item() == pytest.approx(math.log1p(75))
+    # a text placeholder occupies no column
+    assert events.numeric_mask[1, other].item() is False
+    assert events.numeric_mask[:, hp_loss].tolist() == [True, False, False]
+    assert events.numeric[:, count].tolist() == [0.0, 1.0, 0.0]
+    assert events.categorical[1, card_col].item() == vocabulary.lookup(
+        "cards", "ABRASIVE"
+    )
+    assert events.categorical[0, card_col].item() == PAD_INDEX
 
 
 def test_selection_cards_and_bundles_remain_individual_and_link_children(

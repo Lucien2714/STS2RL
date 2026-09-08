@@ -8,6 +8,7 @@ from sts2rl.encoder import (
     ENTITY_CATEGORICAL,
     ENTITY_KINDS,
     ENTITY_NUMERIC_FIELDS,
+    EVENT_EFFECT_KEYS,
     GLOBAL_CATEGORICAL,
     EncoderConfig,
     EntityTransformer,
@@ -15,6 +16,7 @@ from sts2rl.encoder import (
     GameVocabulary,
 )
 from sts2rl.encoder.entity_encoder import ENTITY_CATEGORICAL_VOCABS
+from sts2rl.encoder.game_tokenizer import _EFFECT_RULES
 from sts2rl.env import GameObservation
 
 
@@ -67,3 +69,8 @@ def test_tokenized_widths_match_the_declared_schema(vocabulary: GameVocabulary):
         batch = state.entities[kind]
         assert batch.categorical.shape[1] == len(ENTITY_CATEGORICAL[kind])
         assert batch.numeric.shape[1] == len(ENTITY_NUMERIC_FIELDS[kind])
+
+
+def test_every_effect_bucket_has_a_rule_and_a_column():
+    """The rule order is the column order; a rule with no column is dropped."""
+    assert tuple(key for key, _ in _EFFECT_RULES) == EVENT_EFFECT_KEYS

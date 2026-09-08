@@ -647,17 +647,29 @@ Pick one card to add to your deck. Appears after claiming a card reward, or dire
     "event_name": "Neow",
     "is_ancient": true,
     "in_dialogue": false,        // true = click to advance dialogue first
+    "is_finished": false,        // true = only the Proceed option remains
+    "dialogue": {                // Ancients only; omitted when there is no dialogue
+      "current_line": 2,
+      "total_lines": 5,
+      "lines": [                 // Only lines already revealed on screen
+        { "index": 0, "speaker": "Ancient", "text": "..." }
+      ]
+    },
     "body": "Event description text...",
     "options": [
       {
         "index": 0,
+        "text_key": "TRASH_HEAP.pages.INITIAL.options.DIVE_IN",
         "title": "Draft",
         "description": "Choose 10 card rewards to replace your starting deck.",
         "is_locked": false,
         "is_proceed": false,
         "was_chosen": false,
+        "will_kill_player": false,           // null if the option defines no lethality check
+        "effects": { "hp_loss": 8 },        // Numbers this option's own text interpolates
         "relic_name": "Relic Name",         // Only if option has a relic
         "relic_description": "Relic desc.",  // Only if option has a relic
+        "cards": [ /* Card Objects */ ],     // Only if the option's tips reference cards
         "keywords": [ /* Keyword Objects */ ]
       }
     ]
@@ -666,6 +678,28 @@ Pick one card to add to your deck. Appears after claiming a card reward, or dire
   "player": { ... }
 }
 ```
+
+**`text_key`** is the option's locale-independent identity (e.g.
+`TRASH_HEAP.pages.INITIAL.options.DIVE_IN`). `title` and `description` are
+localized display text and change with the player's language; `text_key` does
+not. Match on it rather than parsing the prose. Null if the game left it unset.
+
+**`will_kill_player`** is the game's own lethality predicate for the option,
+evaluated against the local player's current HP. It is `null` when the option
+defines no such check - `null` and `false` are not the same thing, and `null`
+does not mean the option is safe.
+
+**`effects`** holds the numbers the option's own text interpolates, e.g.
+`{ "hp_loss": 8 }`. The game hands every option the whole event's variable pool
+(the "lose HP" option is given the event's Gold var too), so this is narrowed to
+the placeholders that option's text actually references. Effects with no number
+in the text - removing a card, gaining a random relic - have no placeholder and
+so appear nowhere here. Treat it as a hint; `text_key` and `description` remain
+authoritative.
+
+**`cards`** carries the full card objects behind the option's card hover tips
+(a curse it grants, a card it adds). The same cards also appear in `keywords`,
+but flattened to name + description only.
 
 ### `rest_site` — Rest Site
 
@@ -1256,6 +1290,13 @@ a `GET`.
 The mod waits for the game to settle before capturing that state: the action queue is
 drained and, in combat, the local player is back in the play phase — so an `end_turn`
 response already carries the state of your **next** turn, after the enemies have acted.
+
+A screen that is itself waiting on you counts as settled and returns immediately: a
+blocking popup, and the selection screens (`hand_select`, `card_select`,
+`bundle_select`, `relic_select`). The game cannot advance past those until you act, so
+the response carries the selection screen, **not** the resolved effect — keep selecting
+or confirming until the state moves on.
+
 The wait is capped at 8 seconds; if it expires, the state is returned as-is plus
 `"state_wait_timed_out": true` (poll with `GET` until `battle.is_play_phase` is true).
 If the state cannot be read at all, `state` is replaced by `state_error`.
