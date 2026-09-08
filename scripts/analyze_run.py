@@ -43,6 +43,24 @@ def report(run_dir: Path, buckets: int) -> None:
     errors = sum(row.get("action_errors", 0) for row in episodes)
     print(f"reused runs: {reused}   action errors: {errors}")
 
+    # Throughput and truncation, which is what comparing two backends -- a
+    # windowed client against a headless one, or the game against a simulator
+    # -- actually turns on.  Truncation is reported beside it rather than
+    # buried: a truncated episode leaves the run alive, so the next reset joins
+    # it instead of starting its assigned seed, and a seeded experiment stops
+    # measuring what it claims to.  A faster backend that truncates more is not
+    # faster.
+    total_steps = sum(row.get("steps", 0) for row in episodes)
+    total_seconds = sum(row.get("duration_seconds", 0.0) for row in episodes)
+    truncated = sum(1 for row in episodes if row.get("truncated"))
+    per_step = f"{total_seconds / total_steps:.3f}" if total_steps else "n/a"
+    print(
+        f"throughput: {per_step} s/step "
+        f"({total_steps} steps in {total_seconds:.0f}s)   "
+        f"truncated: {truncated}/{len(episodes)} "
+        f"({100 * truncated / len(episodes):.1f}%)"
+    )
+
     size = max(1, len(episodes) // buckets)
     print(f"\n-- reward and floor by block of {size} episodes")
     print(f"{'episodes':>14}  {'reward':>8}  {'floor':>7}  {'steps':>7}")
