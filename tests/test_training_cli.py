@@ -10,6 +10,7 @@ import pytest
 
 from sts2rl.env import ResetSpec
 from sts2rl.training import TrainingConfig, TrainingPlan
+from sts2rl.training.config import DEFAULT_HOLDOUT_SEEDS, DEFAULT_SEED_POOL
 from sts2rl.training import cli
 from sts2rl.training import eval_cli
 
@@ -181,9 +182,14 @@ def test_default_installs_the_bundled_pools(tmp_path: Path):
 
     plan = cli._new_plan(args)
 
-    assert len(plan.training.training_seeds) == 12
-    assert len(plan.training.holdout_seeds) == 3
+    assert plan.training.training_seeds == DEFAULT_SEED_POOL
+    assert plan.training.holdout_seeds == DEFAULT_HOLDOUT_SEEDS
     assert not set(plan.training.training_seeds) & set(plan.training.holdout_seeds)
+    # Size is the dial between memorizing a map and spending the variance
+    # budget on draw luck, so a pool that silently shrank back to a dozen is
+    # worth failing over.
+    assert len(plan.training.training_seeds) >= 100
+    assert len(plan.training.holdout_seeds) >= 20
 
 
 def test_resume_refuses_to_reshuffle_the_seed_pool(tmp_path: Path):

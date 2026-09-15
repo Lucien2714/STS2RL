@@ -14,6 +14,11 @@ from sts2rl.encoder import EncoderConfig
 from sts2rl.env import DEFAULT_ACTION_DELAY_SECONDS, ResetSpec
 
 
+# Consecutive failed episodes before a client is considered gone rather than
+# unlucky.  A crashed game should cost its own episodes, not the whole job, but
+# a client that never comes back must stop consuming the episode budget.
+MAX_EPISODE_FAILURES = 3
+
 # Fixed run seeds, cycled one per episode.
 #
 # A fresh random run every episode puts map layout, card rewards, shops, and
@@ -24,18 +29,71 @@ from sts2rl.env import DEFAULT_ACTION_DELAY_SECONDS, ResetSpec
 #
 # A pool, not one seed: a single seed is memorized as an action sequence.  The
 # holdout seeds are never trained on, so evaluating on them is what separates
-# "learned to climb" from "learned these twelve maps".
-# Consecutive failed episodes before a client is considered gone rather than
-# unlucky.  A crashed game should cost its own episodes, not the whole job, but
-# a client that never comes back must stop consuming the episode budget.
-MAX_EPISODE_FAILURES = 3
-
+# "learned to climb" from "learned these maps".
+#
+# Size is the dial between those two failures, and it is the only one that
+# matters here.  Twelve seeds against the ~1500 episodes a run affords is 125
+# plays of each map, which is enough to memorize the early floors; an unbounded
+# pool plays each map once and spends the whole variance budget on draw luck.
+# A hundred and fifty sits between them -- roughly ten plays of each -- and
+# keeps the pool a fixed *distribution*, so a block mean stays comparable while
+# per-seed memorization stops paying.
+#
+# These are real seeds, not invented ones: the game writes every finished run
+# to %APPDATA%\SlayTheSpire2\**\saves\history\*.run as plaintext JSON, and
+# the seeds of `game_mode: standard` runs are exactly what the game generates
+# for itself.  9664 distinct ones were available; 180 were sampled and split.
+# Do not hand-write seeds from a guessed alphabet.
 DEFAULT_SEED_POOL = (
-    "7NKRVDBV", "TJWVA3B8", "GJ677ZKE", "DDY7BHHQ",
-    "7PFC7NZR", "CSJ92XBT", "SQFNH36F", "ZU9GBB22",
-    "7AU6U593", "PST6BSQ9", "KFGBG4ZP", "6T76XVK2",
+    "0357NDTC82", "066ET8NQLE", "07ZJQVNVL7", "0PCBECVTPL",
+    "0SZ8ECRZ24", "0YGUCN8B3E", "0ZTT4AKVKQ", "110DDJMHPW",
+    "137NFE5RG8", "144HTUX89Q", "1DGAKJS6N1", "1TG6C8U3N8",
+    "2EU9F6SKEW", "2GZWK3AK07", "2RX76H6U40", "2WCXDRCQEK",
+    "30MCWJY3ZW", "35SA6UP02F", "3EH64E978B", "3PANEGKLP8",
+    "4E42J8772G", "4LUSRA08AA", "4UEVB4R020", "4WZYR2MXCA",
+    "519KRCMJ1E", "5NMSDLXWL3", "5XH4KM54TQ", "5XV3DVMT54",
+    "61GF5AVUQZ", "6S8W3SPCTK", "6SH31VZ0FJ", "6YUZ71TMFG",
+    "71V1L4Y4AY", "73RAAPKKBU", "7FUMQ5U383", "7Q2BCFGE9J",
+    "7U0Z1N999B", "80P165FWJK", "82VGM1L9X3", "85DZ31Z4JN",
+    "86B0C37772", "8JZJ52Z0JD", "8W42J8N8BK", "8ZNZHNW39P",
+    "92HLLQAXJX", "92S7VV54T8", "9BKMGETU32", "9ECTYSNSM9",
+    "AB48KLTYDN", "AK43ULL3WS", "AKVPQYZBW0", "AY2KPZ2Y4F",
+    "AZ7C354ZGG", "BE373Z71WC", "C44HJ097MA", "C5XTQ8N51B",
+    "C6DV53VPJR", "CBDBHTM9M4", "CCV1BUE8JM", "CNL0342G9S",
+    "CQ3PNLJZ4G", "DHLVJZ6EGF", "DM6RLN1NVV", "DWTS7PY5KL",
+    "ET5LNZFVZU", "EU058TPXR2", "EXL7VX6GSF", "FHHFSB5W4C",
+    "FKKT3Z53KN", "G5BKM8N1PE", "GTQKW4KCAH", "H14T0C5F9B",
+    "H18EBU8G0C", "HD7R5MKQ2V", "J10MF934VG", "J3Q3TS7YQC",
+    "JEQSXL4XVT", "JZ5N6AMTLB", "K678KQVS5F", "K8J1X2YT02",
+    "KNAU1ZSPHB", "L5H8DCJH35", "L9FKQKD6G4", "LY016TGPH9",
+    "M68VC3WXK6", "M6T3ATQ75E", "MCC3YA2MU5", "MJX3TR3ABP",
+    "MKM92CSWXS", "MLUX0HMCMC", "MTD016VJZ6", "MVS24QNA90",
+    "N4TEY69R4W", "NSAVTMQY28", "NYBVL26E3R", "NYQARG8CDA",
+    "PEX21CB8CY", "PFFQ609NM0", "PTN3SALX8A", "PUHV5ZWXW6",
+    "Q9DQCF87D5", "QT2X5DJYGY", "QU1EDZHZW2", "QVRPSHQCX1",
+    "R0QAH22FT7", "RDFHM3K1TP", "RLD3D7R8S7", "RPQCVYAC73",
+    "S0YXM0ZF7E", "S3D2UEQ2SA", "S7BJ2HE0N6", "SAQSERR9W6",
+    "SEVAAV3J4H", "T0PUBZJ5J3", "TS3YZ85RYN", "TY6M3ZKZ7N",
+    "U5YMYR3EDP", "UAQPVEC9B1", "UBQ0U1KPP2", "UE5594L22L",
+    "UEBM9KYPJ1", "UPKK579N2X", "UYRE9J3ZCW", "V1WJ9EMZ3B",
+    "V6JVY2SB2B", "VKPFDM8N0H", "VKYQ6RHFQY", "W3A8MC7UZ5",
+    "WAQTZF819T", "WBRYST09GL", "WJQPTU9TKV", "WK11RMT05Q",
+    "X0PQQB73K7", "X1D85PKAN3", "X6XDWGGYK2", "X8BB1PBC3H",
+    "X96RX31CM1", "XMATWPFYRY", "XPTWPYU48C", "XRY1E24VDR",
+    "XSNZH9Q4QL", "Y8FNXHLE1Y", "YATQ6AS8J0", "YB1FN6Y4KL",
+    "YM58Q1TE7Z", "YMQ4BC2NH5", "YX5MBLDEZX", "ZL6K7D783Q",
+    "ZQC7S0WBNA", "ZUVVK2SC7B",
 )
-DEFAULT_HOLDOUT_SEEDS = ("QXVE762C", "YDZERTWD", "ZTTJDGJF")
+DEFAULT_HOLDOUT_SEEDS = (
+    "1HV0TDQF9C", "1PC2R1GS0T", "2022RDHNEP", "89WSDV9QQG",
+    "8VACK0N352", "92MZ92WNYF", "AC64N3DSJ8", "CNFN4QK80E",
+    "DD4ZL96VCV", "DG979J1U01", "DHNGF9Y8D2", "ETDA4LAPWY",
+    "FEGQDD9EGJ", "H2T77H5C88", "H8BHDZSEB4", "M0VG0FRGBS",
+    "MBCEEP4024", "MBXM1CC2L6", "N7QUJJ2AEA", "QU54MPMGQE",
+    "SAUP1VW3LY", "SRG0QRCVQ7", "UMRVMH92DS", "UUP0VM3LZA",
+    "VCDTTUXZXK", "WQ9865E3X6", "Y03PUR11PD", "YQ26XB9RDL",
+    "Z69Q62VL4J", "ZWRRHMF29A",
+)
 
 
 @dataclass(frozen=True)

@@ -391,3 +391,81 @@ def test_a_screen_that_never_opens_ends_the_episode():
     assert agent.observed == 0
     assert result.truncated is True
     assert env.steps <= 5
+
+
+def test_an_accepted_action_that_moves_nothing_is_marked_inert():
+    """The game answering "ok" while the screen stays put is its own failure.
+
+    It is not a refusal, so none of the stall handling sees it; a measured
+    evaluation looped on a shop purchase the mod retracted every time, with
+    the API reporting success throughout, until the step budget ran out.
+    """
+
+    class InertEnv(FakeEnv):
+        def step(self, action: GameAction):
+            # Accepted, and the state comes back byte for byte identical.
+            return EnvStep(dict(self.state), done=False, info={"action_error": False})
+
+    env = InertEnv()
+    agent = RecordingAgent()
+
+    result = _runner(env, agent, max_steps=3).run()
+
+    assert result.truncated is True
+    assert [t.info.get("inert") for t in result.transitions] == [True, True, True]
+
+
+def test_a_normal_step_is_not_marked_inert():
+    env = FakeEnv()
+    agent = RecordingAgent()
+
+    result = _runner(env, agent).run()
+
+    assert result.terminated is True
+    assert all(not t.info.get("inert") for t in result.transitions)
+
+
+def test_running_out_of_steps_is_reported_as_the_step_limit():
+    class InertEnv(FakeEnv):
+        def step(self, action: GameAction):
+            return EnvStep(dict(self.state), done=False, info={"action_error": False})
+
+    result = _runner(InertEnv(), RecordingAgent(), max_steps=2).run()
+
+    assert result.truncation_reason == "step_limit"
+
+
+def test_a_screen_that_never_opens_is_reported_with_what_was_tried():
+    """"truncated" alone cannot tell this from a combat that never settled."""
+
+    class RefusedEnv(FakeEnv):
+        def __init__(self):
+            super().__init__()
+            self.state = {"state_type": "map", "map": {"next_options": [{"index": 0}]}}
+
+        def step(self, action: GameAction):
+            # Refused, and nothing moved -- the livelock signature.
+            return EnvStep(
+                dict(self.state),
+                done=False,
+                info={"action_error": True, "error": "Map screen is not open"},
+            )
+
+    result = _runner(RefusedEnv(), RecordingAgent(), max_state_refreshes=2).run()
+
+    assert result.truncated is True
+    assert result.truncation_reason == "refused_without_moving"
+    assert result.attempted_actions == (
+        {"type": "choose_map_node", "index": 0},
+    ) * 3
+
+
+def test_no_legal_action_is_reported_as_its_own_reason():
+    class StuckEnv(FakeEnv):
+        def __init__(self):
+            super().__init__()
+            self.state = {"state_type": "treasure", "treasure": {}}
+
+    result = _runner(StuckEnv(), RecordingAgent(), max_state_refreshes=1).run()
+
+    assert result.truncation_reason == "no_legal_action"

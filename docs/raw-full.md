@@ -739,6 +739,7 @@ Shop inventory is auto-opened when state is queried.
         "price": 75,               // Gold price in the shop
         "is_stocked": true,
         "can_afford": true,
+        "can_purchase": true,      // Whether `shop_purchase` will actually go through — see note below
         "on_sale": false,
         "card_id": "OFFERING",
         "card_name": "Offering",
@@ -756,6 +757,8 @@ Shop inventory is auto-opened when state is queried.
         "price": 150,
         "is_stocked": true,
         "can_afford": false,
+        "can_purchase": false,
+        "purchase_blocked_reason": "not_enough_gold",  // Only present when can_purchase is false
         "relic_id": "VAJRA",
         "relic_name": "Vajra",
         "relic_description": "At the start of each combat, gain 1 Strength.",
@@ -768,6 +771,8 @@ Shop inventory is auto-opened when state is queried.
         "price": 50,
         "is_stocked": true,
         "can_afford": true,
+        "can_purchase": false,
+        "purchase_blocked_reason": "potion_slots_full",
         "potion_id": "FIRE_POTION",
         "potion_name": "Fire Potion",
         "potion_description": "Deal 20 damage to target enemy.",
@@ -779,7 +784,8 @@ Shop inventory is auto-opened when state is queried.
         "category": "card_removal",
         "price": 75,
         "is_stocked": true,
-        "can_afford": true
+        "can_afford": true,
+        "can_purchase": true
       }
     ],
     "can_proceed": true,       // Whether `proceed` will work now — see note below
@@ -790,6 +796,25 @@ Shop inventory is auto-opened when state is queried.
   "player": { ... }
 }
 ```
+
+**`can_purchase` answers "will `shop_purchase` actually go through?"**
+
+`is_stocked` and `can_afford` are only the first two checks the game makes. A purchase that
+passes both can still be refused further down, and the game gives no feedback beyond shaking
+the slot. `can_purchase` folds in every check; when it is `false`,
+`purchase_blocked_reason` says which one failed:
+
+| `purchase_blocked_reason` | Meaning |
+| --- | --- |
+| `sold_out` | `is_stocked` is false (already bought, or card removal already used) |
+| `not_enough_gold` | `can_afford` is false |
+| `potion_slots_full` | No open potion slot — use or discard a potion first |
+| `potions_forbidden` | A relic (e.g. Sozu) blocks obtaining potions entirely |
+| `cannot_add_to_deck` | Something prevents adding that card to the deck |
+| `no_removable_cards` | Card removal, but the deck holds nothing removable (all Eternal) |
+
+`shop_purchase` applies the same gate and returns the reason as an error, so a blocked
+purchase never silently no-ops.
 
 **`can_proceed` answers "will `proceed` work right now?", not "is the proceed button enabled?"**
 
@@ -816,6 +841,7 @@ A relic-only shop disguised as an event. Uses `shop_purchase` and `proceed` acti
           "cost": 150,
           "is_stocked": true,
           "can_afford": true,
+          "can_purchase": true,
           "relic_id": "VAJRA",
           "relic_name": "Vajra",
           "relic_description": "At the start of each combat, gain 1 Strength.",
@@ -1023,12 +1049,20 @@ Run has ended.
   "state_type": "game_over",
   "game_over": {
     "message": "Run ended.",
+    "victory": false,
+    "outcome": "combat_death",
+    "killed_by": "SPIRE_GROWTH",
     "options": ["main_menu"]
   },
   "run": { ... },
   "player": { ... }
 }
 ```
+
+`victory` is `true` when the run was won. `outcome` is one of `victory`,
+`combat_death`, `event_death`, `abandoned`, or `unknown`. `killed_by` carries the
+encounter or event name for the two death outcomes and is omitted otherwise.
+`message` reads `"Run ended in victory."` on a win, `"Run ended."` otherwise.
 
 Use `menu_select` with `main_menu` to return to the main menu. `continue` is not advertised because it is not an actionable game-over option.
 

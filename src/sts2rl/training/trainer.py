@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import replace
+import json
 import threading
 from time import monotonic
 
@@ -17,6 +18,18 @@ from sts2rl.training.config import (
     TrainingState,
 )
 from sts2rl.training.metrics import EpisodeMetrics, TrainingMetricsWriter
+
+
+# How many raw states one run may write for diagnosis.  A state is tens of
+# kilobytes and a livelock produces one per episode, so this is a budget rather
+# than a switch: a handful of examples explains a failure, and thousands only
+# fill the disk.
+MAX_STATE_SNAPSHOTS = 50
+
+# How many times one accepted-but-inert action must repeat within an episode
+# before its state is worth keeping.  A single inert step is ordinary -- a
+# screen that had nothing to change -- while a hundred is a policy stuck.
+INERT_SNAPSHOT_THRESHOLD = 10
 
 
 class Trainer:
@@ -33,6 +46,8 @@ class Trainer:
         reporter: Callable[[EpisodeMetrics], None] | None = None,
         tensorboard_log_dir: str = "tensorboard",
         max_episode_failures: int = MAX_EPISODE_FAILURES,
+        max_state_snapshots: int = MAX_STATE_SNAPSHOTS,
+        inert_snapshot_threshold: int = INERT_SNAPSHOT_THRESHOLD,
     ) -> None:
         self.runners: tuple[EpisodeRunner, ...] = (
             tuple(runner) if isinstance(runner, Sequence) else (runner,)
@@ -50,6 +65,14 @@ class Trainer:
         if max_episode_failures < 1:
             raise ValueError("max_episode_failures must be at least 1")
         self.max_episode_failures = max_episode_failures
+        if max_state_snapshots < 0 or inert_snapshot_threshold < 1:
+            raise ValueError(
+                "max_state_snapshots must not be negative and "
+                "inert_snapshot_threshold must be at least 1"
+            )
+        self.max_state_snapshots = max_state_snapshots
+        self.inert_snapshot_threshold = inert_snapshot_threshold
+        self._snapshots_written = 0
         self._checkpointing = threading.Lock()
         self._last_saved_update = self.state.optimizer_updates
         self._last_saved_episode = self.state.completed_episodes
@@ -130,6 +153,8 @@ class Trainer:
                 )
                 self.metrics_writer.log_episode(episode_metrics)
                 self._log_action_errors(result)
+                self._log_inert_actions(result)
+                self._log_truncation(result)
                 if self.reporter is not None:
                     self.reporter(episode_metrics)
 
@@ -219,6 +244,8 @@ class Trainer:
                     )
                     self.metrics_writer.log_episode(episode_metrics)
                     self._log_action_errors(result)
+                    self._log_inert_actions(result)
+                    self._log_truncation(result)
                     if self.reporter is not None:
                         self.reporter(episode_metrics)
 
@@ -347,6 +374,119 @@ class Trainer:
             },
             self.state.environment_steps,
         )
+
+    def _log_inert_actions(self, result: EpisodeResult) -> None:
+        """Record actions the game accepted that changed nothing.
+
+        A rejection is loud -- it carries a message and lands in
+        ``action_errors``.  An accepted action that moves no part of the state
+        is silent, and it is the more dangerous of the two: nothing fails, so
+        the stall handling never sees it, and a deterministic policy repeats it
+        until the step budget is gone.  Grouped by action type and screen,
+        because the same inert action repeated ten thousand times is one fact.
+        """
+        inert: dict[tuple[str, str], dict[str, object]] = {}
+        for transition in result.transitions:
+            if not transition.info.get("inert"):
+                continue
+            state_type = str(transition.state.raw_state.get("state_type"))
+            key = (transition.action.action_type, state_type)
+            inert.setdefault(
+                key,
+                {
+                    "count": 0,
+                    "action": transition.action.to_dict(),
+                    "state_type": state_type,
+                },
+            )
+            inert[key]["count"] += 1  # type: ignore[operator]
+        if not inert:
+            return
+        self.metrics_writer.log_event(
+            "inert_actions",
+            {
+                "episode": self.state.completed_episodes,
+                "actions": list(inert.values())[:10],
+            },
+            self.state.environment_steps,
+        )
+        worst = max(inert.values(), key=lambda entry: entry["count"])  # type: ignore[arg-type]
+        if int(worst["count"]) >= self.inert_snapshot_threshold:
+            self._save_state_snapshot(
+                "inert",
+                {
+                    "episode": self.state.completed_episodes,
+                    "action": worst["action"],
+                    "repeated": worst["count"],
+                    "state": self._last_state_for(result, worst["state_type"]),
+                },
+            )
+
+    def _log_truncation(self, result: EpisodeResult) -> None:
+        """Record why an episode stopped short, and what it was trying.
+
+        ``truncated`` on its own says only that the run did not end in death,
+        which covers a combat that never reached its play phase, a screen the
+        policy could not leave, and a step budget spent -- three different
+        problems that need three different fixes.
+        """
+        if not result.truncated:
+            return
+        self.metrics_writer.log_event(
+            "truncation",
+            {
+                "episode": self.state.completed_episodes,
+                "reason": result.truncation_reason,
+                "state_type": result.final_state.get("state_type"),
+                "steps": result.steps,
+                "attempted_actions": list(result.attempted_actions),
+            },
+            self.state.environment_steps,
+        )
+        self._save_state_snapshot(
+            "truncation",
+            {
+                "episode": self.state.completed_episodes,
+                "reason": result.truncation_reason,
+                "attempted_actions": list(result.attempted_actions),
+                "state": result.final_state,
+            },
+        )
+
+    def _last_state_for(
+        self, result: EpisodeResult, state_type: object
+    ) -> dict[str, object]:
+        """Return the last raw state of the given screen, for a snapshot."""
+        for transition in reversed(result.transitions):
+            if transition.state.raw_state.get("state_type") == state_type:
+                return transition.state.raw_state
+        return result.final_state
+
+    def _save_state_snapshot(self, kind: str, payload: Mapping[str, object]) -> None:
+        """Write one raw state to disk, under a budget.
+
+        ``state_type`` alone cannot reproduce a livelock: the shop that trapped
+        one evaluation needed its item list and their ``can_afford`` flags to
+        explain.  A whole state is tens of kilobytes, though, so this is capped
+        per run -- diagnosis needs a handful of examples, not every one.
+        """
+        if self._snapshots_written >= self.max_state_snapshots:
+            return
+        directory = self.plan.training.run_dir / "diagnostics"
+        try:
+            directory.mkdir(parents=True, exist_ok=True)
+            path = directory / (
+                f"{kind}_ep{self.state.completed_episodes:06d}"
+                f"_{self._snapshots_written:03d}.json"
+            )
+            path.write_text(
+                json.dumps(payload, indent=2, sort_keys=True, default=str),
+                encoding="utf-8",
+            )
+        except OSError:
+            # Diagnostics must never take the run down with them.
+            return
+        self._snapshots_written += 1
 
     def _episode_reset_spec(self, episode_index: int | None = None) -> ResetSpec:
         """Return the reset for the next episode, seeded from the pool.

@@ -28,6 +28,12 @@ class EpisodeResult:
     terminated: bool
     truncated: bool
     reused_run: bool = False
+    # Why the episode stopped short, and what it was trying when it did.
+    # ``truncated`` alone says an episode ended without dying, which is not
+    # enough to tell a combat that never settled from a screen the policy
+    # could not leave.
+    truncation_reason: str | None = None
+    attempted_actions: tuple[dict, ...] = ()
 
     @property
     def steps(self) -> int:
@@ -90,9 +96,13 @@ class EpisodeRunner:
         self.reward_model.reset(initial_state)
         self.agent.reset(observation)
 
+        truncation_reason: str | None = None
+        attempted: list[dict] = []
+
         for _ in range(self.max_steps):
             decision = self._choose_with_refresh(observation)
             if decision is None:
+                truncation_reason = "no_legal_action"
                 break
             action, observation = decision
             env_step = self.env.step(action)
@@ -103,20 +113,33 @@ class EpisodeRunner:
                 # and repeating it is how a deterministic policy spends ten
                 # thousand steps on one screen.
                 stalled += 1
+                attempted.append(action.to_dict())
                 self.agent.discard_decision()
                 if stalled > self.max_state_refreshes:
                     truncated_by_stall = True
+                    truncation_reason = "refused_without_moving"
                     break
                 self._wait_for_the_screen(stalled - 1)
                 observation = self._observation(self.env.get_state())
                 continue
             stalled = 0
 
+            extra: dict = {}
             if env_step.info.get("action_error"):
                 reward, reward_info = self.reward_model.action_error_reward(
                     env_step.info.get("error")
                 )
             else:
+                # An action the game accepted that moved nothing.  This is not
+                # a refusal, so none of the stall handling above sees it, and
+                # it is invisible in the metrics -- yet it is what a
+                # deterministic policy loops on forever.  One measured
+                # evaluation spent its whole step budget re-buying a shop item
+                # the mod retracted every time, while the API kept answering
+                # "ok".  Recording it costs a dictionary comparison already
+                # performed for the refusal case.
+                if env_step.raw_state == observation.raw_state:
+                    extra["inert"] = True
                 reward, reward_info = self.reward_model.compute(
                     observation.raw_state,
                     env_step.raw_state,
@@ -132,7 +155,7 @@ class EpisodeRunner:
                 reward=float(reward),
                 next_state=next_observation,
                 done=env_step.done,
-                info={**env_step.info, "reward": reward_info},
+                info={**env_step.info, "reward": reward_info, **extra},
             )
             transitions.append(transition)
             total_reward += float(reward)
@@ -160,6 +183,10 @@ class EpisodeRunner:
             terminated=False,
             truncated=True,
             reused_run=reused_run,
+            # Falling out of the loop means the step budget ran out, which is
+            # a different failure from either break above.
+            truncation_reason=truncation_reason or "step_limit",
+            attempted_actions=tuple(attempted[-5:]),
         )
 
     @staticmethod

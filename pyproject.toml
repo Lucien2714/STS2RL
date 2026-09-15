@@ -28,6 +28,19 @@ build-backend = "hatchling.build"
 [tool.uv]
 package = true
 
+# Torch comes from PyPI as a CPU-only build, and this trains against six local
+# game clients on a six-core machine: the clients need those cores more than
+# the encoder does, so the forward pass belongs on the GPU. The wheels are only
+# on PyTorch's own index, and cu130 is the first line that carries sm_120 for
+# an RTX 50-series card.
+[[tool.uv.index]]
+name = "pytorch-cu130"
+url = "https://download.pytorch.org/whl/cu130"
+explicit = true
+
+[tool.uv.sources]
+torch = { index = "pytorch-cu130" }
+
 [tool.pytest.ini_options]
 pythonpath = ["src"]
 testpaths = ["tests"]

@@ -199,11 +199,21 @@ class LegalActionProvider:
             shop = self._mapping(merchant.get("shop"))
         else:
             shop = self._mapping(state.get("shop"))
+        # ``can_purchase`` is the game's own answer to "will this go through?",
+        # folding in every check behind ``is_stocked`` and ``can_afford``: a
+        # full potion belt, a relic forbidding potions, a card the deck will
+        # not take, a removal with nothing removable.  Reconstructing that list
+        # here is how a purchase came to be offered, accepted, and silently
+        # retracted -- one evaluation spent its whole step budget re-buying the
+        # same item while the API answered "ok" every time.
+        #
+        # Strictly ``is True``: a build that does not send the field offers no
+        # purchases and the agent simply leaves the shop, which is a far better
+        # failure than guessing and looping.
         actions = [
             GameAction("shop_purchase", index=index)
             for item in self._records(shop.get("items"))
-            if item.get("is_stocked") is not False and item.get("can_afford") is True
-            if item.get("category") != "potion" or not self._potion_belt_is_full(state)
+            if item.get("can_purchase") is True
             for index in [self._index(item)]
             if index is not None
         ]

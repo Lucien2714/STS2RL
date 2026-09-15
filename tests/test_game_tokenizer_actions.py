@@ -450,6 +450,7 @@ def _legal_state_cases() -> dict[str, dict[str, object]]:
                         "id": "UPPERCUT",
                         "can_afford": True,
                         "is_stocked": True,
+                        "can_purchase": True,
                     }
                 ],
                 "can_proceed": True,
@@ -467,6 +468,7 @@ def _legal_state_cases() -> dict[str, dict[str, object]]:
                             "id": "BLACK_STAR",
                             "can_afford": True,
                             "is_stocked": True,
+                            "can_purchase": True,
                         }
                     ]
                 }

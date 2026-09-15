@@ -160,23 +160,35 @@ function Get-ModPort {
 }
 
 <#
-    Give a brand-new client save directory the one file it cannot do without.
+    Give a brand-new client save directory the files it cannot do without.
 
-    A client started against an empty APPDATA loads no mods at all. The game
-    logs "Skipping loading mod STS2_MCP, user has not yet seen the mods
-    warning" and then serves no API, so the trainer sees a client that starts
-    and never answers.
+    Two of them, and each missing one costs a whole training lane.
 
-    The flag it is looking for lives in settings.save, which -- unlike the
-    profile and run history -- Steam Cloud does not sync down. A fresh client
-    therefore gets a default settings.save with mods disabled, while everything
-    else arrives correctly from the cloud.
+    settings.save carries mods_enabled, the mod list and seen_ea_disclaimer. A
+    client started against an empty APPDATA loads no mods at all: the game logs
+    "Skipping loading mod STS2_MCP, user has not yet seen the mods warning" and
+    then serves no API, so the trainer sees a client that starts and never
+    answers.
 
-    Copying that one file is enough. It carries mods_enabled, the mod list and
-    seen_ea_disclaimer. Every other save either syncs from Steam or is written
-    on demand, so this deliberately copies nothing else: the point of separate
-    save directories is that clients diverge, and seeding more would start them
-    as copies of one another's run state.
+    progress.save carries the account's unlocks, including which epochs have
+    been revealed. Without it the main menu offers only settings and quit --
+    timeline is blocked with "manual_epoch_reveal_required" and there is no
+    singleplayer entry at all -- so reset fails with "Menu option
+    'singleplayer' is not enabled" and the lane retires after
+    max_episode_failures. That is the expensive shape of this one: the API
+    answers, this script's health check passes, and only the trainer's metrics
+    say anything is wrong.
+
+    Steam Cloud is why neither can be assumed to arrive on its own. It syncs
+    the profile and the run history down into a new save directory, but never
+    settings.save, and it raced four clients coming up at once on
+    progress.save: two of them read the 5 KB default before the 200 KB cloud
+    copy landed.
+
+    Run state -- current_run.save and the history -- is deliberately not
+    copied. The point of separate save directories is that clients diverge, and
+    seeding a live run would start them as copies of one another. Account
+    progression is shared by definition; a run is not.
 #>
 function Initialize-ClientSaves {
     param([string]$AppData, [string]$Label)
@@ -186,10 +198,21 @@ function Initialize-ClientSaves {
         return
     }
 
-    $seeds = @(Get-ChildItem -LiteralPath $SeedFrom -Recurse -File -Filter 'settings.save' -ErrorAction SilentlyContinue)
-    if ($seeds.Count -eq 0) {
+    $wanted = @(
+        'settings.save',
+        'progress.save',
+        'progress.save.backup',
+        'prefs.save',
+        'profile.save'
+    )
+    $seeds = @(Get-ChildItem -LiteralPath $SeedFrom -Recurse -File -ErrorAction SilentlyContinue |
+        Where-Object { $wanted -contains $_.Name })
+    if (@($seeds | Where-Object { $_.Name -eq 'settings.save' }).Count -eq 0) {
         Write-Log "WARNING: no settings.save under $SeedFrom; $Label may load no mods"
         return
+    }
+    if (@($seeds | Where-Object { $_.Name -eq 'progress.save' }).Count -eq 0) {
+        Write-Log "WARNING: no progress.save under $SeedFrom; $Label may offer no singleplayer menu"
     }
 
     $seedRoot = (Resolve-Path -LiteralPath $SeedFrom).Path
@@ -200,7 +223,7 @@ function Initialize-ClientSaves {
         if (Test-Path -LiteralPath $destination) { continue }
         $null = New-Item -ItemType Directory -Path (Split-Path -Parent $destination) -Force
         Copy-Item -LiteralPath $seed.FullName -Destination $destination
-        Set-TrainingFrameRate -SettingsPath $destination
+        if ($seed.Name -eq 'settings.save') { Set-TrainingFrameRate -SettingsPath $destination }
         Write-Log "$Label seeded $relative"
     }
 }

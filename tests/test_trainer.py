@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
+import json
 import time
 
 import pytest
@@ -734,3 +735,160 @@ def test_a_run_that_never_updates_still_saves_once_at_the_end():
     trainer.train()
 
     assert len(checkpoints.episodes) >= 1
+
+
+def _inert_result(steps: int, *, state_type: str = "shop") -> EpisodeResult:
+    """An episode whose actions the game accepted while nothing moved."""
+    observation = GameObservation({"state_type": state_type, "run": {"floor": 20}})
+    transition = Transition(
+        state=observation,
+        action=GameAction("shop_purchase", index=2),
+        reward=-0.01,
+        next_state=observation,
+        done=False,
+        info={"action_error": False, "inert": True},
+    )
+    return EpisodeResult(
+        initial_state=observation.raw_state,
+        final_state=observation.raw_state,
+        transitions=tuple(transition for _ in range(steps)),
+        total_reward=-0.01 * steps,
+        terminated=False,
+        truncated=True,
+        truncation_reason="step_limit",
+        attempted_actions=(),
+    )
+
+
+class _ScriptedRunner:
+    """Return prepared results, so a trainer test needs no game."""
+
+    def __init__(self, agent: FakeAgent, results: list[EpisodeResult]) -> None:
+        self.agent = agent
+        self.results = list(results)
+        self.reset_specs: list[object] = []
+
+    def run(self, reset_spec: object) -> EpisodeResult:
+        self.reset_specs.append(reset_spec)
+        self.agent.environment_steps += 1
+        return self.results.pop(0)
+
+
+def _trainer_with(results, tmp_path, metrics, **kwargs):
+    agent = FakeAgent()
+    plan = replace(
+        _plan(total=len(results)),
+        training=replace(
+            _plan(total=len(results)).training, run_dir=tmp_path, tensorboard_enabled=False
+        ),
+    )
+    return Trainer(
+        _ScriptedRunner(agent, results),  # type: ignore[arg-type]
+        agent,  # type: ignore[arg-type]
+        FakeCheckpointManager(),  # type: ignore[arg-type]
+        metrics,  # type: ignore[arg-type]
+        plan,
+        **kwargs,
+    )
+
+
+def test_an_accepted_action_that_moves_nothing_is_recorded(tmp_path):
+    """A refusal is loud; an accepted action that changes nothing is silent.
+
+    It is the more dangerous of the two: no stall handling sees it, and a
+    deterministic policy repeats it until the step budget is gone.  One
+    measured evaluation spent three hours re-buying a shop item the mod
+    retracted every time while the API kept answering "ok".
+    """
+    metrics = FakeMetricsWriter()
+    trainer = _trainer_with([_inert_result(12)], tmp_path, metrics)
+
+    trainer.train()
+
+    events = {name: payload for name, payload in metrics.event_payloads}
+    assert "inert_actions" in events
+    entry = events["inert_actions"]["actions"][0]
+    assert entry["action"] == {"type": "shop_purchase", "index": 2}
+    assert entry["state_type"] == "shop"
+    assert entry["count"] == 12
+
+
+def test_a_single_inert_step_writes_no_snapshot(tmp_path):
+    """One inert step is ordinary -- a screen that had nothing to change."""
+    metrics = FakeMetricsWriter()
+    trainer = _trainer_with(
+        [_inert_result(1)], tmp_path, metrics, inert_snapshot_threshold=10
+    )
+
+    trainer.train()
+
+    assert not (tmp_path / "diagnostics").exists() or not list(
+        (tmp_path / "diagnostics").glob("inert_*.json")
+    )
+
+
+def test_a_repeated_inert_action_saves_the_whole_state(tmp_path):
+    """state_type alone cannot reproduce a livelock.
+
+    The shop that trapped one evaluation needed its item list and their
+    can_afford flags to explain, and none of that is in the metrics.
+    """
+    metrics = FakeMetricsWriter()
+    trainer = _trainer_with(
+        [_inert_result(40)], tmp_path, metrics, inert_snapshot_threshold=10
+    )
+
+    trainer.train()
+
+    files = list((tmp_path / "diagnostics").glob("inert_*.json"))
+    assert len(files) == 1
+    saved = json.loads(files[0].read_text(encoding="utf-8"))
+    assert saved["repeated"] == 40
+    assert saved["action"] == {"type": "shop_purchase", "index": 2}
+    assert saved["state"]["state_type"] == "shop"
+
+
+def test_truncation_records_why_and_what_it_was_trying(tmp_path):
+    """"truncated" alone covers three different problems.
+
+    A combat that never reached its play phase, a screen the policy could not
+    leave, and a spent step budget need three different fixes.
+    """
+    metrics = FakeMetricsWriter()
+    result = replace(
+        _inert_result(3),
+        truncation_reason="refused_without_moving",
+        attempted_actions=({"type": "choose_rest_option", "index": 0},),
+    )
+    trainer = _trainer_with([result], tmp_path, metrics)
+
+    trainer.train()
+
+    events = {name: payload for name, payload in metrics.event_payloads}
+    assert events["truncation"]["reason"] == "refused_without_moving"
+    assert events["truncation"]["state_type"] == "shop"
+    assert events["truncation"]["attempted_actions"] == [
+        {"type": "choose_rest_option", "index": 0}
+    ]
+    saved = json.loads(
+        next((tmp_path / "diagnostics").glob("truncation_*.json")).read_text(
+            encoding="utf-8"
+        )
+    )
+    assert saved["state"]["run"]["floor"] == 20
+
+
+def test_snapshots_stop_at_their_budget(tmp_path):
+    """A state is tens of kilobytes and a livelock produces one per episode."""
+    metrics = FakeMetricsWriter()
+    trainer = _trainer_with(
+        [_inert_result(40) for _ in range(5)],
+        tmp_path,
+        metrics,
+        max_state_snapshots=2,
+        inert_snapshot_threshold=10,
+    )
+
+    trainer.train()
+
+    assert len(list((tmp_path / "diagnostics").glob("*.json"))) == 2

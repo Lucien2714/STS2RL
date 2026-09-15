@@ -116,8 +116,11 @@ def test_combat_candidates_expand_enemy_targets_and_filter_unplayable_cards():
                 "state_type": "shop",
                 "shop": {
                     "items": [
-                        {"index": 2, "is_stocked": True, "can_afford": True},
-                        {"index": 3, "is_stocked": True, "can_afford": False},
+                        {"index": 2, "is_stocked": True, "can_afford": True,
+                         "can_purchase": True},
+                        {"index": 3, "is_stocked": True, "can_afford": False,
+                         "can_purchase": False,
+                         "purchase_blocked_reason": "not_enough_gold"},
                     ],
                     "can_proceed": True,
                 },
@@ -288,7 +291,8 @@ def test_shop_proceed_follows_can_proceed_now_that_it_means_what_it_says():
             "inventory_open": True,
             "items": [
                 {"index": 0, "category": "card", "price": 149,
-                 "is_stocked": True, "can_afford": False},
+                 "is_stocked": True, "can_afford": False, "can_purchase": False,
+                 "purchase_blocked_reason": "not_enough_gold"},
             ],
         },
     }
@@ -710,4 +714,85 @@ def test_the_other_shape_still_works_when_the_pick_is_moved_away():
     assert actions == [
         {"type": "combat_select_card", "card_index": 0},
         {"type": "combat_select_card", "card_index": 1},
+    ]
+
+
+def test_a_purchase_is_offered_only_when_the_game_says_it_will_go_through():
+    """``can_purchase`` folds in every check behind stock and gold.
+
+    Reconstructing that list here is what produced a livelock: a potion the
+    belt had no room for passed ``is_stocked`` and ``can_afford``, the game
+    took the click and silently retracted it, and a deterministic policy
+    re-bought it until the step budget was gone.
+    """
+    state = {
+        "state_type": "shop",
+        "player": {"gold": 107, "potions": [], "max_potion_slots": 3},
+        "shop": {
+            "can_proceed": True,
+            "inventory_open": True,
+            "items": [
+                {"index": 0, "category": "card", "price": 75,
+                 "is_stocked": True, "can_afford": True, "can_purchase": True},
+                # Affordable and in stock, and still refused by the game.
+                {"index": 1, "category": "potion", "price": 51,
+                 "is_stocked": True, "can_afford": True, "can_purchase": False,
+                 "purchase_blocked_reason": "potion_slots_full"},
+                {"index": 2, "category": "relic", "price": 287,
+                 "is_stocked": True, "can_afford": False, "can_purchase": False,
+                 "purchase_blocked_reason": "not_enough_gold"},
+                {"index": 3, "category": "card_removal", "price": 75,
+                 "is_stocked": False, "can_afford": True, "can_purchase": False,
+                 "purchase_blocked_reason": "sold_out"},
+            ],
+        },
+    }
+
+    assert [a.to_dict() for a in LegalActionProvider().candidates(state)] == [
+        {"type": "shop_purchase", "index": 0},
+        {"type": "proceed"},
+    ]
+
+
+def test_a_shop_that_reports_no_can_purchase_is_left_rather_than_guessed_at():
+    """A build without the field offers nothing to buy, and the agent leaves.
+
+    Falling back to stock-and-gold would reintroduce exactly the guess that
+    livelocked, and leaving a shop costs one node's worth of nothing.
+    """
+    state = {
+        "state_type": "shop",
+        "player": {"gold": 500, "potions": []},
+        "shop": {
+            "can_proceed": True,
+            "items": [{"index": 0, "is_stocked": True, "can_afford": True}],
+        },
+    }
+
+    assert [a.to_dict() for a in LegalActionProvider().candidates(state)] == [
+        {"type": "proceed"}
+    ]
+
+
+def test_a_fake_merchant_gets_the_same_gate():
+    state = {
+        "state_type": "fake_merchant",
+        "player": {"gold": 300, "potions": []},
+        "fake_merchant": {
+            "shop": {
+                "can_proceed": True,
+                "items": [
+                    {"index": 0, "category": "relic", "price": 150,
+                     "is_stocked": True, "can_afford": True, "can_purchase": True},
+                    {"index": 1, "category": "relic", "price": 150,
+                     "is_stocked": True, "can_afford": True, "can_purchase": False,
+                     "purchase_blocked_reason": "cannot_add_to_deck"},
+                ],
+            }
+        },
+    }
+
+    assert [a.to_dict() for a in LegalActionProvider().candidates(state)] == [
+        {"type": "shop_purchase", "index": 0},
+        {"type": "proceed"},
     ]
