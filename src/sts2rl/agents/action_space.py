@@ -19,6 +19,36 @@ class NoLegalActionsError(RuntimeError):
 # keeps the exit shut.  Unknown types fall outside this set on purpose.
 REWARDS_TAKEN_OUTRIGHT = frozenset({"gold", "relic", "potion"})
 
+# The potions confirmed drinkable with no fight running, and the screens they
+# were confirmed on.  Both are lists of **observed** facts, not rules, and must
+# only grow from a live check.
+#
+# No API field answers "can this be drunk here?": ``can_use_in_combat`` is true
+# on every potion the game reports, and there is no out-of-combat twin.  An
+# earlier gate inferred it from ``target_type`` -- anything not aimed at an
+# enemy -- and it was wrong in the way that costs most.  A Skill Potion
+# (``Self``) offered on a rewards screen was refused with "can only be used in
+# combat", the refusal consumed nothing, the screen did not move, and once PPO
+# had raised that action's probability each episode truncated on it, left the
+# run alive, and handed it to the next episode, which truncated on it again at
+# step 0.  Sixteen of the 38 episodes from 118 to 155 truncated that way
+# before the run was stopped, and a seeded experiment was measuring reused
+# runs.
+#
+# So each entry is a (potion, screen) pair somebody has seen work:
+#
+# * Foul Potion in a shop -- three drinks in one traced human run -- and at the
+#   fake merchant, whose fight is documented as started by it.
+# * Blood Potion in a shop and at a rest site -- one drink each in two traced
+#   runs, accepted both times (HP 51 -> 66 and 32 -> 48, potion consumed).
+#
+# A pair is never widened by analogy.  Blood Potion on a rewards screen is
+# plausible and unobserved, and plausible is what the target-type gate was.
+NON_COMBAT_POTIONS: dict[str, frozenset[str]] = {
+    "FOUL_POTION": frozenset({"shop", "fake_merchant"}),
+    "BLOOD_POTION": frozenset({"shop", "rest_site"}),
+}
+
 
 class LegalActionProvider:
     """Enumerate complete, parameterized actions that are legal in a raw state."""
@@ -136,6 +166,22 @@ class LegalActionProvider:
 
         ``proceed`` reappears only when there is nothing to claim at all, so a
         screen we cannot act on is never a dead end.
+
+        **The full-belt check is the only claimability rule this screen needs.**
+        A reward item carries no ``can_claim`` field -- unlike a shop item,
+        which has ``can_purchase`` folding in every check -- so it looks like
+        the rest of the shop's blocked reasons have to be reconstructed here,
+        and that a reconstruction missing one would strand the agent: the last
+        unclaimable outright item is a lone candidate, ``proceed`` is withheld
+        because the list is not empty, and nothing in the candidate set escapes.
+
+        It does not happen, because the game declines to *generate* what it
+        would refuse.  Sozu ("you can no longer obtain potions") suppresses the
+        potion reward outright rather than listing an unclaimable one, and a
+        card removal never lists Eternal cards, so ``potions_forbidden`` and
+        ``no_removable_cards`` cannot reach this screen.  A full potion belt is
+        the exception and the reason this check exists: the reward *is* still
+        listed, and claiming it is refused -- 12 times in one traced run.
         """
         rewards = self._mapping(state.get("rewards"))
         outright: list[GameAction] = []
@@ -191,6 +237,7 @@ class LegalActionProvider:
         ]
         if rest_site.get("can_proceed") is True:
             actions.append(GameAction("proceed"))
+        actions.extend(self._noncombat_potion_actions(state))
         return actions
 
     def _shop_actions(self, state: RawState) -> list[GameAction]:
@@ -220,6 +267,7 @@ class LegalActionProvider:
         if shop.get("can_proceed") is True:
             actions.append(GameAction("proceed"))
         actions.extend(self._discard_potion_actions(state))
+        actions.extend(self._noncombat_potion_actions(state))
         return actions
 
     def _treasure_actions(self, state: RawState) -> list[GameAction]:
@@ -389,6 +437,29 @@ class LegalActionProvider:
                 if target is not None
             ]
         return [GameAction(action_type, **base)]
+
+    def _noncombat_potion_actions(self, state: RawState) -> list[GameAction]:
+        """Return the potions confirmed drinkable on this screen with no fight.
+
+        ``_combat_actions`` used to be the only place ``use_potion`` was
+        offered, which left a real action unreachable: a traced human drank
+        three Foul Potions in a shop -- the potion summons a fight, so it is a
+        deliberate move and not a disguised discard.
+
+        Only (potion, screen) pairs in ``NON_COMBAT_POTIONS`` are offered,
+        because the failure mode is a loop, not a wasted potion: a refused drink
+        consumes nothing and leaves the screen exactly as it was, so the same
+        policy chooses it again.  See the constant for the run that proved it.
+        """
+        state_type = state.get("state_type")
+        player = self._mapping(state.get("player"))
+        return [
+            GameAction("use_potion", slot=slot)
+            for potion in self._records(player.get("potions"))
+            if state_type in NON_COMBAT_POTIONS.get(str(potion.get("id")), ())
+            for slot in [self._integer(potion.get("slot"))]
+            if slot is not None
+        ]
 
     def _discard_potion_actions(self, state: RawState) -> list[GameAction]:
         """Return discards, but only once the belt has no room left.

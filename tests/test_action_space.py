@@ -796,3 +796,91 @@ def test_a_fake_merchant_gets_the_same_gate():
         {"type": "shop_purchase", "index": 0},
         {"type": "proceed"},
     ]
+
+
+
+def _potion(slot: int, potion_id: str, target_type: str = "Self") -> dict:
+    return {
+        "slot": slot,
+        "id": potion_id,
+        "can_use_in_combat": True,
+        "target_type": target_type,
+    }
+
+
+def _screen_with_potions(state_type: str, *potions: dict) -> dict:
+    sections = {
+        "shop": {"items": [], "can_proceed": True},
+        "fake_merchant": {"shop": {"items": [], "can_proceed": True}},
+        "rewards": {"items": [{"index": 0, "type": "gold"}], "can_proceed": True},
+        "rest_site": {"options": [{"index": 0}], "can_proceed": True},
+    }
+    return {
+        "state_type": state_type,
+        state_type: sections[state_type],
+        "player": {"potions": list(potions), "max_potion_slots": 3},
+    }
+
+
+def _drinks(state: dict) -> list[dict]:
+    return [a for a in payloads(state) if a["type"] == "use_potion"]
+
+
+@pytest.mark.parametrize("state_type", ["shop", "fake_merchant"])
+def test_a_foul_potion_can_be_thrown_where_it_starts_a_fight(state_type):
+    """A traced human drank three in a shop; the fake merchant's fight is it.
+
+    It summons a fight, so it is a deliberate move rather than a disguised
+    discard, and combat used to be the only screen offering ``use_potion``.
+    """
+    state = _screen_with_potions(
+        state_type, _potion(1, "FOUL_POTION", "TargetedNoCreature")
+    )
+
+    assert _drinks(state) == [{"type": "use_potion", "slot": 1}]
+
+
+def test_a_potion_that_only_works_in_combat_is_not_offered_outside_it():
+    """The regression.  "Potion 'Skill Potion' can only be used in combat".
+
+    A refused drink consumes nothing and leaves the screen unchanged, so the
+    same policy chose it again every step until the episode truncated -- and
+    left the run alive for the next episode to truncate on at step 0.
+    """
+    state = _screen_with_potions("shop", _potion(0, "SKILL_POTION", "Self"))
+
+    assert _drinks(state) == []
+
+
+@pytest.mark.parametrize("target_type", ["Self", "AnyPlayer", "TargetedNoCreature"])
+def test_target_type_is_not_evidence_a_potion_works_outside_combat(target_type):
+    """Inferring it from the target type is the gate that failed."""
+    state = _screen_with_potions("shop", _potion(0, "BLOCK_POTION", target_type))
+
+    assert _drinks(state) == []
+
+
+@pytest.mark.parametrize("state_type", ["shop", "rest_site"])
+def test_a_blood_potion_can_be_drunk_where_it_was_seen_to_work(state_type):
+    """Accepted twice in traced runs: HP 51 -> 66 in a shop, 32 -> 48 resting."""
+    state = _screen_with_potions(
+        state_type, _potion(0, "BLOCK_POTION"), _potion(1, "BLOOD_POTION", "AnyPlayer")
+    )
+
+    assert _drinks(state) == [{"type": "use_potion", "slot": 1}]
+
+
+@pytest.mark.parametrize(
+    ("state_type", "potion_id"),
+    [
+        ("rewards", "FOUL_POTION"),
+        ("rewards", "BLOOD_POTION"),
+        ("rest_site", "FOUL_POTION"),
+        ("fake_merchant", "BLOOD_POTION"),
+    ],
+)
+def test_a_pair_nobody_has_seen_work_is_not_offered(state_type, potion_id):
+    """A pair is never widened by analogy: plausible is what the old gate was."""
+    state = _screen_with_potions(state_type, _potion(0, potion_id, "AnyPlayer"))
+
+    assert _drinks(state) == []

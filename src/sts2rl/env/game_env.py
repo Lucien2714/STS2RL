@@ -129,11 +129,23 @@ class GameEnv:
           selection is confirmed once the prompt will take no more cards.
 
         This is the one place the environment sends a request the agent did not
-        choose.  It is safe because in both cases nothing else is left on the
-        screen to decide: the reward screen withholds the card claim until
-        everything taken outright has been, and a bundle preview offers no
-        third option.  A card reward reached straight from an event does not
-        land back on ``rewards`` and is left alone.
+        choose.  It is safe because nothing claimable is left behind: the
+        reward screen withholds the card claim until every gold and relic has
+        been taken, and a bundle preview offers no third option.  A card reward
+        reached straight from an event does not land back on ``rewards`` and is
+        left alone.
+
+        **A potion against a full belt is the one thing this can abandon**, and
+        it is abandoned knowingly.  ``_reward_actions`` drops such a potion from
+        the outright set rather than offering a claim the game would refuse,
+        which promotes the card while the potion is still listed; leaving then
+        takes the potion with it.  Two things make that acceptable.  The agent
+        is not trapped into it -- discarding a held potion frees a slot, which
+        moves the reward back into the outright set where it is claimed before
+        the card -- and the reward model scores no potions either way, so the
+        loss it prices is zero.  A traced human made the same call twice,
+        walking away from a Fire Potion and a Speed Potion with a full belt.
+        Gold and relics are never skipped, so they can never be lost this way.
         """
         if action.action_type in CARD_REWARD_DECISIONS:
             if raw_state.get("state_type") != "rewards":
