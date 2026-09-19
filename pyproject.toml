@@ -20,6 +20,8 @@ dev = [
 [project.scripts]
 sts2rl-train = "sts2rl.training.cli:main"
 sts2rl-eval = "sts2rl.training.eval_cli:main"
+sts2rl-bc-clean = "sts2rl.offline.clean_cli:main"
+sts2rl-bc-train = "sts2rl.training.bc_cli:main"
 
 [build-system]
 requires = ["hatchling"]

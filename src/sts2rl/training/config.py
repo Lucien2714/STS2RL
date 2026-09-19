@@ -119,6 +119,11 @@ class TrainingConfig:
     run_dir: Path = Path("runs/default")
     tensorboard_enabled: bool = True
     tensorboard_flush_secs: int = 30
+    # The behavior-cloning artifact the encoder started from, or None for
+    # random weights.  Recorded rather than only applied: two runs identical in
+    # every other field are different experiments if one started from cloned
+    # weights, and nothing else in the run directory would say so.
+    init_encoder: str | None = None
 
     def __post_init__(self) -> None:
         for name in (
@@ -157,6 +162,10 @@ class TrainingConfig:
             raise TypeError("device must be a string")
         if not isinstance(self.tensorboard_enabled, bool):
             raise TypeError("tensorboard_enabled must be a boolean")
+        if self.init_encoder is not None and (
+            not isinstance(self.init_encoder, str) or not self.init_encoder
+        ):
+            raise ValueError("init_encoder must be a non-empty path or None")
         try:
             torch.device(self.device)
         except (RuntimeError, TypeError) as exc:

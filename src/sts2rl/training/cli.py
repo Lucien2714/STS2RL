@@ -14,6 +14,7 @@ import torch
 from sts2rl.agents import CandidatePPOAgent, EpisodeRunner, PPOConfig
 from sts2rl.encoder import EncoderConfig, GameEncoder, GameTokenizer, GameVocabulary
 from sts2rl.env import GameEnv, ResetSpec
+from sts2rl.training.bc import load_bc_encoder_state
 from sts2rl.training.checkpoint import CheckpointManager, LoadedCheckpoint
 from sts2rl.training.config import (
     DEFAULT_HOLDOUT_SEEDS,
@@ -42,6 +43,16 @@ def create_parser() -> argparse.ArgumentParser:
         help="Optimizer updates between checkpoints (not episodes).",
     )
     parser.add_argument("--resume", nargs="?", const="latest")
+    parser.add_argument(
+        "--init-encoder",
+        type=Path,
+        help=(
+            "start a NEW run from a behavior-cloning artifact's encoder "
+            "weights (sts2rl-bc-train). Only the weights transfer: the "
+            "optimizer state belongs to a different objective and the counters "
+            "to a run that never happened. Cannot be combined with --resume."
+        ),
+    )
     parser.add_argument("--base-url")
     parser.add_argument("--timeout", type=float)
     parser.add_argument(
@@ -125,6 +136,13 @@ def main(argv: Sequence[str] | None = None) -> int:
 
 def run_training(args: argparse.Namespace) -> int:
     """Build either a new or resumed runtime and train to its target."""
+    init_encoder = getattr(args, "init_encoder", None)
+    if init_encoder is not None and args.resume is not None:
+        raise ValueError(
+            "--init-encoder starts a new run from cloned weights; --resume "
+            "continues one that already has its own. Pass one or the other."
+        )
+
     vocabulary = GameVocabulary.from_bundled_data()
     manager = CheckpointManager(args.run_dir, vocabulary)
     loaded: LoadedCheckpoint | None = None
@@ -162,6 +180,20 @@ def run_training(args: argparse.Namespace) -> int:
     )
     if loaded is not None:
         manager.restore_agent(loaded, agent, plan)
+    elif init_encoder is not None:
+        # Weights only, and into a fresh agent: the critic head comes along
+        # untrained because behavior cloning never touched it, which is
+        # deliberate -- an expert's returns sit at a scale an early policy
+        # never reaches, and _ReturnScale would relearn the divisor underneath
+        # a critic calibrated to the old one.
+        encoder.load_state_dict(
+            load_bc_encoder_state(
+                init_encoder,
+                vocabulary=vocabulary,
+                encoder_config=plan.encoder,
+            )
+        )
+        encoder.to(agent.device)
 
     with TrainingMetricsWriter(
         plan.training.run_dir,
@@ -239,6 +271,11 @@ def _new_plan(args: argparse.Namespace) -> TrainingPlan:
             device=_or_default(args.device, training_defaults.device),
             torch_seed=_or_default(args.torch_seed, training_defaults.torch_seed),
             run_dir=args.run_dir,
+            init_encoder=(
+                None
+                if getattr(args, "init_encoder", None) is None
+                else str(args.init_encoder)
+            ),
             tensorboard_enabled=(
                 training_defaults.tensorboard_enabled
                 if args.no_tensorboard is None

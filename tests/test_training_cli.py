@@ -7,6 +7,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+import torch
 
 from sts2rl.env import ResetSpec
 from sts2rl.training import TrainingConfig, TrainingPlan
@@ -293,3 +294,144 @@ def test_the_evaluation_cli_builds_one_client_per_port(tmp_path: Path):
         "http://localhost:15527/api/v1",
         "http://localhost:15528/api/v1",
     )
+
+
+def test_init_encoder_and_resume_are_mutually_exclusive(tmp_path: Path):
+    """One starts from cloned weights, the other continues its own."""
+    args = cli.create_parser().parse_args(
+        [
+            "--run-dir",
+            str(tmp_path / "run"),
+            "--resume",
+            "--init-encoder",
+            str(tmp_path / "bc_best.pt"),
+        ]
+    )
+
+    with pytest.raises(ValueError, match="Pass one or the other"):
+        cli.run_training(args)
+
+
+def test_init_encoder_defaults_to_absent(tmp_path: Path):
+    args = cli.create_parser().parse_args(["--run-dir", str(tmp_path / "run")])
+
+    assert args.init_encoder is None
+
+
+def test_init_encoder_loads_only_the_encoder_weights(tmp_path: Path):
+    """The artifact carries no optimizer state and no counters to restore."""
+    from sts2rl.encoder import EncoderConfig, GameEncoder, GameVocabulary
+    from sts2rl.training.bc import BCConfig, EpochMetrics, save_bc_checkpoint
+
+    vocabulary = GameVocabulary.from_bundled_data()
+    cloned = GameEncoder(vocabulary, EncoderConfig())
+    with torch.no_grad():
+        for parameter in cloned.parameters():
+            parameter.add_(0.25)
+    artifact = save_bc_checkpoint(
+        tmp_path / "bc_best.pt",
+        encoder=cloned,
+        vocabulary_fingerprint=vocabulary.fingerprint(),
+        encoder_config=EncoderConfig(),
+        bc_config=BCConfig(),
+        metrics=EpochMetrics(
+            epoch=1,
+            train_loss=0.5,
+            train_accuracy=0.9,
+            holdout_loss=0.6,
+            holdout_accuracy=0.4,
+            holdout_chance=0.2,
+            holdout_first_candidate=0.3,
+        ),
+    )
+
+    fresh = GameEncoder(vocabulary, EncoderConfig())
+    fresh.load_state_dict(
+        cli.load_bc_encoder_state(
+            artifact, vocabulary=vocabulary, encoder_config=EncoderConfig()
+        )
+    )
+
+    for name, tensor in cloned.state_dict().items():
+        assert torch.allclose(fresh.state_dict()[name], tensor)
+
+
+def test_init_encoder_is_applied_before_any_client_is_contacted(tmp_path: Path):
+    """The call site is wired, and it runs before the network.
+
+    Loading weights after a client is contacted would leave a half-built run
+    behind when the artifact turns out to be incompatible.
+    """
+    from sts2rl.encoder import EncoderConfig
+
+    seen: dict[str, object] = {}
+
+    class Stop(RuntimeError):
+        pass
+
+    def capture(path, *, vocabulary, encoder_config):
+        seen["path"] = path
+        seen["fingerprint"] = vocabulary.fingerprint()
+        seen["encoder_config"] = encoder_config
+        raise Stop
+
+    args = cli.create_parser().parse_args(
+        [
+            "--run-dir",
+            str(tmp_path / "run"),
+            "--init-encoder",
+            str(tmp_path / "bc_best.pt"),
+            "--hidden-dim",
+            "32",
+            "--entity-heads",
+            "2",
+        ]
+    )
+    original = cli.load_bc_encoder_state
+    cli.load_bc_encoder_state = capture
+    try:
+        with pytest.raises(Stop):
+            cli.run_training(args)
+    finally:
+        cli.load_bc_encoder_state = original
+
+    assert seen["path"] == tmp_path / "bc_best.pt"
+    assert seen["encoder_config"] == EncoderConfig(hidden_dim=32, entity_heads=2)
+
+
+def test_a_run_started_from_cloned_weights_says_so_in_its_config(tmp_path: Path):
+    """Two runs identical in every other field are different experiments."""
+    args = cli.create_parser().parse_args(
+        [
+            "--run-dir",
+            str(tmp_path / "run"),
+            "--init-encoder",
+            str(tmp_path / "bc_best.pt"),
+        ]
+    )
+
+    plan = cli._new_plan(args)
+
+    assert plan.training.init_encoder == str(tmp_path / "bc_best.pt")
+    assert TrainingPlan.from_dict(plan.to_dict()).training.init_encoder == str(
+        tmp_path / "bc_best.pt"
+    )
+
+
+def test_a_run_from_random_weights_records_none(tmp_path: Path):
+    args = cli.create_parser().parse_args(["--run-dir", str(tmp_path / "run")])
+
+    assert cli._new_plan(args).training.init_encoder is None
+
+
+def test_a_config_saved_before_the_field_existed_still_loads(tmp_path: Path):
+    """Every run directory written so far lacks init_encoder."""
+    values = TrainingConfig(run_dir=tmp_path).to_dict()
+    del values["init_encoder"]
+
+    assert TrainingConfig.from_dict(values).init_encoder is None
+
+
+def test_an_empty_init_encoder_is_refused(tmp_path: Path):
+    with pytest.raises(ValueError, match="init_encoder"):
+        TrainingConfig(run_dir=tmp_path, init_encoder="")

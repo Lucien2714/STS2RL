@@ -6,6 +6,7 @@ __pycache__/
 runs/
 logs/
 /checkpoints/
+/data/
 
 *.egg-info/
 .claude/
