@@ -4,6 +4,9 @@ STS2RL is a reinforcement-learning project for Slay the Spire 2 using the
 STS2MCP HTTP API. It is a package-oriented rewrite of the earlier prototype,
 with explicit environment, agent, training, and evaluation boundaries.
 
+# Current Active Branch:
+- main-refactor
+
 ## Quick Start
 
 Install dependencies with uv from this directory:
