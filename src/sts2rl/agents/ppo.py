@@ -289,8 +289,29 @@ class CandidatePPOAgent(Agent):
         Forced steps are never scored, so their reward would otherwise be lost.
         Extending the preceding recorded transition keeps the return of every
         trained decision equal to the return the environment actually paid.
+
+        **A terminal step is never extended**, because the next episode's first
+        step is often forced and the rollout deliberately spans episodes.  The
+        merge would then reach back across the boundary and overwrite
+        ``done=True`` with ``False`` -- erasing the only terminal in the
+        trajectory -- while crediting the new episode's reward to the old
+        episode's last decision and replacing its ``next_observation`` with a
+        state from a different run.
+
+        That is not hypothetical: with the first decision of every episode
+        forced (a map that offers one node), measured rollouts of 256 steps
+        contained **zero** terminals.  GAE then bootstraps across episode
+        boundaries forever, so the value chain has nothing anchoring it to real
+        rewards, and ``_ReturnScale`` -- which is fed ``advantages + values`` --
+        grows every update: 1.0 to 33.7 over 25 updates against a true return
+        RMS of 3.8, while the evaluated floor fell from 8.0 to 2.5.  With the
+        boundary respected, terminals reappear (2 to 4 per rollout), the scale
+        settles at 4.3, and the same seeds climb from 8.5 to 10.5.
+
+        The reward is carried instead, which credits it to the next recorded
+        decision -- the one in the episode that actually earned it.
         """
-        if not entry.steps or entry.pending is not None:
+        if not entry.steps or entry.pending is not None or entry.steps[-1].done:
             entry.carried_reward += float(transition.reward)
             return
         last = entry.steps[-1]

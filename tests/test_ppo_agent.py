@@ -695,3 +695,88 @@ def test_an_untouched_scale_leaves_the_reward_units_alone():
     agent = _agent()
 
     assert agent._return_scale.scale == pytest.approx(1.0)
+
+
+def test_a_forced_step_never_reaches_back_across_an_episode_boundary():
+    """The rollout spans episodes, so the step before a forced one may be a terminal.
+
+    Merging into it erased the only terminal GAE had to anchor on, credited the
+    new episode's reward to the old episode's last decision, and replaced its
+    next observation with a state from another run.
+    """
+    torch.manual_seed(39)
+    agent = _agent(rollout_size=20)
+    agent.update = lambda: {}  # type: ignore[method-assign]
+    decision_observation = _observation(_map_state(2))
+    terminal = _observation({"state_type": "game_over"})
+
+    action = agent.choose_action(decision_observation)
+    agent.observe(
+        Transition(
+            state=decision_observation,
+            action=action,
+            reward=1.0,
+            next_state=terminal,
+            done=True,
+        )
+    )
+
+    # A new episode whose first decision is forced, which is the usual shape:
+    # the first map of an act offers exactly one node.
+    next_episode = _observation(_map_state(1))
+    agent.reset(next_episode)
+    forced_action = agent.choose_action(next_episode)
+    agent.observe(
+        Transition(
+            state=next_episode,
+            action=forced_action,
+            reward=4.0,
+            next_state=_observation(_map_state(2)),
+            done=False,
+        )
+    )
+
+    ended = agent._lane(0).steps[-1]
+    assert ended.done is True, "the terminal must survive the next episode's forced step"
+    assert ended.reward == pytest.approx(1.0), "its reward must stay its own episode's"
+    assert ended.next_observation is terminal
+    # The forced step's reward belongs to the new episode, and waits for its
+    # first recorded decision.
+    assert agent._lane(0).carried_reward == pytest.approx(4.0)
+
+
+def test_a_carried_reward_reaches_the_next_episode_s_first_decision():
+    torch.manual_seed(39)
+    agent = _agent(rollout_size=20)
+    agent.update = lambda: {}  # type: ignore[method-assign]
+    first = _observation(_map_state(2))
+    terminal = _observation({"state_type": "game_over"})
+    action = agent.choose_action(first)
+    agent.observe(
+        Transition(state=first, action=action, reward=1.0, next_state=terminal, done=True)
+    )
+
+    forced = _observation(_map_state(1))
+    agent.reset(forced)
+    agent.observe(
+        Transition(
+            state=forced,
+            action=agent.choose_action(forced),
+            reward=4.0,
+            next_state=first,
+            done=False,
+        )
+    )
+    agent.observe(
+        Transition(
+            state=first,
+            action=agent.choose_action(first),
+            reward=2.0,
+            next_state=terminal,
+            done=True,
+        )
+    )
+
+    assert len(agent._lane(0).steps) == 2
+    assert agent._lane(0).steps[1].reward == pytest.approx(6.0)
+    assert agent._lane(0).carried_reward == pytest.approx(0.0)
