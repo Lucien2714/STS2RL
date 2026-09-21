@@ -17,6 +17,24 @@ uv run python scripts/train.py `
   --device cpu
 ```
 
+Add `--backend sim` to train against
+[STS2Simulator](../../STS2Simulator/README.md) instead of a game client:
+
+```powershell
+uv run sts2rl-train `
+  --run-dir runs/sim-001 `
+  --backend sim `
+  --base-url http://localhost:15600/api/v1 `
+  --seed-pool default `
+  --total-episodes 1000
+```
+
+The simulator needs seeds (it has no menus to leave the choice to) and defaults
+the action delay to zero. `--sim-mode gauntlet` trains on hallway fights with no
+map. The backend is recorded in `config.json` and cannot change on resume: two
+runs identical in every other field are different experiments if one of them
+never touched the game.
+
 The run directory must be empty for a new experiment. This prevents an
 accidental invocation from overwriting another model or mixing unrelated
 metrics. Run `python scripts/train.py --help` for all encoder, PPO, environment,

@@ -9,7 +9,7 @@ from sts2rl.env.mcp_client import (
     STS2Client,
     STS2ClientError,
 )
-from sts2rl.env.reset import ResetController, ResetSpec
+from sts2rl.env.reset import ResetController, ResetSpec, SimResetController
 from sts2rl.env.state import extract_raw_state, response_state as _response_state
 from sts2rl.env.types import EnvStep, RawState
 
@@ -37,8 +37,18 @@ def _selection_is_complete(prompt: dict) -> bool:
     return selected >= maximum
 
 
+BACKENDS = ("game", "sim")
+
+
 class GameEnv:
-    """Reset and step one raw STS2MCP single-player environment."""
+    """Reset and step one raw STS2MCP single-player environment.
+
+    Two backends speak the same API, so only starting a run differs.  ``game``
+    is a real client, reached by navigating its menus.  ``sim`` is
+    STS2Simulator, which has no menus and starts a run in one request.
+    Everything after reset -- stepping, the embedded state, rejected actions --
+    is identical, which is the point of the simulator serving this API.
+    """
 
     def __init__(
         self,
@@ -46,7 +56,11 @@ class GameEnv:
         timeout: float = 20.0,
         client: STS2Client | None = None,
         action_delay_seconds: float = DEFAULT_ACTION_DELAY_SECONDS,
+        backend: str = "game",
     ) -> None:
+        if backend not in BACKENDS:
+            raise ValueError(f"backend must be one of {BACKENDS}, got {backend!r}")
+        self.backend = backend
         self._owns_client = client is None
         self.client = (
             client
@@ -59,10 +73,14 @@ class GameEnv:
             )
         )
         self.action_dispatcher = ActionDispatcher(self.client)
-        self.reset_controller = ResetController(self.client, self.action_dispatcher)
+        self.reset_controller = (
+            SimResetController(self.client)
+            if backend == "sim"
+            else ResetController(self.client, self.action_dispatcher)
+        )
 
     def reset(self, spec: ResetSpec | None = None) -> RawState:
-        """Navigate menus until a run is active and return its raw state."""
+        """Start a run and return the first state the agent can act on."""
         return self.reset_controller.reset(spec or ResetSpec())
 
     @property

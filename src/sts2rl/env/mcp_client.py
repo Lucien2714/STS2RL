@@ -252,6 +252,39 @@ class STS2Client:
     def get_multiplayer_state(self, format: ResponseFormat = "json") -> Any:
         return self._get("multiplayer", {"format": format})
 
+    def sim_reset(
+        self,
+        character: str,
+        seed: str,
+        ascension: int = 0,
+        mode: str = "run",
+        max_fights: int = 12,
+        start_act: int = 1,
+        capture: bool = False,
+    ) -> Any:
+        """Start a run on the STS2Simulator backend.
+
+        The simulator has no menus, so it starts a run in one request rather
+        than the navigation ``ResetController`` performs.  A real client serves
+        no such endpoint and answers 404.
+        """
+        return self._post(
+            "sim/reset",
+            {
+                "character": character,
+                "seed": seed,
+                "ascension": ascension,
+                "mode": mode,
+                "max_fights": max_fights,
+                "start_act": start_act,
+                "capture": capture,
+            },
+        )
+
+    def sim_info(self) -> dict[str, Any]:
+        """Read the simulator's build and counters; 404 against a real client."""
+        return self._get("sim/info")
+
     def get_player_detail(self) -> dict[str, Any]:
         """Read run-level player detail, the only source of the master deck.
 

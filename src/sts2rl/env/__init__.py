@@ -6,7 +6,7 @@ from sts2rl.env.mcp_client import (
     STS2Client,
     STS2ClientError,
 )
-from sts2rl.env.reset import ResetController, ResetSpec
+from sts2rl.env.reset import ResetController, ResetSpec, SimResetController
 from sts2rl.env.types import EnvStep, GameObservation, RawState
 
 __all__ = [
@@ -17,6 +17,7 @@ __all__ = [
     "RawState",
     "ResetController",
     "ResetSpec",
+    "SimResetController",
     "STS2Client",
     "STS2ClientError",
 ]

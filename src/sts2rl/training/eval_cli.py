@@ -119,6 +119,11 @@ def run_evaluation(args: argparse.Namespace) -> int:
                         base_url=base_url,
                         timeout=timeout,
                         action_delay_seconds=delay,
+                        # The run records which environment it was trained
+                        # against, and the two do not start a run the same way:
+                        # evaluating a simulator run through the game's menus
+                        # fails at the first reset.
+                        backend=plan.training.backend,
                     )
                 ),
                 agent.lane_view(lane),

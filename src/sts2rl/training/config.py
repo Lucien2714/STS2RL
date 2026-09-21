@@ -12,6 +12,7 @@ import torch
 from sts2rl.agents import MAX_STATE_REFRESHES, PPOConfig
 from sts2rl.encoder import EncoderConfig
 from sts2rl.env import DEFAULT_ACTION_DELAY_SECONDS, ResetSpec
+from sts2rl.env.game_env import BACKENDS
 
 
 # Consecutive failed episodes before a client is considered gone rather than
@@ -108,6 +109,11 @@ class TrainingConfig:
     max_steps_per_episode: int = 10_000
     max_state_refreshes: int = MAX_STATE_REFRESHES
     max_episode_failures: int = MAX_EPISODE_FAILURES
+    # Which environment the clients are: a real game client, reached through
+    # its menus, or STS2Simulator.  Recorded rather than only applied, and
+    # refused on resume, because two runs identical in every other field are
+    # different experiments if one of them never touched the game.
+    backend: str = "game"
     base_url: str = "http://localhost:15526/api/v1"
     timeout: float = 20.0
     action_delay_seconds: float = DEFAULT_ACTION_DELAY_SECONDS
@@ -154,6 +160,8 @@ class TrainingConfig:
             raise ValueError("action_delay_seconds must not be negative")
         if isinstance(self.torch_seed, bool) or not isinstance(self.torch_seed, int):
             raise ValueError("torch_seed must be an integer")
+        if self.backend not in BACKENDS:
+            raise ValueError(f"backend must be one of {BACKENDS}, got {self.backend!r}")
         if not isinstance(self.base_url, str):
             raise TypeError("base_url must be a string")
         if not self.base_url.strip():
@@ -268,10 +276,26 @@ class TrainingPlan:
             raise ValueError("reset character must be between 0 and 4")
         if self.reset.game_mode == "standard" and self.reset.run_seed is not None:
             raise ValueError("run_seed is only supported for custom or daily runs")
-        if self.training.training_seeds and self.reset.game_mode != "custom":
+        if (
+            self.training.training_seeds
+            and self.training.backend == "game"
+            and self.reset.game_mode != "custom"
+        ):
             raise ValueError(
                 "a seed pool needs the custom-run screen, which is the only one "
                 "that accepts a seed; pass --game-mode custom"
+            )
+        if self.reset.sim_start_act > 1 and self.training.backend != "sim":
+            # A real client starts where its menu starts; only the simulator
+            # can restore a run part-way through.
+            raise ValueError("--sim-start-act needs --backend sim")
+        if self.training.backend == "sim" and not (
+            self.training.training_seeds or self.reset.run_seed
+        ):
+            # The simulator starts every run by seed; it has no menu to leave
+            # the choice to, and no "whatever the game rolls" mode.
+            raise ValueError(
+                "the simulator backend needs seeds; pass --seed-pool or --run-seed"
             )
 
     def to_dict(self) -> dict[str, object]:

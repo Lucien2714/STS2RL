@@ -24,10 +24,40 @@ class ResetSpec:
     allow_active_run: bool = False
     ascension: int | None = None
     modifiers: tuple[str, ...] = ()
+    # Simulator backend only; a real client has no use for either.  ``run``
+    # plays the seed's map act by act, ``gauntlet`` plays hallway fights with
+    # no map at all, which is a combat-only task rather than a shorter run.
+    sim_mode: str = "run"
+    sim_max_fights: int = 12
+    # ``sim_start_act`` > 1 restores the simulator's snapshot of this seed's
+    # run as it entered that act, so the seed still names the run and a pool
+    # of them cycles like any other.  ``sim_capture`` has the simulator write
+    # those snapshots as a run reaches each later act; it changes nothing the
+    # episode plays.
+    sim_start_act: int = 1
+    sim_capture: bool = False
 
     def __post_init__(self) -> None:
         if self.game_mode not in {"standard", "custom", "daily"}:
             raise ValueError(f"Unsupported game mode: {self.game_mode!r}")
+        if self.sim_mode not in {"run", "gauntlet"}:
+            raise ValueError(f"Unsupported simulator mode: {self.sim_mode!r}")
+        if (
+            isinstance(self.sim_max_fights, bool)
+            or not isinstance(self.sim_max_fights, int)
+            or self.sim_max_fights < 1
+        ):
+            raise ValueError("sim_max_fights must be a positive integer")
+        if (
+            isinstance(self.sim_start_act, bool)
+            or not isinstance(self.sim_start_act, int)
+            or self.sim_start_act < 1
+        ):
+            raise ValueError("sim_start_act must be a positive integer")
+        if (self.sim_start_act > 1 or self.sim_capture) and self.sim_mode != "run":
+            raise ValueError(
+                "sim_start_act and sim_capture follow the map, so they need sim_mode 'run'"
+            )
         object.__setattr__(self, "modifiers", tuple(self.modifiers))
         if any(not isinstance(key, str) or not key for key in self.modifiers):
             raise ValueError("modifiers must be non-empty strings")
@@ -536,4 +566,45 @@ class ResetController:
             tuple(sorted(enabled_option_names(raw_state))),
             selected_character_id(raw_state),
             _ascension_level(raw_state),
+        )
+
+
+class SimResetController:
+    """Start a run on the STS2Simulator backend, which has no menus.
+
+    ``ResetController`` exists because the real client starts a run by walking
+    menus, and those menus settle asynchronously: three separate races killed
+    long runs at episodes 374, 406 and 501.  The simulator has no menus and no
+    frames, so a run starts in one request that returns the first state the
+    agent can act on.  None of the retries, settling, or stall detection above
+    has anything to do here.
+
+    The seed is therefore never ignored.  ``reused_active_run`` exists to
+    satisfy the same interface and is always False: a reset always starts the
+    run it was asked for, so nothing can quietly measure a different one.
+    """
+
+    def __init__(self, client: Any) -> None:
+        self.client = client
+        self.reused_active_run = False
+
+    def reset(self, spec: ResetSpec) -> RawState:
+        """Start the run the spec describes and return its first state."""
+        character = GameCharacter.get(spec.character)
+        if character is None:
+            raise ValueError(f"Unsupported character index: {spec.character}")
+        if spec.run_seed is None:
+            raise ValueError(
+                "the simulator needs an explicit seed; pass --run-seed or a seed pool"
+            )
+        return extract_raw_state(
+            self.client.sim_reset(
+                character=character,
+                seed=spec.run_seed,
+                ascension=spec.ascension or 0,
+                mode=spec.sim_mode,
+                max_fights=spec.sim_max_fights,
+                start_act=spec.sim_start_act,
+                capture=spec.sim_capture,
+            )
         )

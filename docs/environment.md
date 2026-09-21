@@ -47,3 +47,37 @@ Reset menu navigation lives in `ResetController`. Every menu transition is a
 `MenuSelectAction` sent through the same dispatcher as normal environment
 actions. Calling `reset()` while a run is already active raises by default;
 use `ResetSpec(allow_active_run=True)` only when reusing that run is intended.
+
+## Two backends, one API
+
+`GameEnv(backend=...)` picks what the client on the other end is:
+
+- `game` (default): a real STS2MCP client. A run starts by navigating its
+  menus, which is what `ResetController` exists for.
+- `sim`: [STS2Simulator](../../STS2Simulator/README.md), which hosts the game's
+  own rules engine with no Godot engine and serves the same API. It has no
+  menus, so `SimResetController` starts a run in one `POST /api/v1/sim/reset`
+  and gets back the first state the agent can act on.
+
+Everything after reset is the same code: the same dispatcher, the same embedded
+state on every response, the same `action_error` on a rejected action. That is
+the point of the simulator serving this API rather than a bespoke one -- the
+encoder, the action space, and the reward never learn which one they are
+talking to.
+
+Two differences are worth knowing:
+
+- **Seeds are required.** The simulator has no menu to leave the choice to and
+  no "whatever the game rolls" mode, so `--seed-pool` or `--run-seed` is
+  mandatory. In exchange the seed is never ignored: `reused_active_run` is
+  always false, because a reset always starts the run it was asked for rather
+  than joining one already in progress.
+- **The action delay is zero by default.** `action_delay_seconds` paces the
+  *next* request while a real client is still resolving the last one. The
+  simulator answers only once the game has settled, so there is nothing to
+  pace.
+
+`ResetSpec.sim_mode` chooses what an episode plays: `run` follows the seed's map
+act by act, `gauntlet` plays hallway fights with no map at all, which is a
+combat-only task rather than a shorter run. `sim_max_fights` bounds the
+gauntlet. Both are ignored by a real client.

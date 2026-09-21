@@ -178,6 +178,11 @@ class Evaluator:
             allow_active_run=True,
             ascension=self.reset.ascension,
             modifiers=self.reset.modifiers,
+            # Carried rather than defaulted: what the episode plays is part of
+            # the task, so scoring a different one would not be a comparison.
+            sim_mode=self.reset.sim_mode,
+            sim_max_fights=self.reset.sim_max_fights,
+            sim_start_act=self.reset.sim_start_act,
         )
 
     def run(self, schedule: Sequence[tuple[str, str]]) -> list[EpisodeScore]:

@@ -14,6 +14,7 @@ import torch
 from sts2rl.agents import CandidatePPOAgent, EpisodeRunner, PPOConfig
 from sts2rl.encoder import EncoderConfig, GameEncoder, GameTokenizer, GameVocabulary
 from sts2rl.env import GameEnv, ResetSpec
+from sts2rl.env.game_env import BACKENDS
 from sts2rl.training.bc import load_bc_encoder_state
 from sts2rl.training.checkpoint import CheckpointManager, LoadedCheckpoint
 from sts2rl.training.config import (
@@ -51,6 +52,36 @@ def create_parser() -> argparse.ArgumentParser:
             "weights (sts2rl-bc-train). Only the weights transfer: the "
             "optimizer state belongs to a different objective and the counters "
             "to a run that never happened. Cannot be combined with --resume."
+        ),
+    )
+    parser.add_argument(
+        "--backend",
+        choices=BACKENDS,
+        help=(
+            "game (default) plays through real STS2MCP clients; sim plays "
+            "through STS2Simulator, which starts every run from a seed."
+        ),
+    )
+    parser.add_argument(
+        "--sim-mode",
+        choices=("run", "gauntlet"),
+        help=(
+            "simulator only: run follows the seed's map act by act, gauntlet "
+            "plays hallway fights with no map."
+        ),
+    )
+    parser.add_argument(
+        "--sim-max-fights",
+        type=int,
+        help="simulator gauntlet only: fights won before the episode truncates.",
+    )
+    parser.add_argument(
+        "--sim-start-act",
+        type=int,
+        help=(
+            "simulator run mode only: start each episode at this act, restored "
+            "from the simulator's snapshot of the seed's run (sts2sim --snapshots). "
+            "The seed pools must name seeds the library holds that act for."
         ),
     )
     parser.add_argument("--base-url")
@@ -213,6 +244,7 @@ def run_training(args: argparse.Namespace) -> int:
                             action_delay_seconds=(
                                 plan.training.action_delay_seconds
                             ),
+                            backend=plan.training.backend,
                         )
                     ),
                     # Each client gets its own lane so the agent keeps their
@@ -243,6 +275,14 @@ def _new_plan(args: argparse.Namespace) -> TrainingPlan:
     encoder_defaults = EncoderConfig()
     ppo_defaults = PPOConfig()
     reset_defaults = ResetSpec()
+    backend = _or_default(args.backend, training_defaults.backend)
+    # The delay paces the *next* request while a real client is still resolving
+    # the last one.  The simulator answers only once the game has settled, so
+    # there is nothing to pace and the default would be pure cost.
+    action_delay = _or_default(
+        args.action_delay,
+        0.0 if backend == "sim" else training_defaults.action_delay_seconds,
+    )
     return TrainingPlan(
         training=TrainingConfig(
             total_episodes=_or_default(
@@ -260,11 +300,10 @@ def _new_plan(args: argparse.Namespace) -> TrainingPlan:
             max_episode_failures=_or_default(
                 args.max_episode_failures, training_defaults.max_episode_failures
             ),
+            backend=backend,
             base_url=_or_default(args.base_url, training_defaults.base_url),
             timeout=_or_default(args.timeout, training_defaults.timeout),
-            action_delay_seconds=_or_default(
-                args.action_delay, training_defaults.action_delay_seconds
-            ),
+            action_delay_seconds=action_delay,
             ports=_port_list(args.ports),
             training_seeds=_seed_list(args.seed_pool, DEFAULT_SEED_POOL),
             holdout_seeds=_seed_list(args.holdout_seeds, DEFAULT_HOLDOUT_SEEDS),
@@ -325,6 +364,13 @@ def _new_plan(args: argparse.Namespace) -> TrainingPlan:
             ),
             ascension=_or_default(args.ascension, reset_defaults.ascension),
             modifiers=_seed_list(args.modifiers, ()),
+            sim_mode=_or_default(args.sim_mode, reset_defaults.sim_mode),
+            sim_max_fights=_or_default(
+                args.sim_max_fights, reset_defaults.sim_max_fights
+            ),
+            sim_start_act=_or_default(
+                args.sim_start_act, reset_defaults.sim_start_act
+            ),
         ),
     )
 
@@ -353,6 +399,10 @@ def _resumed_plan(
             "max_grad_norm": saved.ppo.max_grad_norm,
             "rollout_size": saved.ppo.rollout_size,
             "update_epochs": saved.ppo.update_epochs,
+            "backend": saved.training.backend,
+            "sim_mode": saved.reset.sim_mode,
+            "sim_max_fights": saved.reset.sim_max_fights,
+            "sim_start_act": saved.reset.sim_start_act,
             "character": saved.reset.character,
             "game_mode": saved.reset.game_mode,
             "run_seed": saved.reset.run_seed,
