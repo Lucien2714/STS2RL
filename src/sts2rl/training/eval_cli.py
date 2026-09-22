@@ -10,7 +10,8 @@ from pathlib import Path
 
 from sts2rl.agents import CandidatePPOAgent, EpisodeRunner
 from sts2rl.encoder import GameEncoder, GameTokenizer, GameVocabulary
-from sts2rl.env import GameEnv
+from sts2rl.env import DEFAULT_ACTION_DELAY_SECONDS, GameEnv
+from sts2rl.env.game_env import BACKENDS
 from sts2rl.training.checkpoint import CheckpointManager
 from sts2rl.training.evaluate import (
     Evaluator,
@@ -43,6 +44,16 @@ def create_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--ports",
         help="Comma-separated STS2MCP ports played in parallel.",
+    )
+    parser.add_argument(
+        "--backend",
+        choices=BACKENDS,
+        help=(
+            "environment to score against; defaults to the one the run trained "
+            "on.  Naming the other one measures transfer -- a simulator-trained "
+            "checkpoint played by real game clients -- which is a different "
+            "question from how well the run learned its own environment."
+        ),
     )
     parser.add_argument("--base-url")
     parser.add_argument("--timeout", type=float)
@@ -105,11 +116,16 @@ def run_evaluation(args: argparse.Namespace) -> int:
 
     base_urls = _client_base_urls(args, plan)
     timeout = args.timeout if args.timeout is not None else plan.training.timeout
-    delay = (
-        args.action_delay
-        if args.action_delay is not None
-        else plan.training.action_delay_seconds
-    )
+    backend = args.backend or plan.training.backend
+    if args.action_delay is not None:
+        delay = args.action_delay
+    elif backend == plan.training.backend:
+        delay = plan.training.action_delay_seconds
+    else:
+        # The recorded delay was chosen for the other environment.  A simulator
+        # run records 0, which against a real client is a diagnostic setting,
+        # not a speedup: actions land while the game is still resolving.
+        delay = 0.0 if backend == "sim" else DEFAULT_ACTION_DELAY_SECONDS
 
     with ExitStack() as clients:
         runners = [
@@ -123,7 +139,7 @@ def run_evaluation(args: argparse.Namespace) -> int:
                         # against, and the two do not start a run the same way:
                         # evaluating a simulator run through the game's menus
                         # fails at the first reset.
-                        backend=plan.training.backend,
+                        backend=backend,
                     )
                 ),
                 agent.lane_view(lane),

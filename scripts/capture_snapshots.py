@@ -43,6 +43,8 @@ def main() -> int:
                         help="the directory every sts2sim was started with --snapshots")
     parser.add_argument("--ports", required=True)
     parser.add_argument("--act", type=int, default=2)
+    parser.add_argument("--boss", action="store_true",
+                        help="capture the act's boss fight rather than the act's start")
     parser.add_argument("--attempts", type=int, default=6,
                         help="sampled attempts per seed after the deterministic one")
     args = parser.parse_args()
@@ -61,11 +63,12 @@ def main() -> int:
     manager.restore_agent(loaded, agent, plan)
 
     character = GameCharacter.get(plan.reset.character)
+    target = f"act{args.act}_boss" if args.boss else f"act{args.act}"
     seeds = list(plan.training.training_seeds) + list(plan.training.holdout_seeds)
     ports = [int(p) for p in args.ports.split(",")]
 
     def captured(seed: str) -> bool:
-        return (args.library / character / seed / f"act{args.act}.json").exists()
+        return (args.library / character / seed / f"{target}.json").exists()
 
     def play(pending: list[str], deterministic: bool) -> None:
         agent.train(not deterministic)
@@ -111,22 +114,22 @@ def main() -> int:
         for thread in threads:
             thread.join()
 
-    print(f"{len(seeds)} seeds, act {args.act}, library {args.library}")
+    print(f"{len(seeds)} seeds, target {target}, library {args.library}")
     print("deterministic pass:")
     play([s for s in seeds if not captured(s)], deterministic=True)
     for attempt in range(1, args.attempts + 1):
         missing = [s for s in seeds if not captured(s)]
         if not missing:
             break
-        print(f"sampled attempt {attempt}: {len(missing)} seeds still short of act {args.act}")
+        print(f"sampled attempt {attempt}: {len(missing)} seeds still short of {target}")
         play(missing, deterministic=False)
 
     train = [s for s in plan.training.training_seeds if captured(s)]
     hold = [s for s in plan.training.holdout_seeds if captured(s)]
     print(f"\ncaptured: training {len(train)}/{len(plan.training.training_seeds)}, "
           f"holdout {len(hold)}/{len(plan.training.holdout_seeds)}")
-    (args.library / f"act{args.act}_training_seeds.txt").write_text(",".join(train))
-    (args.library / f"act{args.act}_holdout_seeds.txt").write_text(",".join(hold))
+    (args.library / f"{target}_training_seeds.txt").write_text(",".join(train))
+    (args.library / f"{target}_holdout_seeds.txt").write_text(",".join(hold))
     return 0
 
 

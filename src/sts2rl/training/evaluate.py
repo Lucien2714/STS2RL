@@ -183,6 +183,7 @@ class Evaluator:
             sim_mode=self.reset.sim_mode,
             sim_max_fights=self.reset.sim_max_fights,
             sim_start_act=self.reset.sim_start_act,
+            sim_start_boss=self.reset.sim_start_boss,
         )
 
     def run(self, schedule: Sequence[tuple[str, str]]) -> list[EpisodeScore]:

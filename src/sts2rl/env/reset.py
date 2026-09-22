@@ -32,10 +32,13 @@ class ResetSpec:
     # ``sim_start_act`` > 1 restores the simulator's snapshot of this seed's
     # run as it entered that act, so the seed still names the run and a pool
     # of them cycles like any other.  ``sim_capture`` has the simulator write
-    # those snapshots as a run reaches each later act; it changes nothing the
-    # episode plays.
+    # those snapshots as a run reaches each later act and each boss room; it
+    # changes nothing the episode plays.  ``sim_start_boss`` starts at
+    # ``sim_start_act``'s boss fight instead of its map, from the save the game
+    # takes on entering that room.
     sim_start_act: int = 1
     sim_capture: bool = False
+    sim_start_boss: bool = False
 
     def __post_init__(self) -> None:
         if self.game_mode not in {"standard", "custom", "daily"}:
@@ -54,9 +57,12 @@ class ResetSpec:
             or self.sim_start_act < 1
         ):
             raise ValueError("sim_start_act must be a positive integer")
-        if (self.sim_start_act > 1 or self.sim_capture) and self.sim_mode != "run":
+        if (
+            self.sim_start_act > 1 or self.sim_capture or self.sim_start_boss
+        ) and self.sim_mode != "run":
             raise ValueError(
-                "sim_start_act and sim_capture follow the map, so they need sim_mode 'run'"
+                "sim_start_act, sim_start_boss and sim_capture follow the map, "
+                "so they need sim_mode 'run'"
             )
         object.__setattr__(self, "modifiers", tuple(self.modifiers))
         if any(not isinstance(key, str) or not key for key in self.modifiers):
@@ -606,5 +612,6 @@ class SimResetController:
                 max_fights=spec.sim_max_fights,
                 start_act=spec.sim_start_act,
                 capture=spec.sim_capture,
+                start_boss=spec.sim_start_boss,
             )
         )

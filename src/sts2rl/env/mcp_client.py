@@ -261,6 +261,7 @@ class STS2Client:
         max_fights: int = 12,
         start_act: int = 1,
         capture: bool = False,
+        start_boss: bool = False,
     ) -> Any:
         """Start a run on the STS2Simulator backend.
 
@@ -278,6 +279,7 @@ class STS2Client:
                 "max_fights": max_fights,
                 "start_act": start_act,
                 "capture": capture,
+                "start_boss": start_boss,
             },
         )
 

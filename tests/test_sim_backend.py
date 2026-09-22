@@ -48,6 +48,7 @@ def test_reset_starts_the_run_in_one_request():
             "max_fights": 12,
             "start_act": 1,
             "capture": False,
+            "start_boss": False,
         }
     ]
 
@@ -65,6 +66,15 @@ def test_reset_can_start_from_a_later_act_and_capture():
     assert client.requests[0]["capture"] is True
 
 
+def test_reset_can_start_at_an_acts_boss():
+    client = FakeSimClient()
+
+    SimResetController(client).reset(ResetSpec(run_seed="ABC1234567", sim_start_boss=True))
+
+    assert client.requests[0]["start_act"] == 1
+    assert client.requests[0]["start_boss"] is True
+
+
 @pytest.mark.parametrize(
     "kwargs",
     [
@@ -72,6 +82,7 @@ def test_reset_can_start_from_a_later_act_and_capture():
         {"sim_start_act": True},
         {"sim_start_act": 2, "sim_mode": "gauntlet"},
         {"sim_capture": True, "sim_mode": "gauntlet"},
+        {"sim_start_boss": True, "sim_mode": "gauntlet"},
     ],
 )
 def test_reset_spec_rejects_an_impossible_start(kwargs):
@@ -90,7 +101,20 @@ def test_a_later_start_act_needs_the_simulator(tmp_path: Path):
             "--sim-start-act", "2",
         ]
     )
-    with pytest.raises(ValueError, match="--sim-start-act needs --backend sim"):
+    with pytest.raises(ValueError, match="need --backend sim"):
+        cli._new_plan(args)
+
+
+def test_a_boss_start_needs_the_simulator(tmp_path: Path):
+    args = cli.create_parser().parse_args(
+        [
+            "--run-dir", str(tmp_path / "run"),
+            "--seed-pool", "ABC1234567",
+            "--game-mode", "custom",
+            "--sim-start-boss",
+        ]
+    )
+    with pytest.raises(ValueError, match="need --backend sim"):
         cli._new_plan(args)
 
 
@@ -104,6 +128,19 @@ def test_new_plan_carries_the_start_act(tmp_path: Path):
         ]
     )
     assert cli._new_plan(args).reset.sim_start_act == 2
+
+
+def test_new_plan_carries_the_boss_start(tmp_path: Path):
+    args = cli.create_parser().parse_args(
+        [
+            "--run-dir", str(tmp_path / "run"),
+            "--backend", "sim",
+            "--seed-pool", "ABC1234567",
+            "--sim-start-boss",
+        ]
+    )
+    reset = cli._new_plan(args).reset
+    assert (reset.sim_start_act, reset.sim_start_boss) == (1, True)
 
 
 def test_reset_never_reuses_a_run():

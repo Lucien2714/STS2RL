@@ -84,6 +84,16 @@ def create_parser() -> argparse.ArgumentParser:
             "The seed pools must name seeds the library holds that act for."
         ),
     )
+    parser.add_argument(
+        "--sim-start-boss",
+        action="store_const",
+        const=True,
+        help=(
+            "simulator run mode only: start each episode at the boss fight of "
+            "--sim-start-act (default act 1), restored from the save the game "
+            "takes on entering the boss room."
+        ),
+    )
     parser.add_argument("--base-url")
     parser.add_argument("--timeout", type=float)
     parser.add_argument(
@@ -371,6 +381,9 @@ def _new_plan(args: argparse.Namespace) -> TrainingPlan:
             sim_start_act=_or_default(
                 args.sim_start_act, reset_defaults.sim_start_act
             ),
+            sim_start_boss=_or_default(
+                args.sim_start_boss, reset_defaults.sim_start_boss
+            ),
         ),
     )
 
@@ -403,6 +416,7 @@ def _resumed_plan(
             "sim_mode": saved.reset.sim_mode,
             "sim_max_fights": saved.reset.sim_max_fights,
             "sim_start_act": saved.reset.sim_start_act,
+            "sim_start_boss": saved.reset.sim_start_boss,
             "character": saved.reset.character,
             "game_mode": saved.reset.game_mode,
             "run_seed": saved.reset.run_seed,

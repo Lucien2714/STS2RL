@@ -285,10 +285,12 @@ class TrainingPlan:
                 "a seed pool needs the custom-run screen, which is the only one "
                 "that accepts a seed; pass --game-mode custom"
             )
-        if self.reset.sim_start_act > 1 and self.training.backend != "sim":
+        if (
+            self.reset.sim_start_act > 1 or self.reset.sim_start_boss
+        ) and self.training.backend != "sim":
             # A real client starts where its menu starts; only the simulator
             # can restore a run part-way through.
-            raise ValueError("--sim-start-act needs --backend sim")
+            raise ValueError("--sim-start-act and --sim-start-boss need --backend sim")
         if self.training.backend == "sim" and not (
             self.training.training_seeds or self.reset.run_seed
         ):
