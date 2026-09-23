@@ -53,7 +53,7 @@ class _PendingDecision:
     decision: TokenizedDecision
     action_index: int
     log_probability: Tensor
-    value: Tensor
+    value: Tensor  # Raw reward units, fixed at sampling time.
 
 
 @dataclass
@@ -62,9 +62,11 @@ class _RolloutStep:
     next_observation: GameObservation
     action_index: int
     old_log_probability: Tensor
-    old_value: Tensor
+    old_value: Tensor  # Raw reward units, independent of later return scales.
     reward: float
     done: bool
+    episode_end: bool = False
+    bootstrap_value: Tensor | None = None  # Raw value of a truncated final state.
 
 
 @dataclass
@@ -116,16 +118,14 @@ class _Lane:
     """One environment's in-flight decision and its slice of the rollout.
 
     Every client steps its own game, so the decision awaiting an observation
-    and the reward carried across forced steps are per-environment.  The
-    rollout is kept per lane as well because GAE walks a trajectory backwards:
+    is per-environment. The rollout is kept per lane as well because GAE walks
+    a trajectory backwards:
     interleaving two games into one flat list would make step i-1 the temporal
     predecessor of step i only by accident, and the advantage would propagate
     across environments without anything failing.
     """
 
     pending: _PendingDecision | None = None
-    forced_action: bool = False
-    carried_reward: float = 0.0
     steps: list[_RolloutStep] = field(default_factory=list)
 
 
@@ -208,10 +208,13 @@ class CandidatePPOAgent(Agent):
 
     def reset(self, initial_state: GameObservation, lane: int = 0) -> None:
         del initial_state
-        entry = self._lane(lane)
-        entry.pending = None
-        entry.forced_action = False
-        entry.carried_reward = 0.0
+        with self._lock:
+            entry = self._lane(lane)
+            # Also protect callers that reset without finish_episode(): use
+            # the old trajectory's final observation, never the new start.
+            if entry.steps:
+                self._close_episode(entry, entry.steps[-1].next_observation)
+            entry.pending = None
 
     def choose_action(self, state: GameObservation, lane: int = 0) -> GameAction:
         entry = self._lane(lane)
@@ -221,103 +224,76 @@ class CandidatePPOAgent(Agent):
             )
 
         candidates = self.action_provider.require_candidates(state.raw_state)
-        # A single candidate carries no policy gradient: its log probability is
-        # always zero and its ratio always one, so training on it only dilutes
-        # the advantage statistics of genuine decisions.
-        if len(candidates) == 1:
-            entry.forced_action = True
+        if len(candidates) == 1 and not self.training_enabled:
             return candidates[0]
 
         decision = self.tokenizer.tokenize_decision(state, candidates)
         with self._lock, torch.no_grad():
             output = self.game_encoder.policy_value(decision.to(self.device))
             distribution = Categorical(logits=output.logits)
-            if self.training_enabled:
+            if self.training_enabled and len(candidates) > 1:
                 action_index_tensor = distribution.sample()
             else:
                 action_index_tensor = torch.argmax(output.logits)
             log_probability = distribution.log_prob(action_index_tensor)
-
-        action_index = int(action_index_tensor.item())
-        if self.training_enabled:
-            entry.pending = _PendingDecision(
-                decision=decision,
-                action_index=action_index,
-                log_probability=log_probability.detach().cpu(),
-                value=output.value.detach().cpu(),
-            )
+            action_index = int(action_index_tensor.item())
+            if self.training_enabled:
+                # Another lane may update while this action is in flight.
+                # Capture both the value and its units under the model lock.
+                entry.pending = _PendingDecision(
+                    decision=decision,
+                    action_index=action_index,
+                    log_probability=log_probability.detach().cpu(),
+                    value=(output.value * self._return_scale.scale).detach().cpu(),
+                )
         return candidates[action_index]
 
     def observe(self, transition: Transition, lane: int = 0) -> None:
         entry = self._lane(lane)
-        forced = entry.forced_action
-        entry.forced_action = False
         if not self.training_enabled:
             return
 
         with self._lock:
             self.environment_steps += 1
-            if forced:
-                self._absorb_forced_transition(transition, entry)
-            else:
-                if entry.pending is None:
-                    raise RuntimeError(
-                        "choose_action() must be called before observe()"
-                    )
-                entry.steps.append(
-                    _RolloutStep(
-                        decision=entry.pending.decision,
-                        next_observation=transition.next_state,
-                        action_index=entry.pending.action_index,
-                        old_log_probability=entry.pending.log_probability,
-                        old_value=entry.pending.value,
-                        reward=float(transition.reward) + entry.carried_reward,
-                        done=transition.done,
-                    )
+            if entry.pending is None:
+                raise RuntimeError(
+                    "choose_action() must be called before observe()"
                 )
-                entry.carried_reward = 0.0
-                entry.pending = None
+            entry.steps.append(
+                _RolloutStep(
+                    decision=entry.pending.decision,
+                    next_observation=transition.next_state,
+                    action_index=entry.pending.action_index,
+                    old_log_probability=entry.pending.log_probability,
+                    old_value=entry.pending.value,
+                    reward=float(transition.reward),
+                    done=transition.done,
+                    episode_end=transition.done,
+                )
+            )
+            entry.pending = None
             ready = self._rollout_length() >= self.config.rollout_size
         if ready:
             self.update()
             if self.on_update is not None:
                 self.on_update()
 
-    def _absorb_forced_transition(self, transition: Transition, entry: _Lane) -> None:
-        """Merge a forced step into the decision it followed.
+    def _raw_value(self, state: GameObservation) -> Tensor:
+        """Read one bootstrap in reward units while the caller holds the lock."""
+        with torch.no_grad():
+            value = self.game_encoder.value(
+                self.tokenizer.tokenize_state(state).to(self.device)
+            )
+            return (value * self._return_scale.scale).detach().cpu()
 
-        Forced steps are never scored, so their reward would otherwise be lost.
-        Extending the preceding recorded transition keeps the return of every
-        trained decision equal to the return the environment actually paid.
-
-        **A terminal step is never extended**, because the next episode's first
-        step is often forced and the rollout deliberately spans episodes.  The
-        merge would then reach back across the boundary and overwrite
-        ``done=True`` with ``False`` -- erasing the only terminal in the
-        trajectory -- while crediting the new episode's reward to the old
-        episode's last decision and replacing its ``next_observation`` with a
-        state from a different run.
-
-        That is not hypothetical: with the first decision of every episode
-        forced (a map that offers one node), measured rollouts of 256 steps
-        contained **zero** terminals.  GAE then bootstraps across episode
-        boundaries forever, so the value chain has nothing anchoring it to real
-        rewards, and ``_ReturnScale`` -- which is fed ``advantages + values`` --
-        grows every update: 1.0 to 33.7 over 25 updates against a true return
-        RMS of 3.8, while the evaluated floor fell from 8.0 to 2.5.  With the
-        boundary respected, terminals reappear (2 to 4 per rollout), the scale
-        settles at 4.3, and the same seeds climb from 8.5 to 10.5.
-
-        The reward is carried instead, which credits it to the next recorded
-        decision -- the one in the episode that actually earned it.
-        """
-        if not entry.steps or entry.pending is not None or entry.steps[-1].done:
-            entry.carried_reward += float(transition.reward)
+    def _close_episode(self, entry: _Lane, final_state: GameObservation) -> None:
+        """Cut the trace at a nonterminal boundary, retaining its bootstrap."""
+        if not entry.steps or entry.steps[-1].episode_end or entry.steps[-1].done:
             return
         last = entry.steps[-1]
-        last.reward += float(transition.reward)
-        last.next_observation = transition.next_state
-        last.done = transition.done
+        last.next_observation = final_state
+        last.bootstrap_value = self._raw_value(final_state)
+        last.episode_end = True
 
     def finish_episode(
         self,
@@ -327,16 +303,16 @@ class CandidatePPOAgent(Agent):
     ) -> None:
         """End an episode without flushing the rollout.
 
-        The rollout deliberately spans episode boundaries: episodes here are
-        far shorter than ``rollout_size``, and updating on the dozen
-        transitions one episode happens to produce makes both the advantage
-        normalization and the gradient almost pure noise.  GAE already zeroes
-        the bootstrap and the trace at every terminal, so accumulating across
-        episodes changes no return.  The trainer flushes before checkpointing.
+        Terminal transitions already carry a zero bootstrap. A truncation
+        keeps V(final_state), but cuts the trace so the next episode cannot
+        contribute rewards. Neither boundary forces a small PPO update.
         """
-        del final_state, truncated
-        if self._lane(lane).pending is not None:
-            raise RuntimeError("cannot finish an episode with an unobserved action")
+        with self._lock:
+            entry = self._lane(lane)
+            if entry.pending is not None:
+                raise RuntimeError("cannot finish an episode with an unobserved action")
+            if truncated:
+                self._close_episode(entry, final_state)
 
     def train(self, enabled: bool = True) -> None:
         """Switch between stochastic learning and deterministic evaluation."""
@@ -409,9 +385,8 @@ class CandidatePPOAgent(Agent):
         dropped so the lane can choose again, while the rollout it has already
         collected is untouched.
         """
-        entry = self._lane(lane)
-        entry.pending = None
-        entry.forced_action = False
+        with self._lock:
+            self._lane(lane).pending = None
 
     def abort_lane(self, lane: int) -> None:
         """Discard one environment's whole trajectory after its episode failed.
@@ -426,11 +401,10 @@ class CandidatePPOAgent(Agent):
         Only this lane is cleared.  ``abort_episode`` clears every lane and
         would throw away the other clients' work.
         """
-        entry = self._lane(lane)
-        entry.pending = None
-        entry.forced_action = False
-        entry.carried_reward = 0.0
-        entry.steps.clear()
+        with self._lock:
+            entry = self._lane(lane)
+            entry.pending = None
+            entry.steps.clear()
 
     def abort_episode(self) -> None:
         """Discard incomplete actions and rollouts without undoing prior updates."""
@@ -466,10 +440,20 @@ class CandidatePPOAgent(Agent):
             # give the critic a target that does not grow with the policy.
             self._return_scale.update(returns)
             returns = returns / self._return_scale.scale
-            if len(advantages) > 1:
-                advantages = (advantages - advantages.mean()) / (
-                    advantages.std(unbiased=False) + 1e-8
+            policy_mask = torch.tensor(
+                [len(step.decision.actions) > 1 for step in steps],
+                dtype=torch.bool,
+                device=self.device,
+            )
+            policy_advantages = advantages[policy_mask]
+            if len(policy_advantages) > 1:
+                policy_advantages = (policy_advantages - policy_advantages.mean()) / (
+                    policy_advantages.std(unbiased=False) + 1e-8
                 )
+            # Forced actions participate in per-environment-step GAE and in
+            # critic training, but not in the policy's normalization or loss.
+            advantages = torch.zeros_like(advantages)
+            advantages[policy_mask] = policy_advantages
 
             metrics: dict[str, float] = {}
             for _ in range(self.config.update_epochs):
@@ -506,6 +490,10 @@ class CandidatePPOAgent(Agent):
         entropies: list[Tensor] = []
         for index in indices:
             step = steps[index]
+            if len(step.decision.actions) == 1:
+                value = self.game_encoder.value(step.decision.state.to(self.device))
+                value_losses.append(F.mse_loss(value, returns[index]))
+                continue
             output = self.game_encoder.policy_value(step.decision.to(self.device))
             distribution = Categorical(logits=output.logits)
             action_index = torch.tensor(step.action_index, device=self.device)
@@ -527,9 +515,10 @@ class CandidatePPOAgent(Agent):
             value_losses.append(F.mse_loss(output.value, returns[index]))
             entropies.append(distribution.entropy())
 
-        policy_loss = torch.stack(policy_losses).mean()
+        zero = torch.zeros((), device=self.device)
+        policy_loss = torch.stack(policy_losses).mean() if policy_losses else zero
         value_loss = torch.stack(value_losses).mean()
-        entropy = torch.stack(entropies).mean()
+        entropy = torch.stack(entropies).mean() if entropies else zero
         loss = (
             policy_loss
             + self.config.value_coefficient * value_loss
@@ -554,40 +543,31 @@ class CandidatePPOAgent(Agent):
         self, steps: list[_RolloutStep]
     ) -> tuple[Tensor, Tensor]:
         """Return GAE advantages and returns for one lane's trajectory."""
-        # The critic works in the normalised space, GAE in the reward's own, so
-        # every value crossing that boundary is scaled back up.
-        scale = self._return_scale.scale
-        values = (
-            torch.stack([step.old_value for step in steps]).to(self.device) * scale
-        )
+        # Sampling values are already in reward units. Pending decisions can
+        # survive another lane's update; never reinterpret them at a new scale.
+        values = torch.stack([step.old_value for step in steps]).to(self.device)
         advantages = torch.zeros(len(steps), device=self.device)
         with torch.no_grad():
-            last_step = steps[-1]
-            next_value = (
-                torch.zeros((), device=self.device)
-                if last_step.done
-                else self.game_encoder.value(
-                    self.tokenizer.tokenize_state(last_step.next_observation).to(
-                        self.device
-                    )
-                )
-                * scale
-            )
             gae = torch.zeros((), device=self.device)
             for index in range(len(steps) - 1, -1, -1):
                 step = steps[index]
-                nonterminal = 0.0 if step.done else 1.0
-                delta = (
-                    step.reward
-                    + self.config.gamma * next_value * nonterminal
-                    - values[index]
-                )
+                boundary = step.done or step.episode_end or index == len(steps) - 1
+                if step.done:
+                    next_value = torch.zeros((), device=self.device)
+                elif boundary:
+                    bootstrap = step.bootstrap_value
+                    if bootstrap is None:
+                        bootstrap = self._raw_value(step.next_observation)
+                    next_value = bootstrap.to(self.device)
+                else:
+                    next_value = values[index + 1]
+                delta = step.reward + self.config.gamma * next_value - values[index]
+                trace_mask = 0.0 if boundary else 1.0
                 gae = (
                     delta
-                    + self.config.gamma * self.config.gae_lambda * nonterminal * gae
+                    + self.config.gamma * self.config.gae_lambda * trace_mask * gae
                 )
                 advantages[index] = gae
-                next_value = values[index]
         return advantages, advantages + values
 
     def _require_clean_checkpoint_boundary(self, operation: str) -> None:

@@ -20,9 +20,9 @@ state,
 `CandidatePPOAgent` tokenizes and scores only those candidates, then samples
 from the resulting categorical distribution. Its rollout stores the complete
 CPU `TokenizedDecision`, the next `GameObservation`, the selected index, the old
-log probability, the old value, the reward, and the terminal flag. Only the
-final step's next state is ever tokenized, and only when bootstrapping, so the
-common case pays nothing for it. PPO updates rerun `GameEncoder` from those
+log probability, the old value in raw reward units, the reward, and separate
+terminal and episode-boundary flags. Next states are tokenized at nonterminal
+rollout boundaries and episode truncations for bootstrapping. PPO updates rerun `GameEncoder` from those
 snapshots, so gradients reach
 the categorical embeddings, entity transformer, map DAG encoder, action
 encoder, and policy/value heads while the candidate identity remains stable.
@@ -55,26 +55,35 @@ observe(Transition[GameObservation])
 finish_episode(final_observation, truncated)
 ```
 
-A state offering exactly one candidate is executed directly and never enters
-the rollout: its log probability is always zero and its ratio always one, so it
-carries no policy gradient while still diluting the advantage statistics of
-genuine decisions. Its reward is folded into the preceding recorded decision,
-so the return of every trained step still matches what the environment paid.
+A state offering exactly one candidate is recorded as a critic-only transition.
+Its log probability is zero; it is excluded from policy loss, entropy, and
+policy advantage normalization. Keeping the transition preserves the time of
+its reward, the terminal flag, and the per-environment-step discount and GAE
+trace. Rewards are never moved onto preceding or following decisions. The
+default rollout size of 256 now counts all recorded environment transitions,
+including forced actions; it previously counted only genuine choices.
 
 The default long-horizon return settings are `gamma=0.999` and
 `gae_lambda=0.98`. A terminal step bootstraps with zero; a non-terminal rollout
-boundary or truncated episode bootstraps from the stored next observation.
+boundary or truncated episode bootstraps from its own final observation. A
+truncation cuts the GAE trace without zeroing that bootstrap, so rewards from
+the next episode cannot flow backward into it. Sampling values and truncation
+bootstraps are captured in raw reward units under the model lock; subsequent
+return-scale updates cannot change the meaning of an in-flight value. These
+changes preserve the model and checkpoint format. They do not make the parallel
+collector synchronous: another lane may still finish an action sampled before
+the latest update, with its original log probability and raw value retained.
 Updates run over shuffled minibatches (`minibatch_size`, default 32), which also
 bounds how many autograd graphs are live at once. Training samples
 stochastically, while `agent.eval()` selects the highest-logit candidate
 deterministically and does not collect rollout entries.
 
 The training runtime drains metrics for every completed PPO update instead of
-only reading `last_update`. At a clean episode boundary the agent serializes its
-encoder and optimizer; the lifetime counters belong to `TrainingState` and are
-stored once by the checkpoint rather than duplicated here. Incomplete pending
-actions and rollouts must be observed, updated, or explicitly aborted before
-checkpointing.
+only reading `last_update`. Checkpointing takes a locked snapshot of the encoder,
+optimizer, and return scale without flushing an incomplete rollout. Pending
+actions and rollout entries are not serialized. Lifetime counters belong to
+`TrainingState` and are stored once by the checkpoint. Loading requires an empty
+rollout and no pending actions.
 
 The legal-action provider covers combat, in-combat selection, rewards, map,
 events, rest sites, shops, treasure, card/bundle/relic overlays, and the Crystal
