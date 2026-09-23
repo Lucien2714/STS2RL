@@ -370,7 +370,7 @@ def test_a_terminal_inside_the_rollout_cuts_the_return_there():
     assert advantages[0].item() == pytest.approx(1.0 - values[0])
 
 
-def test_forced_single_candidate_is_executed_without_entering_the_rollout():
+def test_forced_single_candidate_is_recorded_as_a_critic_only_step():
     torch.manual_seed(34)
     agent = _agent(rollout_size=20)
     observation = _observation(_map_state(1))
@@ -388,12 +388,15 @@ def test_forced_single_candidate_is_executed_without_entering_the_rollout():
 
     assert action.to_dict() == {"type": "choose_map_node", "index": 0}
     assert agent._lane(0).pending is None
-    assert agent._lane(0).steps == []
+    assert len(agent._lane(0).steps) == 1
+    step = agent._lane(0).steps[0]
+    assert len(step.decision.actions) == 1
+    assert float(step.old_log_probability) == 0.0
+    assert step.reward == 3.0
     assert agent.environment_steps == 1
-    assert agent._lane(0).carried_reward == 3.0
 
 
-def test_forced_step_reward_is_folded_into_the_preceding_decision():
+def test_forced_step_preserves_its_own_reward_and_terminal():
     torch.manual_seed(39)
     agent = _agent(rollout_size=20)
     decision_observation = _observation(_map_state(2))
@@ -422,10 +425,13 @@ def test_forced_step_reward_is_folded_into_the_preceding_decision():
         )
     )
 
-    assert len(agent._lane(0).steps) == 1
-    assert agent._lane(0).steps[0].reward == pytest.approx(5.0)
-    assert agent._lane(0).steps[0].done is True
-    assert agent._lane(0).steps[0].next_observation is terminal
+    assert len(agent._lane(0).steps) == 2
+    first, forced = agent._lane(0).steps
+    assert first.reward == pytest.approx(1.0)
+    assert first.done is False
+    assert forced.reward == pytest.approx(4.0)
+    assert forced.done is True
+    assert forced.next_observation is terminal
     assert agent.environment_steps == 2
 
 
@@ -533,20 +539,18 @@ def test_update_computes_the_advantage_each_lane_would_get_alone():
     assert float(actual[0]) == pytest.approx(float(expected[0]))
 
 
-def test_a_forced_step_is_absorbed_into_its_own_lane():
+def test_a_forced_step_is_recorded_in_its_own_lane():
     agent = _agent()
     _step(agent, 0, reward=1.0, done=False)
     _step(agent, 1, reward=1.0, done=False)
 
     # Lane 1 takes a forced step worth 5.0; lane 0 must not see it.
-    agent._lane(1).forced_action = True
-    observation = _observation(_map_state(2))
+    observation = _observation(_map_state(1))
+    action = agent.choose_action(observation, lane=1)
     agent.observe(
         Transition(
             state=observation,
-            action=agent._lane(1).steps[-1].decision.candidates[0]
-            if hasattr(agent._lane(1).steps[-1].decision, "candidates")
-            else None,
+            action=action,
             reward=5.0,
             next_state=observation,
             done=False,
@@ -555,7 +559,7 @@ def test_a_forced_step_is_absorbed_into_its_own_lane():
         lane=1,
     )
 
-    assert agent._lane(1).steps[-1].reward == pytest.approx(6.0)
+    assert [step.reward for step in agent._lane(1).steps] == [1.0, 5.0]
     assert agent._lane(0).steps[-1].reward == pytest.approx(1.0)
 
 
@@ -603,7 +607,6 @@ def test_aborting_a_lane_discards_its_whole_trajectory():
 
     assert agent._lane(0).steps == []
     assert agent._lane(0).pending is None
-    assert agent._lane(0).carried_reward == 0.0
 
 
 def test_aborting_one_lane_leaves_the_other_clients_alone():
@@ -640,40 +643,39 @@ def test_the_return_scale_grows_with_the_returns_it_sees():
     assert agent._return_scale.scale > small * 5
 
 
-def test_the_critic_target_is_scaled_but_the_advantage_is_not():
-    """GAE works in the reward's own units; only the critic's target moves.
-
-    Scaling the advantage as well would quietly change the policy gradient,
-    which is not what this is for.
-    """
+def test_stored_trajectory_values_are_invariant_to_later_scale_changes():
+    """Changing units after sampling must not rewrite that value estimate."""
     agent = _agent(rollout_size=4)
-    for _ in range(3):
-        _step(agent, 0, reward=1.0, done=False)
+    for done in (False, False, True):
+        _step(agent, 0, reward=1.0, done=done)
     steps = agent._lane(0).steps
     before, _ = agent._advantages_and_returns(steps)
 
     agent._return_scale.update(torch.full((256,), 30.0))
     after, _ = agent._advantages_and_returns(steps)
 
-    # The stored values are read back at the new scale, so advantages change
-    # only through the value estimate, never through a factor applied to them.
     assert agent._return_scale.scale > 5.0
-    assert before.shape == after.shape
+    assert torch.equal(before, after)
 
 
-def test_a_value_crossing_into_gae_is_scaled_back_up():
+def test_a_sampled_value_is_converted_to_reward_units_before_storage():
     agent = _agent(rollout_size=1000)
+    agent._return_scale.update(torch.full((256,), 10.0))
+    observation = _observation(_map_state(2))
+    decision = agent.tokenizer.tokenize_decision(
+        observation, agent.action_provider.require_candidates(observation.raw_state)
+    )
+    with torch.no_grad():
+        raw_value = agent.game_encoder.policy_value(decision).value.item()
+        raw_value *= agent._return_scale.scale
     _step(agent, 0, reward=1.0, done=False)
     step = agent._lane(0).steps[0]
-    step.old_value = torch.tensor(2.0)
+    assert float(step.old_value) == pytest.approx(raw_value)
     step.done = True
-
-    agent._return_scale.update(torch.full((256,), 10.0))
+    agent._return_scale.update(torch.full((256,), 100.0))
     advantages, returns = agent._advantages_and_returns([step])
-
-    # reward - value*scale, with the terminal zeroing the bootstrap.
-    expected = 1.0 - 2.0 * agent._return_scale.scale
-    assert float(advantages[0]) == pytest.approx(expected, rel=1e-4)
+    assert float(advantages[0]) == pytest.approx(1.0 - raw_value, rel=1e-4)
+    assert float(returns[0]) == pytest.approx(1.0)
 
 
 def test_the_scale_survives_a_checkpoint():
@@ -736,16 +738,15 @@ def test_a_forced_step_never_reaches_back_across_an_episode_boundary():
         )
     )
 
-    ended = agent._lane(0).steps[-1]
+    ended = agent._lane(0).steps[0]
     assert ended.done is True, "the terminal must survive the next episode's forced step"
     assert ended.reward == pytest.approx(1.0), "its reward must stay its own episode's"
     assert ended.next_observation is terminal
-    # The forced step's reward belongs to the new episode, and waits for its
-    # first recorded decision.
-    assert agent._lane(0).carried_reward == pytest.approx(4.0)
+    assert agent._lane(0).steps[1].reward == pytest.approx(4.0)
+    assert agent._lane(0).steps[1].done is False
 
 
-def test_a_carried_reward_reaches_the_next_episode_s_first_decision():
+def test_an_initial_forced_reward_is_not_added_to_a_later_decision():
     torch.manual_seed(39)
     agent = _agent(rollout_size=20)
     agent.update = lambda: {}  # type: ignore[method-assign]
@@ -777,6 +778,5 @@ def test_a_carried_reward_reaches_the_next_episode_s_first_decision():
         )
     )
 
-    assert len(agent._lane(0).steps) == 2
-    assert agent._lane(0).steps[1].reward == pytest.approx(6.0)
-    assert agent._lane(0).carried_reward == pytest.approx(0.0)
+    assert len(agent._lane(0).steps) == 3
+    assert [step.reward for step in agent._lane(0).steps] == [1.0, 4.0, 2.0]
