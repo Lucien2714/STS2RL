@@ -214,7 +214,13 @@ ENTITY_NUMERIC_FIELDS: Mapping[str, tuple[str, ...]] = MappingProxyType(
         "pet": ("hp", "max_hp", "hp_ratio", "block", "position"),
         "enemy": ("hp", "max_hp", "hp_ratio", "block", "position"),
         "power": ("amount",),
-        "intent": ("label", "position"),
+        # An intent's ``label`` is "11" for one hit and "7x2" for several, and
+        # a multi-hit label read as one number is no number at all -- a boss's
+        # 3x5 arrived as "missing" beside a jaw worm's 11.  It is split into
+        # the per-hit amount, the hit count, and their product.  The number is
+        # not always damage (``StatusCard`` counts the cards it adds), so the
+        # columns say "amount" and the intent's own embedding says what of.
+        "intent": ("amount", "hits", "total_amount", "position"),
         "reward": ("gold_amount",),
         "shop_item": (
             "price",

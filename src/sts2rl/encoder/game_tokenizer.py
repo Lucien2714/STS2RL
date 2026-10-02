@@ -618,7 +618,7 @@ class GameTokenizer:
                         self.vocabulary.lookup("intents", _text(intent.get("type"))),
                         self.vocabulary.lookup("entity_zones", "battle"),
                     ],
-                    [linear_feature(intent.get("label")), linear_feature(position)],
+                    [*_intent_numeric(intent.get("label")), linear_feature(position)],
                     owner=reference,
                 )
 
@@ -1295,6 +1295,28 @@ def _identity_keys(
     keys = ("id", "name", "entity_id") if include_entity else ("id", "name")
     return tuple(
         value for value in (_text(record.get(key)) for key in keys) if value
+    )
+
+
+def _intent_numeric(label: object) -> tuple[NumericFeature, NumericFeature, NumericFeature]:
+    """Return an intent's per-hit amount, hit count, and total.
+
+    The label is "11" for a single hit and "7x2" for several; anything else
+    ("", "?") carries no number and is missing in all three columns.
+    """
+    text = _text(label)
+    amount, hits = None, None
+    if text is not None:
+        per_hit, separator, count = text.lower().partition("x")
+        amount = _integer(per_hit.strip())
+        hits = _integer(count.strip()) if separator else 1
+    if amount is None or hits is None:
+        missing = NumericFeature.missing()
+        return missing, missing, missing
+    return (
+        signed_log_feature(amount),
+        linear_feature(hits),
+        signed_log_feature(amount * hits),
     )
 
 

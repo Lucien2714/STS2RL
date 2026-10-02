@@ -173,6 +173,7 @@ def test_combat_entities_preserve_positions_and_owner_references(
                     "intents": [
                         {"type": "Attack", "label": "11"},
                         {"type": "Buff", "label": "?"},
+                        {"type": "Attack", "label": "3x5"},
                     ],
                 }
             ]
@@ -196,9 +197,21 @@ def test_combat_entities_preserve_positions_and_owner_references(
     assert [owner.kind for owner in tokenized.entities["intent"].owners] == [
         "enemy",
         "enemy",
+        "enemy",
     ]
-    label = _column(ENTITY_NUMERIC_FIELDS["intent"], "label")
-    assert tokenized.entities["intent"].numeric_mask[:, label].tolist() == [True, False]
+    intents = tokenized.entities["intent"]
+    fields = ENTITY_NUMERIC_FIELDS["intent"]
+    amount = _column(fields, "amount")
+    hits = _column(fields, "hits")
+    total = _column(fields, "total_amount")
+    # A label with no number is missing in every column, not zero.
+    assert intents.numeric_mask[:, amount].tolist() == [True, False, True]
+    assert intents.numeric_mask[:, total].tolist() == [True, False, True]
+    assert intents.numeric[:, hits].tolist() == [1.0, 0.0, 5.0]
+    # A multi-hit attack is a number, and its total is what it deals.
+    assert intents.numeric[2, amount].item() == pytest.approx(math.log1p(3))
+    assert intents.numeric[2, total].item() == pytest.approx(math.log1p(15))
+    assert intents.numeric[0, total].item() == pytest.approx(math.log1p(11))
 
 
 def test_relic_activity_is_explicit_and_unknown_is_not_guessed(
