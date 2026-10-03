@@ -262,26 +262,41 @@ class STS2Client:
         start_act: int = 1,
         capture: bool = False,
         start_boss: bool = False,
+        reseed: int | None = None,
     ) -> Any:
         """Start a run on the STS2Simulator backend.
 
         The simulator has no menus, so it starts a run in one request rather
         than the navigation ``ResetController`` performs.  A real client serves
         no such endpoint and answers 404.
+
+        ``reseed`` replaces the run's combat streams before the first room: a
+        snapshot otherwise restores them as they were, and every episode from
+        it would play the same shuffles and the same enemy rolls.
         """
-        return self._post(
-            "sim/reset",
-            {
-                "character": character,
-                "seed": seed,
-                "ascension": ascension,
-                "mode": mode,
-                "max_fights": max_fights,
-                "start_act": start_act,
-                "capture": capture,
-                "start_boss": start_boss,
-            },
-        )
+        body = {
+            "character": character,
+            "seed": seed,
+            "ascension": ascension,
+            "mode": mode,
+            "max_fights": max_fights,
+            "start_act": start_act,
+            "capture": capture,
+            "start_boss": start_boss,
+        }
+        if reseed is not None:
+            body["reseed"] = reseed
+        return self._post("sim/reset", body)
+
+    def sim_reseed(self, seed: int) -> Any:
+        """Redraw what the fight has not revealed: future shuffles, rolls, and draw order.
+
+        Everything visible stays as it was.  A search reseeds each simulation
+        from a branch point, so its statistics average over the futures a
+        player could face rather than planning against the one the
+        simulator's state already holds.  The response carries the state.
+        """
+        return self._post("sim/reseed", {"seed": seed})
 
     def sim_info(self) -> dict[str, Any]:
         """Read the simulator's build and counters; 404 against a real client."""

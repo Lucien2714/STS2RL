@@ -255,3 +255,21 @@ def test_restoring_an_unknown_branch_point_fails_loudly():
 
     with pytest.raises(STS2ClientError, match="No branch point 9"):
         client.sim_restore(9)
+
+
+def test_reseed_and_seeded_reset_reach_the_simulator():
+    session = FakeSession(FakeResponse({"status": "ok"}))
+    client = STS2Client(base_url="http://localhost:15600/api/v1", session=session)
+
+    client.sim_reseed(123)
+    client.sim_reset("IRONCLAD", "ABC", start_boss=True, reseed=9)
+    client.sim_reset("IRONCLAD", "ABC")
+
+    reseed, seeded, plain = session.requests
+    assert (reseed["url"], reseed["json"]) == (
+        "http://localhost:15600/api/v1/sim/reseed",
+        {"seed": 123},
+    )
+    assert seeded["json"]["reseed"] == 9
+    # Without a reseed the field is left out, so the simulator restores streams as saved.
+    assert "reseed" not in plain["json"]
