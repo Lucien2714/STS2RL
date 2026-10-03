@@ -230,3 +230,28 @@ def test_an_http_error_is_a_real_answer_and_is_not_retried(monkeypatch):
 def test_a_negative_retry_count_is_rejected():
     with pytest.raises(ValueError, match="max_retries"):
         STS2Client(max_retries=-1)
+
+
+def test_branch_points_use_the_simulator_endpoints():
+    session = FakeSession(FakeResponse({"status": "ok", "id": 7}))
+    client = STS2Client(base_url="http://localhost:15600/api/v1", session=session)
+
+    assert client.sim_snapshot() == 7
+    client.sim_restore(7)
+    client.sim_release(7)
+
+    assert [(r["method"], r["url"], r["json"]) for r in session.requests] == [
+        ("POST", "http://localhost:15600/api/v1/sim/snapshot", {}),
+        ("POST", "http://localhost:15600/api/v1/sim/restore", {"id": 7}),
+        ("DELETE", "http://localhost:15600/api/v1/sim/snapshot/7", None),
+    ]
+
+
+def test_restoring_an_unknown_branch_point_fails_loudly():
+    session = FakeSession(
+        FakeResponse({"status": "error", "error": "No branch point 9."}, status_code=400)
+    )
+    client = STS2Client(session=session)
+
+    with pytest.raises(STS2ClientError, match="No branch point 9"):
+        client.sim_restore(9)

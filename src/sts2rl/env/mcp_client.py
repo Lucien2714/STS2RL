@@ -287,6 +287,22 @@ class STS2Client:
         """Read the simulator's build and counters; 404 against a real client."""
         return self._get("sim/info")
 
+    def sim_snapshot(self) -> int:
+        """Hold the simulator's current state as a branch point and return its id.
+
+        The point stays held, and restorable any number of times, until it is
+        released.  A real client has no such endpoint.
+        """
+        return int(self._post("sim/snapshot", {})["id"])
+
+    def sim_restore(self, snapshot_id: int) -> Any:
+        """Return the simulator to a branch point; the response carries the state."""
+        return self._post("sim/restore", {"id": snapshot_id})
+
+    def sim_release(self, snapshot_id: int) -> None:
+        """Release a branch point the caller no longer needs."""
+        self._request("DELETE", f"sim/snapshot/{snapshot_id}")
+
     def get_player_detail(self) -> dict[str, Any]:
         """Read run-level player detail, the only source of the master deck.
 
