@@ -5,10 +5,16 @@ climbing; this only decides which of two lines a search prefers when neither has
 finished the fight.  It reads the raw state the API returns, so it needs no network
 and cannot drift from what the agent is shown.
 
-A finished fight is scored exactly: a loss is 0 and a win is worth more the more HP
-and potions it keeps, in that order (CombatSolver's final ordering: survival, then
-victory, then HP, then potions).  A fight in progress is scored as the chance of
-winning it, ``sigma(w . phi(s))``, times what winning from here would be worth.  The
+A finished fight is scored exactly: a win is worth more the more HP and potions it
+keeps, in that order (CombatSolver's final ordering: survival, then victory, then HP,
+then potions).  A fight in progress is scored as the chance of winning it,
+``sigma(w . phi(s))``, times what winning from here would be worth.
+
+A loss is worth a little for the damage it dealt (``LOSS_PROGRESS_WEIGHT`` times the
+share of the enemies' health taken), never as much as any win.  Without it every line
+of a fight that looks lost scores zero, and the search, with nothing to tell its
+options apart, plays at random -- exactly where a careful line matters most, since
+"looks lost" is the evaluator's guess and not the fight's verdict.  The
 features are built around who falls first -- survival margin against the incoming
 attack, the enemies' remaining health, the growth each side has banked -- because a
 shallow search sees only what a turn or two does, and these are what carry the turns
@@ -19,6 +25,7 @@ own fights reach (``fit_weights``).
 from __future__ import annotations
 
 import math
+import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any
@@ -30,6 +37,7 @@ COMBAT_STATE_TYPES = frozenset({"monster", "elite", "boss", "hand_select"})
 WIN_BASE = 0.7
 WIN_HP_WEIGHT = 0.25
 WIN_POTION_WEIGHT = 0.05
+LOSS_PROGRESS_WEIGHT = 0.1
 
 # Powers that change how a fight goes, read by id as the API sends them.
 PLAYER_GROWTH = ("STRENGTH_POWER", "DEXTERITY_POWER")
@@ -41,6 +49,9 @@ FEATURES = (
     "hp_ratio",
     "survival_margin",
     "lethal_incoming",
+    "race",
+    "deck_damage",
+    "deck_block",
     "enemy_hp_ratio",
     "enemy_block_ratio",
     "player_strength",
@@ -61,6 +72,9 @@ DEFAULT_WEIGHTS: Mapping[str, float] = {
     "hp_ratio": 2.0,
     "survival_margin": 1.0,
     "lethal_incoming": -3.0,
+    "race": 1.0,
+    "deck_damage": 0.5,
+    "deck_block": 0.3,
     "enemy_hp_ratio": -4.0,
     "enemy_block_ratio": -1.0,
     "player_strength": 0.5,
@@ -73,6 +87,17 @@ DEFAULT_WEIGHTS: Mapping[str, float] = {
     "potions": 0.2,
     "status_cards": -0.2,
 }
+
+
+# What a card says it does, read from its description: the numbers there are the
+# game's own, interpolated with upgrades. English only, which is what the simulator
+# and the mod serve.
+_DAMAGE = re.compile(
+    r"Deal (\d+) damage(?: to (?:ALL enemies|a random enemy))?(?: (\d+|X) times| (twice))?", re.IGNORECASE
+)
+_BLOCK = re.compile(r"Gain (\d+) Block", re.IGNORECASE)
+# A fight longer than this is as good as never ending, for either side.
+TURNS_CAP = 20.0
 
 
 def is_fight_over(state: RawState) -> bool:
@@ -138,11 +163,22 @@ def features(state: RawState) -> dict[str, float]:
         if str(card.get("type", "")).lower() in ("status", "curse")
     )
     potions = [p for p in _records(player.get("potions")) if p.get("id")]
+    energy = max(_number(player.get("max_energy")), 1.0)
+    damage_per_energy, block_per_energy = deck_output(piles, energy)
+    damage_per_turn = damage_per_energy * energy
+    vulnerable = any(p.get("VULNERABLE_POWER", 0.0) > 0 for p in theirs)
+    enemy_turns = min(enemy_hp / max(damage_per_turn * (1.5 if vulnerable else 1.0), 1.0), TURNS_CAP)
+    player_turns = min(effective / max(incoming, 1.0), TURNS_CAP)
     return {
         "bias": 1.0,
         "hp_ratio": hp / max_hp,
         "survival_margin": max(-3.0, min(3.0, math.log1p(effective) - math.log1p(incoming))),
         "lethal_incoming": 1.0 if incoming >= effective > 0 or effective <= 0 else 0.0,
+        # StS fights are races: how many enemy turns the player outlasts the enemies by,
+        # on a log scale. Incoming is this turn's intent, output is the deck's average.
+        "race": max(-3.0, min(3.0, math.log1p(player_turns) - math.log1p(enemy_turns))),
+        "deck_damage": damage_per_turn / 30.0,
+        "deck_block": block_per_energy * energy / 20.0,
         "enemy_hp_ratio": enemy_hp / enemy_max,
         "enemy_block_ratio": enemy_block / enemy_max,
         "player_strength": own.get("STRENGTH_POWER", 0.0) / 5.0,
@@ -157,26 +193,85 @@ def features(state: RawState) -> dict[str, float]:
     }
 
 
+# The direction each feature moves the chance of winning when nothing else changes.
+# A fit learns correlation, and correlation can reverse these: long fights give the
+# enemy time to grow and are also the fights a player survives, so a free fit pays
+# for enemy Strength. The search ranks actions by this score, so a reversed weight
+# is a reversed incentive -- it would avoid applying Vulnerable. ``fit_weights``
+# holds each weight on its side of zero (a feature with no entry is free).
+FEATURE_SIGNS: Mapping[str, int] = {
+    "hp_ratio": 1,
+    "survival_margin": 1,
+    "lethal_incoming": -1,
+    "race": 1,
+    "deck_damage": 1,
+    "deck_block": 1,
+    "enemy_hp_ratio": -1,
+    "enemy_block_ratio": -1,
+    "player_strength": 1,
+    "player_dexterity": 1,
+    "player_buffs": 1,
+    "enemy_growth": -1,
+    "enemy_vulnerable": 1,
+    "enemy_weak": 1,
+    "player_debuffs": -1,
+    "potions": 1,
+    "status_cards": -1,
+}
+
+
+def deck_output(cards: Sequence[Mapping[str, Any]], energy: float = 3.0) -> tuple[float, float]:
+    """Damage and block per energy, averaged over the cards still in play this fight.
+
+    Only what a card does when played is read; triggers ("whenever ...") and damage
+    that scales with the state are not, so some decks are undercounted. An X-cost card
+    spends a turn's energy for X hits, a zero-cost card is costed at half an energy,
+    and an unplayable one (a status, a curse) at one energy for nothing, which is
+    roughly what drawing it costs.
+    """
+    damage = block = cost = 0.0
+    for card in cards:
+        copies = _number(card.get("quantity")) or 1.0
+        text = str(card.get("description") or "")
+        for amount, times, twice in _DAMAGE.findall(text):
+            hits = 2.0 if twice else float(times) if times.isdigit() else energy if times else 1.0
+            damage += copies * float(amount) * hits
+        for amount in _BLOCK.findall(text):
+            block += copies * float(amount)
+        spent = str(card.get("cost", ""))
+        cost += copies * (0.5 if spent == "0" else float(spent) if spent.isdigit() else energy if spent.upper() == "X" else 1.0)
+    if cost <= 0:
+        return 6.0, 5.0
+    return damage / cost, block / cost
+
+
 @dataclass(frozen=True)
 class LeafEvaluator:
     """Scores a fight state in [0, 1]: exactly when it is over, by estimate when it is not."""
 
     weights: Mapping[str, float] = field(default_factory=lambda: dict(DEFAULT_WEIGHTS))
 
-    def __call__(self, state: RawState) -> float:
+    def __call__(self, state: RawState, last_combat: RawState | None = None) -> float:
+        """Score ``state``; ``last_combat`` is the last state still in the fight, which a
+        loss needs because ``game_over`` no longer shows the enemies."""
         if is_fight_over(state):
-            return self.terminal(state)
-        return self.win_probability(state) * self._win_value(state)
+            return self.terminal(state, last_combat)
+        p = self.win_probability(state)
+        return p * self._win_value(state) + (1.0 - p) * self._loss_value(state)
 
-    def terminal(self, state: RawState) -> float:
+    def terminal(self, state: RawState, last_combat: RawState | None = None) -> float:
         if is_loss(state):
-            return 0.0
+            return self._loss_value(last_combat) if last_combat is not None else 0.0
         return self._win_value(state)
 
     def win_probability(self, state: RawState) -> float:
         phi = features(state)
         score = sum(self.weights.get(name, 0.0) * value for name, value in phi.items())
         return 1.0 / (1.0 + math.exp(-max(-30.0, min(30.0, score))))
+
+    @staticmethod
+    def _loss_value(state: RawState) -> float:
+        return LOSS_PROGRESS_WEIGHT * (1.0 - features(state)["enemy_hp_ratio"])
 
     @staticmethod
     def _win_value(state: RawState) -> float:
@@ -191,31 +286,44 @@ def fit_weights(
     rows: Sequence[Mapping[str, float]],
     outcomes: Sequence[bool],
     *,
-    l2: float = 1e-2,
-    iterations: int = 500,
+    sample_weights: Sequence[float] | None = None,
+    signs: Mapping[str, int] | None = FEATURE_SIGNS,
+    l2: float = 1e-3,
+    iterations: int = 4000,
     learning_rate: float = 0.5,
 ) -> dict[str, float]:
-    """Logistic regression of fight outcomes on features, by plain gradient descent.
+    """Logistic regression of fight outcomes on features, by full-batch gradient descent.
 
-    Few rows and fifteen features need nothing heavier, and keeping it dependency-free
-    keeps the evaluator importable anywhere the search runs.
+    ``sample_weights`` lets a caller count fights rather than rows: a long fight
+    contributes more decisions than a short one without being more evidence.  The bias
+    is not regularised.  ``signs`` constrains weights to one side of zero (projected
+    gradient descent); pass ``None`` for a free fit.  numpy is imported here only, so
+    scoring a leaf needs nothing.
     """
-    weights = {name: 0.0 for name in FEATURES}
-    n = len(rows)
-    if n == 0:
+    import numpy as np
+
+    if not rows:
         return dict(DEFAULT_WEIGHTS)
+    x = np.array([[phi.get(name, 0.0) for name in FEATURES] for phi in rows], dtype=np.float64)
+    y = np.array([1.0 if won else 0.0 for won in outcomes])
+    w_rows = np.ones(len(rows)) if sample_weights is None else np.asarray(sample_weights, dtype=np.float64)
+    w_rows = w_rows / w_rows.sum()
+    penalty = np.full(len(FEATURES), l2)
+    penalty[FEATURES.index("bias")] = 0.0
+    lower = np.full(len(FEATURES), -np.inf)
+    upper = np.full(len(FEATURES), np.inf)
+    for index, name in enumerate(FEATURES):
+        sign = (signs or {}).get(name, 0)
+        if sign > 0:
+            lower[index] = 0.0
+        elif sign < 0:
+            upper[index] = 0.0
+    weights = np.zeros(len(FEATURES))
     for _ in range(iterations):
-        gradient = {name: 0.0 for name in FEATURES}
-        for phi, won in zip(rows, outcomes):
-            score = sum(weights[name] * phi.get(name, 0.0) for name in FEATURES)
-            p = 1.0 / (1.0 + math.exp(-max(-30.0, min(30.0, score))))
-            error = p - (1.0 if won else 0.0)
-            for name in FEATURES:
-                gradient[name] += error * phi.get(name, 0.0)
-        for name in FEATURES:
-            penalty = 0.0 if name == "bias" else l2 * weights[name]
-            weights[name] -= learning_rate * (gradient[name] / n + penalty)
-    return weights
+        p = 1.0 / (1.0 + np.exp(-np.clip(x @ weights, -30.0, 30.0)))
+        weights -= learning_rate * (x.T @ (w_rows * (p - y)) + penalty * weights)
+        np.clip(weights, lower, upper, out=weights)
+    return {name: float(value) for name, value in zip(FEATURES, weights)}
 
 
 def _player(state: RawState) -> Mapping[str, Any]:

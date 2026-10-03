@@ -18,6 +18,11 @@ Three consequences shape the tree:
   (``ceil(c * n ** alpha)`` children), so the second turn, where every world deals a
   different hand, is not spread across every card at once.
 
+Exploration is weighed against values normalised to the range the tree has seen
+(as MuZero does).  Leaf values live in [0, 1] but siblings typically differ by a few
+hundredths, so a raw UCB lets the exploration term swamp them and spreads a small
+budget almost evenly; normalised, the same budget concentrates.
+
 The tree reaches ``turn_depth`` turns: a simulation stops after that many ``end_turn``
 actions (the enemy turn resolved, the next hand dealt) or when the fight ends, and the
 leaf is scored by the evaluator.  Unvisited actions are tried in a fixed preference
@@ -143,7 +148,7 @@ class CombatSearch:
     def __init__(
         self,
         config: MctsConfig | None = None,
-        evaluator: Callable[[RawState], float] | None = None,
+        evaluator: Callable[[RawState, RawState], float] | None = None,
         candidates: Callable[[RawState], Sequence[GameAction]] | None = None,
         key: Callable[[RawState, GameAction], ActionKey] = action_key,
         rng: random.Random | None = None,
@@ -153,6 +158,7 @@ class CombatSearch:
         self.candidates = candidates or LegalActionProvider().require_candidates
         self.key = key
         self.rng = rng or random.Random()
+        self._low, self._high = math.inf, -math.inf
 
     def search(self, env: SearchEnv, state: RawState) -> SearchResult:
         candidates = tuple(self.candidates(state))
@@ -161,6 +167,7 @@ class CombatSearch:
         # decision is planned against another's.
         seeds = [self.rng.getrandbits(32) for _ in range(self.config.seed_pool)]
         root = Node()
+        self._low, self._high = math.inf, -math.inf
         deadline = None if self.config.seconds is None else time.perf_counter() + self.config.seconds
         try:
             for index in range(self.config.simulations):
@@ -182,9 +189,11 @@ class CombatSearch:
         path = [root]
         node = root
         turns = 0
+        last_combat = state
         for _ in range(self.config.max_steps_per_simulation):
             if is_fight_over(state) or turns >= self.config.turn_depth:
                 break
+            last_combat = state
             try:
                 offered = self.candidates(state)
             except NoLegalActionsError:
@@ -201,7 +210,8 @@ class CombatSearch:
                 turns += 1
             node = node.children.setdefault(key, Node())
             path.append(node)
-        value = self.evaluate(state)
+        value = self.evaluate(state, last_combat)
+        self._low, self._high = min(self._low, value), max(self._high, value)
         for visited in path:
             visited.visits += 1
             visited.value_sum += value
@@ -222,7 +232,9 @@ class CombatSearch:
         if child.visits == 0:
             return math.inf
         available = max(node.available.get(key, 1), 1)
-        return child.value + self.config.exploration * math.sqrt(math.log(available) / child.visits)
+        spread = self._high - self._low
+        q = (child.value - self._low) / spread if spread > 1e-9 else 0.5
+        return q + self.config.exploration * math.sqrt(math.log(available) / child.visits)
 
     def _result(self, root: Node, state: RawState, candidates: Sequence[GameAction]) -> SearchResult:
         keys = [self.key(state, action) for action in candidates]

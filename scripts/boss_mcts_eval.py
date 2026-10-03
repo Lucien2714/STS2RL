@@ -15,12 +15,14 @@ that package, which is how a checkpoint trained against an older vocabulary is p
 
 ``--record-features`` writes, for every searched decision, the evaluator's features of
 the state, labelled afterwards with whether the fight was won: the data
-``sts2rl.search.fit_weights`` fits the leaf evaluator to.
+``sts2rl.search.fit_weights`` fits the leaf evaluator to. The raw states go beside it
+in ``<out>.states.jsonl.gz``, so a changed feature set is refitted without replaying.
 """
 
 from __future__ import annotations
 
 import argparse
+import gzip
 import json
 import queue
 import random
@@ -60,7 +62,6 @@ def world_seed(snapshot: str, world: int) -> int:
 
 def make_mcts_player(args):
     from sts2rl.search import CombatSearch, LeafEvaluator, MctsConfig, play_fight
-    from sts2rl.search.evaluate import features
 
     weights = json.loads(Path(args.weights).read_text(encoding="utf-8")) if args.weights else None
     evaluator = LeafEvaluator(weights) if weights else LeafEvaluator()
@@ -69,9 +70,9 @@ def make_mcts_player(args):
     def play(env: GameEnv, state, job_seed: int):
         search = CombatSearch(config, evaluator=evaluator, rng=random.Random(job_seed))
         result = play_fight(env, search, state, keep_decisions=True)
-        rows = [features(d.state) for d in result.decisions] if args.record_features else []
+        states = [d.state for d in result.decisions] if args.record_features else []
         seconds = [d.seconds for d in result.decisions]
-        return result.final_state, result.last_combat_state, result.steps, seconds, rows
+        return result.final_state, result.last_combat_state, result.steps, seconds, states
 
     return play
 
@@ -121,6 +122,10 @@ def make_actor_player(args):
         return state, last_combat, steps, [], []
 
     return play
+
+
+def states_path(out: Path) -> Path:
+    return out.with_name(out.stem + ".states.jsonl.gz")
 
 
 def boss_health(state: Mapping[str, Any]) -> float | None:
@@ -178,7 +183,7 @@ def main() -> int:
                 reseed = world_seed(seed, world)
                 started = time.perf_counter()
                 state = extract_raw_state(env.client.sim_reset("IRONCLAD", seed, start_act=1, start_boss=True, reseed=reseed))
-                final, last_combat, steps, seconds, rows = play(env, state, reseed)
+                final, last_combat, steps, seconds, states = play(env, state, reseed)
                 won = fight_over(final) and not lost(final)
                 player = final.get("player") if isinstance(final.get("player"), Mapping) else {}
                 record = {
@@ -191,11 +196,18 @@ def main() -> int:
                     "boss_hp_left": None if won else boss_health(last_combat),
                     "decision_seconds": seconds, "seconds": time.perf_counter() - started,
                 }
-                if rows:
-                    record["features"] = rows
+                if states:
+                    from sts2rl.search.evaluate import features
+
+                    record["features"] = [features(s) for s in states]
                 with write_lock:
                     with args.out.open("a", encoding="utf-8") as handle:
                         handle.write(json.dumps(record) + "\n")
+                    if states:
+                        # One gzip member per fight: concatenated members read back as one stream.
+                        with gzip.open(states_path(args.out), "at", encoding="utf-8") as handle:
+                            handle.write(json.dumps({"pool": pool, "snapshot": seed, "world": world,
+                                                     "won": won, "states": states}) + "\n")
                     counts["played"] += 1
                     counts["won"] += won
                     print(f"[{counts['played'] + len(done)}/{total}] {pool:8} {seed} w{world} "

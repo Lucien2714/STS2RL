@@ -1,0 +1,20 @@
+{
+  "bias": -2.576395426901263,
+  "hp_ratio": 3.3189622276501107,
+  "survival_margin": 0.0,
+  "lethal_incoming": -0.564472399667534,
+  "race": 0.45226485813582834,
+  "deck_damage": 2.361661261531339,
+  "deck_block": 0.0,
+  "enemy_hp_ratio": -3.0901364464825343,
+  "enemy_block_ratio": 0.0,
+  "player_strength": 0.9377042296417704,
+  "player_dexterity": 0.10124973847080816,
+  "player_buffs": 0.5434510781755558,
+  "enemy_growth": 0.0,
+  "enemy_vulnerable": 0.0,
+  "enemy_weak": 0.0,
+  "player_debuffs": 0.0,
+  "potions": 0.8618716065016917,
+  "status_cards": 0.0
+}

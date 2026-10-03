@@ -65,7 +65,7 @@ def candidates(state: dict) -> list[GameAction]:
     return offered
 
 
-def evaluate(state: dict) -> float:
+def evaluate(state: dict, last_combat: dict | None = None) -> float:
     return 1 / (1 + math.exp(-state["score"] / 4))
 
 
@@ -128,10 +128,21 @@ def test_widening_limits_how_many_actions_a_node_has_tried():
     assert len(result.root.children) <= math.ceil(1.0 * 3**0.5)
 
 
+def test_small_value_differences_still_concentrate_the_budget():
+    """Leaves a thousandth apart: normalised against the tree's range, the best still wins out."""
+    game = BranchingGame()
+    search = search_for(game, simulations=200)
+    search.evaluate = lambda state, last=None: 0.5 + 0.001 * state["score"]
+    search.candidates = lambda state: [GOOD, BAD, END]
+    result = search.search(game, game.state)
+    assert result.action == GOOD
+    assert result.distribution[0] > 0.5
+
+
 def test_the_branch_point_is_released_even_when_the_search_fails():
     game = BranchingGame()
 
-    def broken(state: dict) -> float:
+    def broken(state: dict, last_combat: dict | None = None) -> float:
         raise RuntimeError("evaluator failed")
 
     search = CombatSearch(MctsConfig(simulations=4, turn_depth=1), evaluator=broken, candidates=candidates)
@@ -187,6 +198,15 @@ def test_a_finished_fight_is_scored_exactly():
     lost = {"state_type": "game_over", "terminal_reason": "death", "player": {"hp": 0, "max_hp": 80}}
     assert value(lost) == 0.0
     assert 0.7 < value(won) < value(healthier) <= 1.0
+    # A loss earns a little for the damage dealt before it, never as much as a win.
+    closer, farther = _combat(enemy_hp=20), _combat(enemy_hp=180)
+    assert value(lost, farther) < value(lost, closer) < 0.7
+
+
+def test_a_fight_that_looks_lost_still_prefers_the_line_that_hurts_the_enemy():
+    value = LeafEvaluator()
+    hopeless = dict(hp=3, intents=(("Attack", "40"),))
+    assert value(_combat(enemy_hp=150, **hopeless)) > value(_combat(enemy_hp=190, **hopeless))
 
 
 def test_intent_damage_reads_single_and_multi_hit_labels():
@@ -225,3 +245,43 @@ def test_a_time_budget_stops_the_search_early_but_always_simulates_once():
     game = BranchingGame()
     result = search_for(game, simulations=100_000, seconds=0.0).search(game, game.state)
     assert result.root.visits == 1
+
+
+def test_deck_output_reads_damage_block_and_hits_from_descriptions():
+    from sts2rl.search.evaluate import deck_output
+
+    cards = [
+        {"description": "Deal 6 damage.", "cost": "1"},
+        {"description": "Deal 5 damage twice.", "cost": "1"},
+        {"description": "Deal 3 damage to a random enemy 3 times.", "cost": "1"},
+        {"description": "Deal 5 damage to ALL enemies X times.", "cost": "X"},
+        {"description": "Gain 5 Block.", "cost": "1", "quantity": 2},
+        {"description": "Unplayable.", "cost": "-1"},
+    ]
+    damage, block = deck_output(cards, energy=3.0)
+    # 6 + 10 + 9 + 15 damage and 10 block over 1+1+1+3+2+1 energy.
+    assert damage == pytest.approx(40 / 9)
+    assert block == pytest.approx(10 / 9)
+
+
+def test_the_race_favours_the_deck_that_kills_faster():
+    weak = _combat()
+    strong = _combat()
+    weak["player"]["draw_pile"] = [{"description": "Deal 4 damage.", "cost": "1"}] * 10
+    strong["player"]["draw_pile"] = [{"description": "Deal 12 damage.", "cost": "1"}] * 10
+    assert features(strong)["race"] > features(weak)["race"]
+    assert features(strong)["deck_damage"] > features(weak)["deck_damage"]
+    assert LeafEvaluator()(strong) > LeafEvaluator()(weak)
+
+
+def test_a_signed_fit_keeps_each_weight_on_its_side_of_zero():
+    from sts2rl.search.evaluate import FEATURE_SIGNS
+
+    # Enemy Vulnerable appears only in lost fights: a free fit makes it a penalty.
+    rows = [{"bias": 1.0, "enemy_vulnerable": 1.0, "hp_ratio": 0.2}] * 20 + [{"bias": 1.0, "hp_ratio": 0.9}] * 20
+    won = [False] * 20 + [True] * 20
+    assert fit_weights(rows, won, signs=None)["enemy_vulnerable"] < 0
+    signed = fit_weights(rows, won)
+    assert signed["enemy_vulnerable"] == 0.0
+    assert signed["hp_ratio"] > 0
+    assert set(FEATURE_SIGNS) <= set(signed)
