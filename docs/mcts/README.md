@@ -1,0 +1,11 @@
+# MCTS 战斗搜索：每一步的记录
+
+计划：`C:\Users\Lucien2714\.claude\plans\progress-temporal-honey.md`。STS2RL 的修改在 `feat/mcts-combat` 分支，模拟器的修改在 STS2Simulator 的 `feat/state-snapshot` 分支。
+
+每个子步骤完成后都按"测试 → 检查 → 记录 → 提交"走完，并在这个目录里单独保存一份记录。
+
+| 步骤 | 记录 | 日期 |
+|---|---|---|
+| Step 0-pre：重放分支（保底方案） | [step0-pre-replay-branches.md](step0-pre-replay-branches.md) | 2026-10-02 |
+| Step 0a：内存快照（原地恢复） | [step0a-in-place-snapshots.md](step0a-in-place-snapshots.md) | 2026-10-03 |
+| Step 0b：reseed（重设隐藏信息） | [step0b-reseed.md](step0b-reseed.md) | 2026-10-03 |
