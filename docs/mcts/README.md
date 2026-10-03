@@ -10,3 +10,4 @@
 | Step 0a：内存快照（原地恢复） | [step0a-in-place-snapshots.md](step0a-in-place-snapshots.md) | 2026-10-03 |
 | Step 0b：reseed（重设隐藏信息） | [step0b-reseed.md](step0b-reseed.md) | 2026-10-03 |
 | 词表更新（插入的任务）：以游戏 v0.107.1 为准 | [vocabulary-update.md](vocabulary-update.md) | 2026-10-03 |
+| Step 1-a：MCTS 搜索器 | [step1a-search.md](step1a-search.md) | 2026-10-03 |
