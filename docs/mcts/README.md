@@ -12,3 +12,4 @@
 | 词表更新（插入的任务）：以游戏 v0.107.1 为准 | [vocabulary-update.md](vocabulary-update.md) | 2026-10-03 |
 | Step 1-a：MCTS 搜索器 | [step1a-search.md](step1a-search.md) | 2026-10-03 |
 | Step 1-b：拟合叶子评估 | [step1b-leaf-evaluator.md](step1b-leaf-evaluator.md) | 2026-10-03 |
+| Step 1-c：选搜索深度 | [step1c-depth.md](step1c-depth.md) | 2026-10-03 |

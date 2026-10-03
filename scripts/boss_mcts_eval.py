@@ -72,7 +72,8 @@ def make_mcts_player(args):
         result = play_fight(env, search, state, keep_decisions=True)
         states = [d.state for d in result.decisions] if args.record_features else []
         seconds = [d.seconds for d in result.decisions]
-        return result.final_state, result.last_combat_state, result.steps, seconds, states
+        simulations = [d.result.root.visits for d in result.decisions]
+        return result.final_state, result.last_combat_state, result.steps, seconds, states, simulations
 
     return play
 
@@ -119,7 +120,7 @@ def make_actor_player(args):
                 agent.discard_decision(lane=0)
             state = env.step(action).raw_state
             steps += 1
-        return state, last_combat, steps, [], []
+        return state, last_combat, steps, [], [], []
 
     return play
 
@@ -183,7 +184,7 @@ def main() -> int:
                 reseed = world_seed(seed, world)
                 started = time.perf_counter()
                 state = extract_raw_state(env.client.sim_reset("IRONCLAD", seed, start_act=1, start_boss=True, reseed=reseed))
-                final, last_combat, steps, seconds, states = play(env, state, reseed)
+                final, last_combat, steps, seconds, states, simulations = play(env, state, reseed)
                 won = fight_over(final) and not lost(final)
                 player = final.get("player") if isinstance(final.get("player"), Mapping) else {}
                 record = {
@@ -195,6 +196,7 @@ def main() -> int:
                     "hp": player.get("hp"), "max_hp": player.get("max_hp"),
                     "boss_hp_left": None if won else boss_health(last_combat),
                     "decision_seconds": seconds, "seconds": time.perf_counter() - started,
+                    "decision_simulations": simulations,
                 }
                 if states:
                     from sts2rl.search.evaluate import features
