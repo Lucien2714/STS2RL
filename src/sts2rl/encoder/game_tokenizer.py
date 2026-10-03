@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 import heapq
+import re
 from types import MappingProxyType
 from typing import Callable, Hashable, Mapping, Sequence
 
@@ -581,7 +582,7 @@ class GameTokenizer:
         for position, pet in enumerate(_records(player.get("pets"))):
             index = rows["pet"].append(
                 [
-                    self.vocabulary.lookup_first("monsters", _identity_keys(pet)),
+                    self.vocabulary.lookup_first("monsters", _monster_keys(pet)),
                     self.vocabulary.lookup("owner_types", "pet"),
                     self.vocabulary.lookup("entity_zones", "battle"),
                 ],
@@ -597,7 +598,7 @@ class GameTokenizer:
         for position, enemy in enumerate(_records(battle.get("enemies"))):
             index = rows["enemy"].append(
                 [
-                    self.vocabulary.lookup_first("monsters", _identity_keys(enemy, include_entity=False)),
+                    self.vocabulary.lookup_first("monsters", _monster_keys(enemy)),
                     self.vocabulary.lookup("owner_types", "enemy"),
                     self.vocabulary.lookup("entity_zones", "battle"),
                 ],
@@ -1296,6 +1297,25 @@ def _identity_keys(
     return tuple(
         value for value in (_text(record.get(key)) for key in keys) if value
     )
+
+
+_ENTITY_ORDINAL = re.compile(r"_\d+$")
+
+
+def _monster_keys(record: Mapping[str, object]) -> tuple[str, ...]:
+    """Return a combatant's identifiers: its id, its name, then its entity id's stem.
+
+    The API sends a combatant without an ``id``, so it resolved by display name
+    alone, and some names are not names: the Test Subject is "Test Subject #C55"
+    with a number that changes per encounter, and a Tough Egg shows as
+    "Hatchling".  The entity id is the monster's id plus an ordinal
+    (``TEST_SUBJECT_0``), so its stem is the id the table holds.  It is tried
+    last, so a combatant whose name resolved still lands where it did.
+    """
+    keys = _identity_keys(record, include_entity=False)
+    entity = _text(record.get("entity_id"))
+    stem = _ENTITY_ORDINAL.sub("", entity) if entity else None
+    return (*keys, stem) if stem else keys
 
 
 def _intent_numeric(label: object) -> tuple[NumericFeature, NumericFeature, NumericFeature]:

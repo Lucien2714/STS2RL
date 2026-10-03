@@ -15,6 +15,10 @@
     "description": "[gold]Card rewards[/gold] now contain only [blue]2[/blue] cards."
   },
   {
+    "id": "CHARACTER_CARDS",
+    "name": null
+  },
+  {
     "id": "CURSED_RUN",
     "name": "Cursed Run",
     "description": "At the start of each Act, add a random [red]Curse[/red] to your deck."

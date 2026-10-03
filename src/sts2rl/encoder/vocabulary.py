@@ -75,6 +75,21 @@ API_SPELLINGS: Mapping[str, Mapping[str, str]] = MappingProxyType(
     {"intents": MappingProxyType({"StatusCard": "STATUS"})}
 )
 
+# Suffixes the game appends to every id of a table and the bundled tables drop.
+#
+# The game names powers after their classes (``FLEX_POTION_POWER``) and spire-codex
+# strips the suffix (``FLEX_POTION``), so a live power id never matched its row and
+# resolved only through the display-name fallback.  That fallback is fragile exactly
+# where it matters: spire-codex titles five powers "Temporary Strength" and eight
+# "Temporary Strength Down", every such alias is ambiguous and dropped, and fifteen
+# live powers -- Flex Potion's and Speed Potion's among them -- read as ``<unknown>``.
+# Measured against the v0.107.1 build's own list (STS2Simulator --export-vocabulary).
+#
+# Like the other mechanisms this is additive: it is tried only when the id and its
+# aliases miss, so nothing that resolved before resolves anywhere else.  It is part of
+# the fingerprint, because it reroutes live ids onto embedding rows.
+API_SUFFIXES: Mapping[str, tuple[str, ...]] = MappingProxyType({"powers": ("_POWER",)})
+
 
 @dataclass(frozen=True)
 class TokenVocabulary:
@@ -300,6 +315,7 @@ class GameVocabulary:
                 "status",
                 "curse",
                 "quest",
+                "none",
             ),
             "rarities": (
                 "ancient",
@@ -334,6 +350,9 @@ class GameVocabulary:
                 "treasure",
                 "boss",
                 "unknown",
+                # MapPointType values the v0.107.1 build has beyond the original list.
+                "ancient",
+                "unassigned",
             ),
             "target_types": (
                 "none",
@@ -345,6 +364,9 @@ class GameVocabulary:
                 "allallies",
                 "anyplayer",
                 "allplayers",
+                # TargetType values the v0.107.1 build has beyond the original list.
+                "osty",
+                "targetednocreature",
             ),
             "entity_types": (
                 "state",
@@ -394,7 +416,7 @@ class GameVocabulary:
                 "shop",
                 "treasure",
             ),
-            "power_types": ("buff", "debuff"),
+            "power_types": ("buff", "debuff", "none"),
             "owner_types": ("player", "enemy", "pet"),
             "reward_types": (
                 "gold",
@@ -412,16 +434,37 @@ class GameVocabulary:
                 "simple_select",
                 "choose",
                 "bundle",
+                # The STS2MCP mod names four card-grid screens itself and sends any other
+                # under its class name; hand selections send their mode.
+                "NCombatPileCardSelectScreen",
+                "NDeckEnchantSelectScreen",
+                "upgrade_select",
             ),
+            # The v0.107.1 build's options are CLONE, COOK, DIG, HATCH, HEAL, KINDLE,
+            # LIFT, MEND and SMITH (STS2Simulator --export-vocabulary). HEAL already
+            # reaches "rest" through its title, so it gets no row of its own; recall
+            # and toke are from older builds and are kept, since an unused row is free.
             "rest_options": (
+                "clone",
+                "cook",
                 "dig",
+                "hatch",
+                "kindle",
                 "lift",
+                "mend",
                 "recall",
                 "rest",
                 "smith",
                 "toke",
             ),
-            "crystal_item_types": ("CrystalSphereGold",),
+            # Every CrystalSphereItem in the build; the mod sends the item's class name.
+            "crystal_item_types": (
+                "CrystalSphereCardReward",
+                "CrystalSphereCurse",
+                "CrystalSphereGold",
+                "CrystalSpherePotion",
+                "CrystalSphereRelic",
+            ),
             "crystal_tools": ("none", "big", "small"),
         }
     )
@@ -434,7 +477,7 @@ class GameVocabulary:
         compare=False,
     )
 
-    FINGERPRINT_VERSION: ClassVar[int] = 3
+    FINGERPRINT_VERSION: ClassVar[int] = 4
 
     @classmethod
     def from_bundled_data(
@@ -516,6 +559,19 @@ class GameVocabulary:
     def lookup(self, table_name: str, token: str | None) -> int:
         """Look up an ID or bundled display-name alias in a named table."""
         normalized_name = normalize_data_type(table_name)
+        result = self._lookup_exact(normalized_name, token)
+        if result != UNKNOWN_INDEX or token is None:
+            return result
+        key = normalize_token(str(token))
+        for suffix in API_SUFFIXES.get(normalized_name, ()):
+            stem = key.removesuffix(normalize_token(suffix))
+            if stem and stem != key:
+                result = self._lookup_exact(normalized_name, stem)
+                if result != UNKNOWN_INDEX:
+                    return result
+        return UNKNOWN_INDEX
+
+    def _lookup_exact(self, normalized_name: str, token: str | None) -> int:
         result = self.table(normalized_name).lookup(token)
         if result != UNKNOWN_INDEX or token is None:
             return result
@@ -578,6 +634,9 @@ class GameVocabulary:
             "api_spellings": {
                 name: dict(sorted(spellings.items()))
                 for name, spellings in sorted(API_SPELLINGS.items())
+            },
+            "api_suffixes": {
+                name: list(suffixes) for name, suffixes in sorted(API_SUFFIXES.items())
             },
             "event_options": [
                 [normalize_token(event_id), normalize_token(option_id)]

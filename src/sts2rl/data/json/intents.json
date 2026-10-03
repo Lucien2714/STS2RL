@@ -54,6 +54,10 @@
     "image_url": "/static/images/intents/heal.png"
   },
   {
+    "id": "HIDDEN",
+    "name": "Hidden"
+  },
+  {
     "id": "SLEEP",
     "name": "Sleeping",
     "description": "This enemy is doing nothing this turn.",

@@ -262,12 +262,12 @@ def test_camel_case_enums_resolve_without_breaking_concatenated_tokens():
 
 
 def test_lookup_first_falls_back_from_an_unrecognized_id_to_the_name():
-    """Statuses arrive as STRENGTH_POWER against a table holding STRENGTH."""
+    """An id the table cannot reach still resolves through the display name."""
     vocabulary = GameVocabulary.from_bundled_data()
 
-    assert vocabulary.lookup("powers", "STRENGTH_POWER") == UNKNOWN_INDEX
+    assert vocabulary.lookup("powers", "NOT_A_REAL_POWER") == UNKNOWN_INDEX
     assert vocabulary.lookup_first(
-        "powers", ["STRENGTH_POWER", "Strength"]
+        "powers", ["NOT_A_REAL_POWER", "Strength"]
     ) == vocabulary.lookup("powers", "STRENGTH")
 
 
@@ -332,6 +332,67 @@ def test_the_fingerprint_covers_the_api_spellings(monkeypatch):
         "API_SPELLINGS",
         MappingProxyType({"intents": MappingProxyType({"Sleepy": "SLEEP"})}),
     )
+
+    after = GameVocabulary.from_bundled_data().fingerprint()
+
+    assert before != after
+
+
+def test_the_games_power_ids_resolve_by_id_despite_the_dropped_suffix():
+    """The game sends FLEX_POTION_POWER where the table holds FLEX_POTION.
+
+    The display-name fallback cannot bridge it: five powers are titled
+    "Temporary Strength", so that alias is ambiguous and dropped, and the
+    power read as unknown.
+    """
+    vocabulary = GameVocabulary.from_bundled_data()
+
+    for live, row in [
+        ("FLEX_POTION_POWER", "FLEX_POTION"),
+        ("SPEED_POTION_POWER", "SPEED_POTION"),
+        ("STRENGTH_POWER", "STRENGTH"),
+    ]:
+        assert vocabulary.lookup("powers", live) == vocabulary.lookup("powers", row)
+        assert vocabulary.lookup("powers", live) != UNKNOWN_INDEX
+
+
+def test_two_powers_sharing_a_title_stay_apart():
+    """Both Monarch's Gaze powers present the same title; their ids differ."""
+    vocabulary = GameVocabulary.from_bundled_data()
+
+    main = vocabulary.lookup_first("powers", ["MONARCHS_GAZE_POWER", "Monarch's Gaze"])
+    debuff = vocabulary.lookup_first(
+        "powers", ["MONARCHS_GAZE_STRENGTH_DOWN_POWER", "Monarch's Gaze"]
+    )
+
+    assert debuff == vocabulary.lookup("powers", "MONARCHS_GAZE_STRENGTH_DOWN")
+    assert main != debuff
+
+
+def test_the_suffix_is_only_a_fallback():
+    """An id that resolves as sent never has its suffix stripped."""
+    vocabulary = GameVocabulary.from_bundled_data()
+
+    assert vocabulary.lookup("cards", "STRIKE_IRONCLAD_POWER") == UNKNOWN_INDEX
+    assert vocabulary.lookup("powers", "_POWER") == UNKNOWN_INDEX
+
+
+def test_the_current_builds_rest_options_and_intents_resolve():
+    vocabulary = GameVocabulary.from_bundled_data()
+
+    for option in ("CLONE", "COOK", "HATCH", "KINDLE", "MEND"):
+        assert vocabulary.lookup("rest_options", option) != UNKNOWN_INDEX
+    # HEAL keeps reaching the row it always reached, through its title.
+    assert vocabulary.lookup_first("rest_options", ["HEAL", "Rest"]) == vocabulary.lookup(
+        "rest_options", "rest"
+    )
+    assert vocabulary.lookup("intents", "Hidden") != UNKNOWN_INDEX
+    assert vocabulary.lookup("modifiers", "CHARACTER_CARDS") != UNKNOWN_INDEX
+
+
+def test_the_fingerprint_covers_the_api_suffixes(monkeypatch):
+    before = GameVocabulary.from_bundled_data().fingerprint()
+    monkeypatch.setattr(vocabulary_module, "API_SUFFIXES", MappingProxyType({}))
 
     after = GameVocabulary.from_bundled_data().fingerprint()
 

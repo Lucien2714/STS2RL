@@ -820,3 +820,33 @@ def test_pile_grouping_separates_upgraded_and_enchanted_copies(
     assert sorted(cards.numeric[draw, count].tolist()) == pytest.approx(
         sorted([math.log1p(2), math.log1p(1), math.log1p(1)])
     )
+
+
+def test_a_combatant_whose_name_is_not_its_name_resolves_by_entity_id(
+    tokenizer: GameTokenizer, vocabulary: GameVocabulary
+):
+    """The API sends no id for a combatant, and some display names change.
+
+    Test Subject shows a per-encounter number ("Test Subject #C55") and a Tough
+    Egg shows as "Hatchling"; the entity id's stem is the monster's id.
+    """
+    state = {
+        "state_type": "monster",
+        "player": _base_player(),
+        "battle": {
+            "enemies": [
+                {"entity_id": "TEST_SUBJECT_0", "name": "Test Subject #C55", "hp": 91, "max_hp": 100},
+                {"entity_id": "TOUGH_EGG_1", "name": "Hatchling", "hp": 19, "max_hp": 19},
+                {"entity_id": "CEREMONIAL_BEAST_2", "name": "Ceremonial Beast", "hp": 252, "max_hp": 252},
+            ]
+        },
+    }
+
+    enemies = tokenizer.tokenize_state(GameObservation(state)).entities["enemy"]
+
+    assert enemies.categorical[:, 0].tolist() == [
+        vocabulary.lookup("monsters", "TEST_SUBJECT"),
+        vocabulary.lookup("monsters", "TOUGH_EGG"),
+        vocabulary.lookup("monsters", "CEREMONIAL_BEAST"),
+    ]
+    assert UNKNOWN_INDEX not in enemies.categorical[:, 0].tolist()
