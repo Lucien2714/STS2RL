@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import argparse
+import json
+import random
 from collections.abc import Callable, Sequence
 from contextlib import ExitStack
 from dataclasses import replace
@@ -15,6 +17,7 @@ from sts2rl.agents import CandidatePPOAgent, EpisodeRunner, PPOConfig
 from sts2rl.encoder import EncoderConfig, GameEncoder, GameTokenizer, GameVocabulary
 from sts2rl.env import GameEnv, ResetSpec
 from sts2rl.env.game_env import BACKENDS
+from sts2rl.search import CombatSearch, LeafEvaluator, MctsConfig, SearchCombatAgent, SearchDecisionRecorder
 from sts2rl.training.bc import load_bc_encoder_state
 from sts2rl.training.checkpoint import CheckpointManager, LoadedCheckpoint
 from sts2rl.training.config import (
@@ -26,6 +29,8 @@ from sts2rl.training.config import (
 )
 from sts2rl.training.metrics import EpisodeMetrics, TrainingMetricsWriter
 from sts2rl.training.trainer import Trainer
+
+DEFAULT_SEARCH_WEIGHTS = Path(__file__).resolve().parents[1] / "search" / "weights" / "act1_boss_step1b.json"
 
 
 T = TypeVar("T")
@@ -54,6 +59,22 @@ def create_parser() -> argparse.ArgumentParser:
             "to a run that never happened. Cannot be combined with --resume."
         ),
     )
+    parser.add_argument(
+        "--search-combat",
+        action="store_true",
+        default=None,
+        help=(
+            "step 2 of docs/mcts: the combat search plays fights on each lane's "
+            "simulator, PPO learns everything else (needs --backend sim)"
+        ),
+    )
+    parser.add_argument(
+        "--search-rooms",
+        help="comma-separated rooms whose fights are searched (default monster,elite,boss)",
+    )
+    parser.add_argument("--search-simulations", type=int, help="simulations per searched decision (default 50)")
+    parser.add_argument("--search-depth", type=int, help="turns the search tree reaches (default 2)")
+    parser.add_argument("--search-weights", help="leaf evaluator weights (JSON); default: the step 1-b fit")
     parser.add_argument(
         "--backend",
         choices=BACKENDS,
@@ -245,25 +266,32 @@ def run_training(args: argparse.Namespace) -> int:
     ) as metrics_writer:
         base_urls = plan.training.client_base_urls()
         with ExitStack() as clients:
+            envs = [
+                clients.enter_context(
+                    GameEnv(
+                        base_url=base_url,
+                        timeout=plan.training.timeout,
+                        action_delay_seconds=plan.training.action_delay_seconds,
+                        backend=plan.training.backend,
+                    )
+                )
+                for base_url in base_urls
+            ]
+            recorder = (
+                SearchDecisionRecorder(plan.training.run_dir / "search" / "decisions.jsonl.gz")
+                if plan.training.search_combat
+                else None
+            )
             runners = [
                 EpisodeRunner(
-                    clients.enter_context(
-                        GameEnv(
-                            base_url=base_url,
-                            timeout=plan.training.timeout,
-                            action_delay_seconds=(
-                                plan.training.action_delay_seconds
-                            ),
-                            backend=plan.training.backend,
-                        )
-                    ),
+                    env,
                     # Each client gets its own lane so the agent keeps their
                     # trajectories -- and therefore their advantages -- apart.
-                    agent.lane_view(lane),
+                    _lane_agent(agent, lane, env, plan, recorder),
                     max_steps=plan.training.max_steps_per_episode,
                     max_state_refreshes=plan.training.max_state_refreshes,
                 )
-                for lane, base_url in enumerate(base_urls)
+                for lane, env in enumerate(envs)
             ]
             trainer = Trainer(
                 runners,
@@ -278,6 +306,34 @@ def run_training(args: argparse.Namespace) -> int:
             )
             trainer.train()
     return 0
+
+
+def _lane_agent(agent, lane: int, env: GameEnv, plan: TrainingPlan, recorder):
+    """The lane's agent: PPO alone, or PPO with the combat search playing fights."""
+    view = agent.lane_view(lane)
+    if not plan.training.search_combat:
+        return view
+    weights_path = (
+        Path(plan.training.search_weights)
+        if plan.training.search_weights
+        else DEFAULT_SEARCH_WEIGHTS
+    )
+    search = CombatSearch(
+        MctsConfig(
+            simulations=plan.training.search_simulations,
+            turn_depth=plan.training.search_turn_depth,
+        ),
+        evaluator=LeafEvaluator(json.loads(weights_path.read_text(encoding="utf-8"))),
+        rng=random.Random(plan.training.torch_seed * 1000 + lane),
+    )
+    return SearchCombatAgent(
+        view,
+        env,
+        search,
+        rooms=frozenset(plan.training.search_rooms),
+        recorder=recorder,
+        run_label=f"lane{lane}",
+    )
 
 
 def _new_plan(args: argparse.Namespace) -> TrainingPlan:
@@ -325,6 +381,15 @@ def _new_plan(args: argparse.Namespace) -> TrainingPlan:
                 if getattr(args, "init_encoder", None) is None
                 else str(args.init_encoder)
             ),
+            search_combat=bool(args.search_combat),
+            search_rooms=(
+                tuple(room.strip() for room in args.search_rooms.split(",") if room.strip())
+                if args.search_rooms
+                else training_defaults.search_rooms
+            ),
+            search_simulations=_or_default(args.search_simulations, training_defaults.search_simulations),
+            search_turn_depth=_or_default(args.search_depth, training_defaults.search_turn_depth),
+            search_weights=args.search_weights,
             tensorboard_enabled=(
                 training_defaults.tensorboard_enabled
                 if args.no_tensorboard is None
@@ -413,6 +478,10 @@ def _resumed_plan(
             "rollout_size": saved.ppo.rollout_size,
             "update_epochs": saved.ppo.update_epochs,
             "backend": saved.training.backend,
+            "search_combat": saved.training.search_combat,
+            "search_simulations": saved.training.search_simulations,
+            "search_depth": saved.training.search_turn_depth,
+            "search_weights": saved.training.search_weights,
             "sim_mode": saved.reset.sim_mode,
             "sim_max_fights": saved.reset.sim_max_fights,
             "sim_start_act": saved.reset.sim_start_act,
@@ -432,6 +501,7 @@ def _resumed_plan(
             "ports": ",".join(str(port) for port in saved.training.ports),
             "holdout_seeds": ",".join(saved.training.holdout_seeds),
             "modifiers": ",".join(saved.reset.modifiers),
+            "search_rooms": ",".join(saved.training.search_rooms),
         },
         normalize=lambda value: ",".join(_seed_list(value, ()) or ()),
     )

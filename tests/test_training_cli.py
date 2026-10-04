@@ -435,3 +435,19 @@ def test_a_config_saved_before_the_field_existed_still_loads(tmp_path: Path):
 def test_an_empty_init_encoder_is_refused(tmp_path: Path):
     with pytest.raises(ValueError, match="init_encoder"):
         TrainingConfig(run_dir=tmp_path, init_encoder="")
+
+
+def test_search_options_reach_a_new_plan(tmp_path: Path):
+    args = cli.create_parser().parse_args(
+        ["--run-dir", str(tmp_path / "run"), "--backend", "sim", "--seed-pool", "AAAA", "--search-combat",
+         "--search-rooms", "elite,boss", "--search-simulations", "80", "--search-depth", "1"]
+    )
+    training = cli._new_plan(args).training
+    assert training.search_combat is True
+    assert training.search_rooms == ("elite", "boss")
+    assert (training.search_simulations, training.search_turn_depth) == (80, 1)
+
+
+def test_search_is_off_unless_asked(tmp_path: Path):
+    args = cli.create_parser().parse_args(["--run-dir", str(tmp_path / "run")])
+    assert cli._new_plan(args).training.search_combat is False

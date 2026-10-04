@@ -14,3 +14,4 @@
 | Step 1-b：拟合叶子评估 | [step1b-leaf-evaluator.md](step1b-leaf-evaluator.md) | 2026-10-03 |
 | Step 1-c：选搜索深度 | [step1c-depth.md](step1c-depth.md) | 2026-10-03 |
 | Step 1-d：全量实验 | [step1d-full-experiment.md](step1d-full-experiment.md) | 2026-10-03 |
+| Step 2-a/b/c：分层 agent 与冒烟测试 | [step2abc-layered-agent.md](step2abc-layered-agent.md) | 2026-10-03 |

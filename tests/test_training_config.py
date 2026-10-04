@@ -159,3 +159,28 @@ def test_ports_survive_a_serialization_round_trip():
     restored = TrainingPlan.from_dict(json.loads(json.dumps(plan.to_dict())))
 
     assert restored.training.ports == (15526, 15527)
+
+
+def test_searching_fights_needs_the_simulator(tmp_path: Path):
+    with pytest.raises(ValueError, match="backend sim"):
+        TrainingConfig(run_dir=tmp_path, search_combat=True)
+    config = TrainingConfig(run_dir=tmp_path, backend="sim", search_combat=True, search_rooms=["elite", "boss"])
+    assert config.search_rooms == ("elite", "boss")
+    with pytest.raises(ValueError, match="search_rooms"):
+        TrainingConfig(run_dir=tmp_path, backend="sim", search_combat=True, search_rooms=("shop",))
+
+
+def test_search_settings_survive_a_round_trip(tmp_path: Path):
+    config = TrainingConfig(
+        run_dir=tmp_path, backend="sim", search_combat=True, search_simulations=200,
+        search_turn_depth=3, search_weights="w.json",
+    )
+    restored = TrainingConfig.from_dict(json.loads(json.dumps(config.to_dict())))
+    assert restored == config
+
+
+def test_a_plan_saved_before_search_existed_loads_without_it(tmp_path: Path):
+    values = TrainingConfig(run_dir=tmp_path).to_dict()
+    for name in ("search_combat", "search_rooms", "search_simulations", "search_turn_depth", "search_weights"):
+        values.pop(name)
+    assert TrainingConfig.from_dict(values).search_combat is False

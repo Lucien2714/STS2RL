@@ -54,6 +54,8 @@ class _PendingDecision:
     action_index: int
     log_probability: Tensor
     value: Tensor  # Raw reward units, fixed at sampling time.
+    # False for an action another policy chose (see ``choose_external``).
+    policy_trainable: bool = True
 
 
 @dataclass
@@ -67,6 +69,7 @@ class _RolloutStep:
     done: bool
     episode_end: bool = False
     bootstrap_value: Tensor | None = None  # Raw value of a truncated final state.
+    policy_trainable: bool = True
 
 
 @dataclass
@@ -146,6 +149,9 @@ class LaneView(Agent):
     def choose_action(self, state: GameObservation) -> GameAction:
         return self.agent.choose_action(state, lane=self.lane)
 
+    def choose_external(self, state: GameObservation, action: GameAction) -> GameAction:
+        return self.agent.choose_external(state, action, lane=self.lane)
+
     def observe(self, transition: Transition) -> None:
         self.agent.observe(transition, lane=self.lane)
 
@@ -154,6 +160,11 @@ class LaneView(Agent):
 
     def finish_episode(self, final_state: GameObservation, truncated: bool) -> None:
         self.agent.finish_episode(final_state, truncated, lane=self.lane)
+
+
+def _policy_step(step: _RolloutStep) -> bool:
+    """Whether a step trains the policy: a real choice, made by this policy."""
+    return step.policy_trainable and len(step.decision.actions) > 1
 
 
 class CandidatePPOAgent(Agent):
@@ -248,6 +259,44 @@ class CandidatePPOAgent(Agent):
                 )
         return candidates[action_index]
 
+    def choose_external(
+        self, state: GameObservation, action: GameAction, lane: int = 0
+    ) -> GameAction:
+        """Take an action another policy chose, and learn its value but not its choice.
+
+        The combat search plays fights; PPO still owns everything around them.
+        Its steps belong in the trajectory -- GAE has to walk through the fight
+        for the reward after it to reach the map choice before it, and the
+        critic is what should learn what a deck is worth once the fight is
+        played well -- but the action is not a sample from this policy, so it
+        has no log probability to form a ratio with and gets no policy
+        gradient. It is handled exactly like a forced step: in GAE and the
+        critic loss, out of the policy loss and the advantage normalisation.
+        """
+        entry = self._lane(lane)
+        if entry.pending is not None:
+            raise RuntimeError(
+                "observe() must be called before choosing another action"
+            )
+        candidates = self.action_provider.require_candidates(state.raw_state)
+        wanted = action.to_dict()
+        matches = [i for i, candidate in enumerate(candidates) if candidate.to_dict() == wanted]
+        if not matches:
+            raise ValueError(f"{action} is not one of this state's candidates")
+        action_index = matches[0]
+        if not self.training_enabled:
+            return candidates[action_index]
+        decision = self.tokenizer.tokenize_decision(state, candidates)
+        with self._lock:
+            entry.pending = _PendingDecision(
+                decision=decision,
+                action_index=action_index,
+                log_probability=torch.zeros(()),
+                value=self._raw_value(state),
+                policy_trainable=False,
+            )
+        return candidates[action_index]
+
     def observe(self, transition: Transition, lane: int = 0) -> None:
         entry = self._lane(lane)
         if not self.training_enabled:
@@ -269,6 +318,7 @@ class CandidatePPOAgent(Agent):
                     reward=float(transition.reward),
                     done=transition.done,
                     episode_end=transition.done,
+                    policy_trainable=entry.pending.policy_trainable,
                 )
             )
             entry.pending = None
@@ -441,7 +491,7 @@ class CandidatePPOAgent(Agent):
             self._return_scale.update(returns)
             returns = returns / self._return_scale.scale
             policy_mask = torch.tensor(
-                [len(step.decision.actions) > 1 for step in steps],
+                [_policy_step(step) for step in steps],
                 dtype=torch.bool,
                 device=self.device,
             )
@@ -450,8 +500,9 @@ class CandidatePPOAgent(Agent):
                 policy_advantages = (policy_advantages - policy_advantages.mean()) / (
                     policy_advantages.std(unbiased=False) + 1e-8
                 )
-            # Forced actions participate in per-environment-step GAE and in
-            # critic training, but not in the policy's normalization or loss.
+            # Forced and external actions participate in per-environment-step
+            # GAE and in critic training, but not in the policy's normalization
+            # or loss.
             advantages = torch.zeros_like(advantages)
             advantages[policy_mask] = policy_advantages
 
@@ -490,7 +541,7 @@ class CandidatePPOAgent(Agent):
         entropies: list[Tensor] = []
         for index in indices:
             step = steps[index]
-            if len(step.decision.actions) == 1:
+            if not _policy_step(step):
                 value = self.game_encoder.value(step.decision.state.to(self.device))
                 value_losses.append(F.mse_loss(value, returns[index]))
                 continue

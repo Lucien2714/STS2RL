@@ -130,6 +130,15 @@ class TrainingConfig:
     # every other field are different experiments if one started from cloned
     # weights, and nothing else in the run directory would say so.
     init_encoder: str | None = None
+    # Step 2 of docs/mcts: the combat search plays these rooms' fights on each
+    # lane's simulator and PPO learns only the rest (the critic still sees the
+    # fights). Recorded and refused on resume like the backend: a run whose
+    # fights were searched is a different experiment from one whose were not.
+    search_combat: bool = False
+    search_rooms: tuple[str, ...] = ("monster", "elite", "boss")
+    search_simulations: int = 50
+    search_turn_depth: int = 2
+    search_weights: str | None = None
 
     def __post_init__(self) -> None:
         for name in (
@@ -201,6 +210,18 @@ class TrainingConfig:
                 f"{sorted(overlap)}"
             )
         object.__setattr__(self, "run_dir", Path(self.run_dir))
+        rooms = tuple(self.search_rooms)
+        object.__setattr__(self, "search_rooms", rooms)
+        if not isinstance(self.search_combat, bool):
+            raise TypeError("search_combat must be a boolean")
+        if self.search_combat and self.backend != "sim":
+            raise ValueError("searching fights needs --backend sim: only the simulator can branch")
+        if not rooms or any(room not in ("monster", "elite", "boss") for room in rooms):
+            raise ValueError("search_rooms must name monster, elite or boss rooms")
+        for name in ("search_simulations", "search_turn_depth"):
+            value = getattr(self, name)
+            if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+                raise ValueError(f"{name} must be a positive integer")
 
     def validate_runtime_device(self) -> torch.device:
         """Resolve the configured device and reject unavailable CUDA devices."""
@@ -216,6 +237,7 @@ class TrainingConfig:
         result["ports"] = list(self.ports)
         result["training_seeds"] = list(self.training_seeds)
         result["holdout_seeds"] = list(self.holdout_seeds)
+        result["search_rooms"] = list(self.search_rooms)
         return result
 
     def client_base_urls(self) -> tuple[str, ...]:

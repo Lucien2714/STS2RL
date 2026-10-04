@@ -780,3 +780,62 @@ def test_an_initial_forced_reward_is_not_added_to_a_later_decision():
 
     assert len(agent._lane(0).steps) == 3
     assert [step.reward for step in agent._lane(0).steps] == [1.0, 4.0, 2.0]
+
+
+def _external_step(agent, index: int, *, reward: float, done: bool) -> None:
+    observation = _observation(_map_state(3))
+    candidates = agent.action_provider.require_candidates(observation.raw_state)
+    agent.choose_external(observation, candidates[index])
+    agent.observe(
+        Transition(
+            state=observation,
+            action=candidates[index],
+            reward=reward,
+            next_state=_observation(_map_state(3)),
+            done=done,
+        )
+    )
+
+
+def test_an_external_action_is_recorded_for_the_critic_only():
+    torch.manual_seed(51)
+    agent = _agent(rollout_size=50)
+    _external_step(agent, 2, reward=1.5, done=False)
+
+    step = agent._lane(0).steps[0]
+    assert step.action_index == 2
+    assert step.policy_trainable is False
+    assert len(step.decision.actions) == 3
+    assert step.reward == 1.5
+    assert agent.environment_steps == 1
+
+
+def test_external_actions_train_the_critic_but_never_the_policy():
+    torch.manual_seed(52)
+    agent = _agent(rollout_size=4, update_epochs=1)
+    for index in range(4):
+        _external_step(agent, index % 3, reward=2.0, done=index == 3)
+
+    metrics = agent.last_update
+    assert metrics["policy_loss"] == 0.0
+    assert metrics["entropy"] == 0.0
+    assert metrics["value_loss"] > 0.0
+
+
+def test_an_external_action_must_be_one_of_the_candidates():
+    agent = _agent()
+    observation = _observation(_map_state(2))
+    foreign = agent.action_provider.require_candidates(_observation(_map_state(3)).raw_state)[2]
+    with pytest.raises(ValueError):
+        agent.choose_external(observation, foreign)
+    assert agent._lane(0).pending is None
+
+
+def test_a_lane_view_passes_external_actions_to_its_lane():
+    agent = _agent()
+    view = agent.lane_view(3)
+    observation = _observation(_map_state(2))
+    action = agent.action_provider.require_candidates(observation.raw_state)[1]
+    assert view.choose_external(observation, action).to_dict() == action.to_dict()
+    assert agent._lane(3).pending is not None
+    assert agent._lane(0).pending is None
