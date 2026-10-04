@@ -116,7 +116,10 @@ class SearchCombatAgent(Agent):
         recorder: SearchDecisionRecorder | None = None,
         run_label: str = "lane",
     ) -> None:
-        self.lane = lane
+        self.inner = lane
+        # The trainer reads ``agent.lane`` as the lane's number (as on a LaneView),
+        # to key its failure handling and its metrics: it must be that int.
+        self.lane = getattr(lane, "lane", 0)
         self.sim = SimulatorSearchEnv(env)
         self.search = search
         self.rooms = rooms
@@ -134,7 +137,7 @@ class SearchCombatAgent(Agent):
         self._step = 0
         self._in_fight = False
         self._node = self._node_before = None
-        self.lane.reset(initial_state)
+        self.inner.reset(initial_state)
 
     def choose_action(self, state: GameObservation) -> GameAction:
         raw = state.raw_state
@@ -148,7 +151,7 @@ class SearchCombatAgent(Agent):
             self._in_fight = False
         if not self._in_fight:
             self._node = self._node_before = None
-            return self.lane.choose_action(state)
+            return self.inner.choose_action(state)
 
         candidates = self.search.candidates(raw)
         self._node_before = self._node
@@ -167,18 +170,18 @@ class SearchCombatAgent(Agent):
             action = _from_subtree(self.search, self._node, raw, candidates)
         if self._node is not None:
             self._node = self._node.children.get(self.search.key(raw, action))
-        return self.lane.choose_external(state, action)
+        return self.inner.choose_external(state, action)
 
     def observe(self, transition: Transition) -> None:
-        self.lane.observe(transition)
+        self.inner.observe(transition)
 
     def discard_decision(self) -> None:
         # The action was refused and the screen did not move: the tree did not move
         # either, so the retry must answer from where it stood.
         self._node = self._node_before
-        self.lane.discard_decision()
+        self.inner.discard_decision()
 
     def finish_episode(self, final_state: GameObservation, truncated: bool) -> None:
         self._in_fight = False
         self._node = self._node_before = None
-        self.lane.finish_episode(final_state, truncated)
+        self.inner.finish_episode(final_state, truncated)

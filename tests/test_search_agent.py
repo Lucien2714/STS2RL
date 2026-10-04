@@ -161,3 +161,14 @@ def test_the_wrapper_passes_learning_calls_through():
     wrapped.observe(transition)
     wrapped.finish_episode(obs(MAP), truncated=True)
     assert lane.calls[-2:] == [("observe", None), ("finish", True)]
+
+
+def test_the_wrapper_reports_its_lane_number_like_a_lane_view():
+    """The trainer keys failure handling and metrics on ``runner.agent.lane``."""
+
+    class NumberedLane(FakeLane):
+        lane = 4
+
+    wrapped = SearchCombatAgent(NumberedLane(), env=object(), search=FakeSearch())
+    assert wrapped.lane == 4
+    assert isinstance(wrapped.lane, int)
