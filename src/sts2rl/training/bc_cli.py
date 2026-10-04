@@ -42,6 +42,12 @@ def create_parser() -> argparse.ArgumentParser:
     parser.add_argument("--holdout-fraction", type=float, default=0.2)
     parser.add_argument("--patience", type=int, default=10)
     parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument(
+        "--target-temperature",
+        type=float,
+        default=1.0,
+        help="sharpen soft labels as shares ** (1/T); T < 1 concentrates them (default 1: unchanged)",
+    )
     parser.add_argument("--device", default="cpu")
     parser.add_argument("--hidden-dim", type=int, default=EncoderConfig().hidden_dim)
     parser.add_argument(
@@ -75,6 +81,7 @@ def run_bc(args: argparse.Namespace) -> int:
             holdout_fraction=args.holdout_fraction,
             patience=args.patience,
             seed=args.seed,
+            target_temperature=args.target_temperature,
         )
         encoder_config = EncoderConfig(
             hidden_dim=args.hidden_dim,

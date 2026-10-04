@@ -89,15 +89,26 @@ def make_actor_player(args):
     from sts2rl.training.checkpoint import CheckpointManager
 
     vocabulary = GameVocabulary.from_bundled_data()
-    manager = CheckpointManager(Path(args.run_dir), vocabulary)
-    loaded = manager.load(args.checkpoint, map_location="cpu")
-    agent = CandidatePPOAgent(
-        tokenizer=GameTokenizer(vocabulary),
-        game_encoder=GameEncoder(vocabulary, loaded.plan.encoder),
-        config=loaded.plan.ppo,
-        device="cpu",
-    )
-    manager.restore_agent(loaded, agent, loaded.plan)
+    if args.bc_artifact:
+        # A cloned actor (sts2rl-bc-train): only encoder weights, no PPO state.
+        from sts2rl.encoder import EncoderConfig
+        from sts2rl.training.bc import load_bc_encoder_state
+
+        encoder = GameEncoder(vocabulary, EncoderConfig())
+        encoder.load_state_dict(
+            load_bc_encoder_state(args.bc_artifact, vocabulary=vocabulary, encoder_config=EncoderConfig())
+        )
+        agent = CandidatePPOAgent(tokenizer=GameTokenizer(vocabulary), game_encoder=encoder, device="cpu")
+    else:
+        manager = CheckpointManager(Path(args.run_dir), vocabulary)
+        loaded = manager.load(args.checkpoint, map_location="cpu")
+        agent = CandidatePPOAgent(
+            tokenizer=GameTokenizer(vocabulary),
+            game_encoder=GameEncoder(vocabulary, loaded.plan.encoder),
+            config=loaded.plan.ppo,
+            device="cpu",
+        )
+        manager.restore_agent(loaded, agent, loaded.plan)
     agent.train(args.sample)
     lock = threading.Lock()
     provider = LegalActionProvider()
@@ -153,6 +164,7 @@ def main() -> int:
                         help="mcts: search the real hidden state instead of reseeded worlds (an upper bound)")
     parser.add_argument("--record-features", action="store_true")
     parser.add_argument("--run-dir", help="actor: the run whose checkpoint plays")
+    parser.add_argument("--bc-artifact", help="actor: a cloned actor (bc_best.pt) instead of a run's checkpoint")
     parser.add_argument("--checkpoint", default="latest")
     parser.add_argument("--sample", action="store_true", help="actor: sample instead of argmax")
     args = parser.parse_args()

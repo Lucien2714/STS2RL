@@ -60,6 +60,11 @@ class BCConfig:
     # See ``BCTrainer.run``.
     patience: int = 10
     seed: int = 0
+    # Soft labels are sharpened as shares ** (1 / T), renormalised. A search with
+    # few simulations spreads its visits widely, so a policy cloned at T = 1 is
+    # right at its argmax and poor when sampled -- and PPO samples. T < 1 keeps
+    # the order of the search's preferences but concentrates them.
+    target_temperature: float = 1.0
 
     def __post_init__(self) -> None:
         for name in ("epochs", "minibatch_size", "patience"):
@@ -76,6 +81,8 @@ class BCConfig:
             raise ValueError("holdout_fraction must be between 0 and 1")
         if isinstance(self.seed, bool) or not isinstance(self.seed, int):
             raise ValueError("seed must be an integer")
+        if not self.target_temperature > 0:
+            raise ValueError("target_temperature must be positive")
 
 
 @dataclass
@@ -295,6 +302,9 @@ class BCTrainer:
             target = torch.tensor(example.expert_index, device=self.device)
             return F.cross_entropy(logits.unsqueeze(0), target.unsqueeze(0))
         shares = torch.tensor(example.target, dtype=logits.dtype, device=self.device)
+        if self.config.target_temperature != 1.0:
+            shares = shares ** (1.0 / self.config.target_temperature)
+            shares = shares / shares.sum()
         return -(shares * F.log_softmax(logits, dim=-1)).sum()
 
     def _logits(self, decision) -> Tensor:

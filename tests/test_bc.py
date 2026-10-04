@@ -442,3 +442,28 @@ def test_a_soft_label_pulls_the_policy_toward_the_search_shares(tmp_path):
         trainer.optimizer.step()
     probabilities = torch.softmax(trainer._logits(soft.decision), dim=-1)
     assert abs(float(probabilities[0]) - 0.7) < 0.05
+
+
+def test_a_lower_target_temperature_sharpens_the_soft_label(tmp_path):
+    import dataclasses
+
+    import torch
+
+    dataset = build_dataset(tmp_path, "a", "b")
+    flat, train, _ = make_trainer(tmp_path, dataset)
+    sharp, _, _ = make_trainer(tmp_path, dataset, target_temperature=0.5)
+    example = train[0]
+    size = flat._logits(example.decision).shape[0]
+    shares = tuple([0.6] + [0.4 / (size - 1)] * (size - 1))
+    soft = dataclasses.replace(example, target=shares)
+    sharp.encoder.load_state_dict(flat.encoder.state_dict())
+    logits = flat._logits(soft.decision)
+    # Logits that already favour the target's top choice fit a sharpened target better.
+    favour = torch.zeros_like(logits)
+    favour[0] = 3.0
+    assert sharp._loss(favour, soft) < flat._loss(favour, soft)
+
+
+def test_the_target_temperature_must_be_positive():
+    with pytest.raises(ValueError, match="target_temperature"):
+        BCConfig(target_temperature=0)
