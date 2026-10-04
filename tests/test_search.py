@@ -99,6 +99,15 @@ def test_reseeding_averages_over_worlds_instead_of_planning_against_one():
     assert fair.action != RISKY
 
 
+def test_a_clairvoyant_search_never_reseeds_and_plans_against_the_real_world():
+    game = BranchingGame(world=0)
+    search = search_for(game)
+    search.config = MctsConfig(simulations=400, turn_depth=1, reseed=False)
+    result = search.search(game, game.state)
+    assert game.reseeds == []
+    assert result.action == RISKY  # +4 in the world it can see
+
+
 def test_the_seed_pool_is_cycled_and_fresh_per_decision():
     game = BranchingGame()
     search = search_for(game, simulations=64, seed_pool=8)

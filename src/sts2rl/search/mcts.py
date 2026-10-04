@@ -73,6 +73,11 @@ class MctsConfig:
     # A wall-clock limit per decision, so trees of different depth can be compared at
     # equal cost: a deeper simulation takes longer. ``simulations`` stays the cap.
     seconds: float | None = None
+    # False plans against the world the simulator holds: every simulation sees the
+    # real draws and enemy rolls. That is cheating, and it is the point -- a fight a
+    # clairvoyant search loses is one no amount of better play would win, so it
+    # bounds what a fair search can reach.
+    reseed: bool = True
 
     def __post_init__(self) -> None:
         if self.simulations < 1 or self.turn_depth < 1 or self.seed_pool < 1:
@@ -174,7 +179,8 @@ class CombatSearch:
                 if deadline is not None and index > 0 and time.perf_counter() > deadline:
                     break
                 world = env.restore(point)
-                env.reseed(seeds[index % len(seeds)])
+                if self.config.reseed:
+                    env.reseed(seeds[index % len(seeds)])
                 self._simulate(env, root, world)
         finally:
             # The environment is left where the decision was taken, with its own hidden

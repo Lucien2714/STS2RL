@@ -65,7 +65,8 @@ def make_mcts_player(args):
 
     weights = json.loads(Path(args.weights).read_text(encoding="utf-8")) if args.weights else None
     evaluator = LeafEvaluator(weights) if weights else LeafEvaluator()
-    config = MctsConfig(simulations=args.simulations, turn_depth=args.turn_depth, seconds=args.seconds)
+    config = MctsConfig(simulations=args.simulations, turn_depth=args.turn_depth, seconds=args.seconds,
+                        reseed=not args.clairvoyant)
 
     def play(env: GameEnv, state, job_seed: int):
         search = CombatSearch(config, evaluator=evaluator, rng=random.Random(job_seed))
@@ -148,6 +149,8 @@ def main() -> int:
     parser.add_argument("--turn-depth", type=int, default=2)
     parser.add_argument("--seconds", type=float, help="mcts: wall-clock budget per decision")
     parser.add_argument("--weights", help="leaf evaluator weights (JSON)")
+    parser.add_argument("--clairvoyant", action="store_true",
+                        help="mcts: search the real hidden state instead of reseeded worlds (an upper bound)")
     parser.add_argument("--record-features", action="store_true")
     parser.add_argument("--run-dir", help="actor: the run whose checkpoint plays")
     parser.add_argument("--checkpoint", default="latest")
@@ -192,6 +195,7 @@ def main() -> int:
                     "policy": args.policy, "simulations": args.simulations if args.policy == "mcts" else None,
                     "turn_depth": args.turn_depth if args.policy == "mcts" else None,
                     "seconds_budget": args.seconds if args.policy == "mcts" else None,
+                    "clairvoyant": bool(args.policy == "mcts" and args.clairvoyant),
                     "won": won, "steps": steps, "final_state": final.get("state_type"),
                     "hp": player.get("hp"), "max_hp": player.get("max_hp"),
                     "boss_hp_left": None if won else boss_health(last_combat),

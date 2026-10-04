@@ -13,3 +13,4 @@
 | Step 1-a：MCTS 搜索器 | [step1a-search.md](step1a-search.md) | 2026-10-03 |
 | Step 1-b：拟合叶子评估 | [step1b-leaf-evaluator.md](step1b-leaf-evaluator.md) | 2026-10-03 |
 | Step 1-c：选搜索深度 | [step1c-depth.md](step1c-depth.md) | 2026-10-03 |
+| Step 1-d：全量实验 | [step1d-full-experiment.md](step1d-full-experiment.md) | 2026-10-03 |
