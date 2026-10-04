@@ -93,10 +93,13 @@ class Decision:
     next_step_index: int | None
     steps_to_run_end: int
     is_run_final_decision: bool
+    # A soft label over ``candidates``: the visit shares of the combat search that
+    # made this decision (docs/mcts, step 3). None for a human's single pick.
+    target_distribution: tuple[float, ...] | None = None
 
     def to_json(self) -> dict[str, Any]:
         """Return the decision as one JSON-compatible object."""
-        return {
+        line = {
             "run_id": self.run_id,
             "step_index": self.step_index,
             "state_type": self.state_type,
@@ -112,6 +115,9 @@ class Decision:
             "steps_to_run_end": self.steps_to_run_end,
             "is_run_final_decision": self.is_run_final_decision,
         }
+        if self.target_distribution is not None:
+            line["target_distribution"] = list(self.target_distribution)
+        return line
 
     @classmethod
     def from_json(cls, value: object) -> Decision:
@@ -158,6 +164,9 @@ class Decision:
             next_step_index=_optional_integer(value.get("next_step_index")),
             steps_to_run_end=_optional_integer(value.get("steps_to_run_end")) or 0,
             is_run_final_decision=value.get("is_run_final_decision") is True,
+            target_distribution=_target_distribution(
+                value.get("target_distribution"), len(candidates)
+            ),
         )
 
     @property
@@ -539,6 +548,22 @@ def read_decisions(path: str | Path) -> Iterable[Decision]:
 
 def _optional_text(value: object) -> str | None:
     return value if isinstance(value, str) and value else None
+
+
+def _target_distribution(value: object, candidate_count: int) -> tuple[float, ...] | None:
+    """Validate a soft label: one non-negative share per candidate, summing to one."""
+    if value is None:
+        return None
+    if not isinstance(value, list) or len(value) != candidate_count:
+        raise ValueError(
+            f"decision target_distribution must list one share per candidate ({candidate_count})"
+        )
+    if any(isinstance(x, bool) or not isinstance(x, (int, float)) or x < 0 for x in value):
+        raise ValueError("decision target_distribution shares must be non-negative numbers")
+    total = float(sum(value))
+    if abs(total - 1.0) > 1e-3:
+        raise ValueError(f"decision target_distribution must sum to 1, not {total:.4f}")
+    return tuple(float(x) / total for x in value)
 
 
 def _optional_integer(value: object) -> int | None:

@@ -51,6 +51,8 @@ class BCExample:
     run_id: str
     step_index: int
     state_type: str | None
+    # The search's visit shares over the candidates, when the label is soft.
+    target: tuple[float, ...] | None = None
 
 
 @dataclass(frozen=True)
@@ -129,6 +131,7 @@ class BCDataset:
             run_id=decision.run_id,
             step_index=decision.step_index,
             state_type=decision.state_type,
+            target=decision.target_distribution,
         )
 
     def run_ids(self) -> tuple[str, ...]:

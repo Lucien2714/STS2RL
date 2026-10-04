@@ -501,3 +501,36 @@ def test_an_invalid_min_floor_is_refused(tmp_path, value):
 
     with pytest.raises(ValueError, match="min_floor must be a positive integer"):
         clean_records(source, tmp_path / "out", min_floor=value)
+
+
+def _soft_decision(**overrides):
+    values = dict(
+        run_id="run-a", step_index=1, state_type="rewards", act=1, floor=3,
+        raw_state=rewards_state(), player_detail=None,
+        candidates=({"type": "claim_reward", "index": 0}, {"type": "claim_reward", "index": 1}),
+        expert_index=1, next_step_index=None, steps_to_run_end=0, is_run_final_decision=False,
+    )
+    values.update(overrides)
+    return Decision(**values)
+
+
+def test_a_soft_label_survives_a_json_round_trip():
+    original = _soft_decision(target_distribution=(0.25, 0.75))
+    restored = Decision.from_json(json.loads(json.dumps(original.to_json())))
+    assert restored == original
+
+
+def test_a_decision_without_a_soft_label_is_written_as_before():
+    assert "target_distribution" not in _soft_decision().to_json()
+    assert Decision.from_json(_soft_decision().to_json()).target_distribution is None
+
+
+@pytest.mark.parametrize(
+    "shares, message",
+    [([1.0], "one share per candidate"), ([0.5, -0.5], "non-negative"), ([0.2, 0.2], "sum to 1")],
+)
+def test_a_malformed_soft_label_is_refused(shares, message):
+    line = _soft_decision().to_json()
+    line["target_distribution"] = shares
+    with pytest.raises(ValueError, match=message):
+        Decision.from_json(line)

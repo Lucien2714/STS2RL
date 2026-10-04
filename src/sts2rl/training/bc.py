@@ -240,7 +240,7 @@ class BCTrainer:
                 example = self.train_set[index]
                 logits = self._logits(example.decision)
                 target = torch.tensor(example.expert_index, device=self.device)
-                losses.append(F.cross_entropy(logits.unsqueeze(0), target.unsqueeze(0)))
+                losses.append(self._loss(logits, example))
                 correct += (torch.argmax(logits) == target).long()
             loss = torch.stack(losses).mean()
 
@@ -269,9 +269,7 @@ class BCTrainer:
                 example = dataset[index]
                 logits = self._logits(example.decision)
                 target = torch.tensor(example.expert_index, device=self.device)
-                losses.append(
-                    F.cross_entropy(logits.unsqueeze(0), target.unsqueeze(0))
-                )
+                losses.append(self._loss(logits, example))
                 hit_flags.append((torch.argmax(logits) == target).long())
                 keys.append(example.state_type or "<unknown>")
         # One synchronization for the whole split rather than two per decision.
@@ -285,6 +283,19 @@ class BCTrainer:
             hits[key] = hits.get(key, 0) + hit
         by_state = {key: hits[key] / counts[key] for key in sorted(counts)}
         return mean_loss, sum(hits_per_example) / len(dataset), by_state
+
+    def _loss(self, logits: Tensor, example) -> Tensor:
+        """Cross entropy against the label: the search's visit shares when the
+        decision carries them, otherwise the one candidate that was picked.
+
+        A soft label keeps what the search knew about near-equal choices -- two
+        lines it visited 45/40 are not a right answer and a wrong one -- which is
+        the calibration PPO needs from a policy it will sample from."""
+        if example.target is None:
+            target = torch.tensor(example.expert_index, device=self.device)
+            return F.cross_entropy(logits.unsqueeze(0), target.unsqueeze(0))
+        shares = torch.tensor(example.target, dtype=logits.dtype, device=self.device)
+        return -(shares * F.log_softmax(logits, dim=-1)).sum()
 
     def _logits(self, decision) -> Tensor:
         return self.encoder.policy_value(decision.to(self.device)).logits

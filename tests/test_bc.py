@@ -407,3 +407,38 @@ def test_the_saved_epoch_is_the_one_with_the_lowest_holdout_loss(tmp_path):
     assert result.best_holdout_accuracy == (
         result.history[result.best_epoch - 1].holdout_accuracy
     )
+
+
+def test_a_one_hot_soft_label_is_the_same_loss_as_the_hard_label(tmp_path):
+    import dataclasses
+
+    import torch
+
+    dataset = build_dataset(tmp_path, "a", "b")
+    trainer, train, _ = make_trainer(tmp_path, dataset)
+    example = train[0]
+    logits = trainer._logits(example.decision)
+    one_hot = tuple(1.0 if i == example.expert_index else 0.0 for i in range(logits.shape[0]))
+    hard = trainer._loss(logits, example)
+    soft = trainer._loss(logits, dataclasses.replace(example, target=one_hot))
+    assert torch.allclose(hard, soft)
+
+
+def test_a_soft_label_pulls_the_policy_toward_the_search_shares(tmp_path):
+    import dataclasses
+
+    import torch
+
+    dataset = build_dataset(tmp_path, "a", "b")
+    trainer, train, _ = make_trainer(tmp_path, dataset)
+    example = train[0]
+    size = trainer._logits(example.decision).shape[0]
+    shares = tuple([0.7] + [0.3 / (size - 1)] * (size - 1))
+    soft = dataclasses.replace(example, target=shares)
+    for _ in range(200):
+        loss = trainer._loss(trainer._logits(soft.decision), soft)
+        trainer.optimizer.zero_grad()
+        loss.backward()
+        trainer.optimizer.step()
+    probabilities = torch.softmax(trainer._logits(soft.decision), dim=-1)
+    assert abs(float(probabilities[0]) - 0.7) < 0.05
