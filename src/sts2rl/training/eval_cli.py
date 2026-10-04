@@ -70,7 +70,39 @@ def create_parser() -> argparse.ArgumentParser:
         type=Path,
         help="Write the per-episode scores and the summary here as JSON.",
     )
+    parser.add_argument(
+        "--search-combat",
+        action="store_true",
+        help=(
+            "play every fight with the combat search instead of the actor (needs "
+            "--backend sim), so two macro policies are compared under the same "
+            "combat play"
+        ),
+    )
+    parser.add_argument("--search-simulations", type=int, default=50)
+    parser.add_argument("--search-depth", type=int, default=2)
+    parser.add_argument("--search-weights", help="leaf evaluator weights (JSON); default: the step 1-b fit")
     return parser
+
+
+def _lane_agent(agent: CandidatePPOAgent, lane: int, env: GameEnv, args: argparse.Namespace):
+    """The lane's agent: the actor alone, or with the combat search playing fights."""
+    view = agent.lane_view(lane)
+    if not args.search_combat:
+        return view
+    import random
+
+    from sts2rl.search import CombatSearch, LeafEvaluator, MctsConfig, SearchCombatAgent
+    from sts2rl.training.cli import DEFAULT_SEARCH_WEIGHTS
+
+    weights = Path(args.search_weights) if args.search_weights else DEFAULT_SEARCH_WEIGHTS
+    search = CombatSearch(
+        MctsConfig(simulations=args.search_simulations, turn_depth=args.search_depth),
+        evaluator=LeafEvaluator(json.loads(weights.read_text(encoding="utf-8"))),
+        # Fixed per lane, so two policies evaluated alike meet the same search luck.
+        rng=random.Random(1000 + lane),
+    )
+    return SearchCombatAgent(view, env, search, run_label=f"eval-lane{lane}")
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -127,26 +159,32 @@ def run_evaluation(args: argparse.Namespace) -> int:
         # not a speedup: actions land while the game is still resolving.
         delay = 0.0 if backend == "sim" else DEFAULT_ACTION_DELAY_SECONDS
 
+    if args.search_combat and backend != "sim":
+        raise ValueError("--search-combat needs the simulator backend: only it can branch")
     with ExitStack() as clients:
+        env_for = [
+            clients.enter_context(
+                GameEnv(
+                    base_url=base_url,
+                    timeout=timeout,
+                    action_delay_seconds=delay,
+                    # The run records which environment it was trained
+                    # against, and the two do not start a run the same way:
+                    # evaluating a simulator run through the game's menus
+                    # fails at the first reset.
+                    backend=backend,
+                )
+            )
+            for base_url in base_urls
+        ]
         runners = [
             EpisodeRunner(
-                clients.enter_context(
-                    GameEnv(
-                        base_url=base_url,
-                        timeout=timeout,
-                        action_delay_seconds=delay,
-                        # The run records which environment it was trained
-                        # against, and the two do not start a run the same way:
-                        # evaluating a simulator run through the game's menus
-                        # fails at the first reset.
-                        backend=backend,
-                    )
-                ),
-                agent.lane_view(lane),
+                env_for[lane],
+                _lane_agent(agent, lane, env_for[lane], args),
                 max_steps=plan.training.max_steps_per_episode,
                 max_state_refreshes=plan.training.max_state_refreshes,
             )
-            for lane, base_url in enumerate(base_urls)
+            for lane in range(len(base_urls))
         ]
         evaluator = Evaluator(
             runners,

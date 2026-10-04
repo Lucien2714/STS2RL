@@ -230,3 +230,20 @@ def test_a_client_that_always_hands_back_someone_elses_run_fails_loudly():
 
     with pytest.raises(RuntimeError, match="did not start"):
         _evaluator([runner], agent, max_episode_failures=2).run([("A", "training")])
+
+
+def test_evaluation_can_play_fights_with_the_search():
+    from sts2rl.agents.ppo import LaneView
+    from sts2rl.search import SearchCombatAgent
+    from sts2rl.training import eval_cli
+
+    class Agent:
+        def lane_view(self, lane):
+            return LaneView(self, lane)
+
+    plain = eval_cli.create_parser().parse_args(["--run-dir", "r"])
+    searched = eval_cli.create_parser().parse_args(["--run-dir", "r", "--search-combat"])
+    assert isinstance(eval_cli._lane_agent(Agent(), 3, object(), plain), LaneView)
+    wrapped = eval_cli._lane_agent(Agent(), 3, object(), searched)
+    assert isinstance(wrapped, SearchCombatAgent)
+    assert wrapped.lane == 3
