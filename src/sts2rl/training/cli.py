@@ -287,7 +287,7 @@ def run_training(args: argparse.Namespace) -> int:
                     env,
                     # Each client gets its own lane so the agent keeps their
                     # trajectories -- and therefore their advantages -- apart.
-                    _lane_agent(agent, lane, env, plan, recorder),
+                    _lane_agent(agent, lane, env, plan, recorder, state.completed_episodes),
                     max_steps=plan.training.max_steps_per_episode,
                     max_state_refreshes=plan.training.max_state_refreshes,
                 )
@@ -308,7 +308,7 @@ def run_training(args: argparse.Namespace) -> int:
     return 0
 
 
-def _lane_agent(agent, lane: int, env: GameEnv, plan: TrainingPlan, recorder):
+def _lane_agent(agent, lane: int, env: GameEnv, plan: TrainingPlan, recorder, start: int = 0):
     """The lane's agent: PPO alone, or PPO with the combat search playing fights."""
     view = agent.lane_view(lane)
     if not plan.training.search_combat:
@@ -332,7 +332,9 @@ def _lane_agent(agent, lane: int, env: GameEnv, plan: TrainingPlan, recorder):
         search,
         rooms=frozenset(plan.training.search_rooms),
         recorder=recorder,
-        run_label=f"lane{lane}",
+        # Episode labels restart in every process; the run's completed count at
+        # start keeps a resumed run's labels apart from the ones already recorded.
+        run_label=f"s{start}-lane{lane}",
     )
 
 

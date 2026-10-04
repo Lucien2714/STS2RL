@@ -451,3 +451,18 @@ def test_search_options_reach_a_new_plan(tmp_path: Path):
 def test_search_is_off_unless_asked(tmp_path: Path):
     args = cli.create_parser().parse_args(["--run-dir", str(tmp_path / "run")])
     assert cli._new_plan(args).training.search_combat is False
+
+
+def test_search_episode_labels_differ_after_a_resume(tmp_path: Path):
+    args = cli.create_parser().parse_args(
+        ["--run-dir", str(tmp_path / "run"), "--backend", "sim", "--seed-pool", "AAAA", "--search-combat"]
+    )
+    plan = cli._new_plan(args)
+
+    class Agent:
+        def lane_view(self, lane):
+            return object()
+
+    first = cli._lane_agent(Agent(), 2, env=object(), plan=plan, recorder=None, start=0)
+    resumed = cli._lane_agent(Agent(), 2, env=object(), plan=plan, recorder=None, start=1000)
+    assert first.run_label != resumed.run_label

@@ -53,13 +53,22 @@ def main() -> int:
                         lines.append(line)
                 except EOFError:
                     pass
+        # Runs recorded before labels carried the resume point restart every lane's
+        # episode counter on resume; a counter going back starts a new segment, so
+        # two episodes never share a label (the holdout split is by label).
+        segment, last = 0, {}
         for line in lines:
             if not line.endswith("\n"):
                 rejected["truncated_line"] += 1
                 continue
             try:
                 value = json.loads(line)
-                value["run_id"] = f"{run.name}:{value['run_id']}"
+                lane, _, count = str(value["run_id"]).rpartition("-")
+                if count.isdigit():
+                    if int(count) < last.get(lane, 0):
+                        segment, last = segment + 1, {}
+                    last[lane] = int(count)
+                value["run_id"] = f"{run.name}:{segment}:{value['run_id']}"
                 decision = Decision.from_json(value)
             except (ValueError, KeyError) as exc:
                 rejected[f"invalid: {str(exc)[:60]}"] += 1
