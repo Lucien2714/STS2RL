@@ -448,6 +448,16 @@ def test_search_options_reach_a_new_plan(tmp_path: Path):
     assert (training.search_simulations, training.search_turn_depth) == (80, 1)
 
 
+def test_room_budgets_reach_a_new_plan(tmp_path: Path):
+    args = cli.create_parser().parse_args(
+        ["--run-dir", str(tmp_path / "run"), "--backend", "sim", "--seed-pool", "AAAA", "--search-combat",
+         "--search-elite-simulations", "200", "--search-boss-simulations", "300"]
+    )
+    training = cli._new_plan(args).training
+    assert training.search_room_simulations() == {"elite": 200, "boss": 300}
+    assert training.search_simulations == 50
+
+
 def test_search_is_off_unless_asked(tmp_path: Path):
     args = cli.create_parser().parse_args(["--run-dir", str(tmp_path / "run")])
     assert cli._new_plan(args).training.search_combat is False

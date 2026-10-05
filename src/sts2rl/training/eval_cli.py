@@ -80,6 +80,8 @@ def create_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument("--search-simulations", type=int, default=50)
+    parser.add_argument("--search-elite-simulations", type=int, help="elite fights (default: --search-simulations)")
+    parser.add_argument("--search-boss-simulations", type=int, help="boss fights (default: --search-simulations)")
     parser.add_argument("--search-depth", type=int, default=2)
     parser.add_argument("--search-weights", help="leaf evaluator weights (JSON); default: the step 1-b fit")
     return parser
@@ -102,7 +104,11 @@ def _lane_agent(agent: CandidatePPOAgent, lane: int, env: GameEnv, args: argpars
         # Fixed per lane, so two policies evaluated alike meet the same search luck.
         rng=random.Random(1000 + lane),
     )
-    return SearchCombatAgent(view, env, search, run_label=f"eval-lane{lane}")
+    rooms = {"elite": args.search_elite_simulations, "boss": args.search_boss_simulations}
+    return SearchCombatAgent(
+        view, env, search, run_label=f"eval-lane{lane}",
+        room_simulations={room: n for room, n in rooms.items() if n is not None},
+    )
 
 
 def main(argv: Sequence[str] | None = None) -> int:

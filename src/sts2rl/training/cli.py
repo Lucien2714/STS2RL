@@ -85,6 +85,8 @@ def create_parser() -> argparse.ArgumentParser:
         help="comma-separated rooms whose fights are searched (default monster,elite,boss)",
     )
     parser.add_argument("--search-simulations", type=int, help="simulations per searched decision (default 50)")
+    parser.add_argument("--search-elite-simulations", type=int, help="simulations per decision in elite fights (default: --search-simulations)")
+    parser.add_argument("--search-boss-simulations", type=int, help="simulations per decision in boss fights (default: --search-simulations)")
     parser.add_argument("--search-depth", type=int, help="turns the search tree reaches (default 2)")
     parser.add_argument("--search-weights", help="leaf evaluator weights (JSON); default: the step 1-b fit")
     parser.add_argument(
@@ -382,6 +384,7 @@ def _lane_agent(agent, lane: int, env: GameEnv, plan: TrainingPlan, recorder, st
         # start keeps a resumed run's labels apart from the ones already recorded.
         run_label=f"s{start}-lane{lane}",
         record_fights=plan.training.search_fights_in_rollout,
+        room_simulations=plan.training.search_room_simulations(),
     )
 
 
@@ -439,6 +442,8 @@ def _new_plan(args: argparse.Namespace) -> TrainingPlan:
             ),
             search_simulations=_or_default(args.search_simulations, training_defaults.search_simulations),
             search_turn_depth=_or_default(args.search_depth, training_defaults.search_turn_depth),
+            search_elite_simulations=args.search_elite_simulations,
+            search_boss_simulations=args.search_boss_simulations,
             search_weights=args.search_weights,
             search_fights_in_rollout=not args.search_fights_out_of_rollout,
             tensorboard_enabled=(
@@ -534,6 +539,8 @@ def _resumed_plan(
             "search_combat": saved.training.search_combat,
             "search_simulations": saved.training.search_simulations,
             "search_depth": saved.training.search_turn_depth,
+            "search_elite_simulations": saved.training.search_elite_simulations,
+            "search_boss_simulations": saved.training.search_boss_simulations,
             "search_weights": saved.training.search_weights,
             "search_fights_out_of_rollout": (
                 None if saved.training.search_fights_in_rollout else True

@@ -179,6 +179,18 @@ def test_search_settings_survive_a_round_trip(tmp_path: Path):
     assert restored == config
 
 
+def test_elite_and_boss_budgets_default_to_the_search_budget(tmp_path: Path):
+    config = TrainingConfig(run_dir=tmp_path, backend="sim", search_combat=True, search_boss_simulations=200)
+    assert config.search_room_simulations() == {"boss": 200}
+    assert TrainingConfig(run_dir=tmp_path).search_room_simulations() == {}
+    with pytest.raises(ValueError, match="search_elite_simulations"):
+        TrainingConfig(run_dir=tmp_path, search_elite_simulations=0)
+    values = config.to_dict()
+    assert TrainingConfig.from_dict(json.loads(json.dumps(values))) == config
+    del values["search_elite_simulations"], values["search_boss_simulations"]
+    assert TrainingConfig.from_dict(values).search_room_simulations() == {}  # older plans
+
+
 def test_a_plan_saved_before_search_existed_loads_without_it(tmp_path: Path):
     values = TrainingConfig(run_dir=tmp_path).to_dict()
     for name in ("search_combat", "search_rooms", "search_simulations", "search_turn_depth", "search_weights"):

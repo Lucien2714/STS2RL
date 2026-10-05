@@ -165,7 +165,11 @@ class CombatSearch:
         self.rng = rng or random.Random()
         self._low, self._high = math.inf, -math.inf
 
-    def search(self, env: SearchEnv, state: RawState) -> SearchResult:
+    def search(self, env: SearchEnv, state: RawState, simulations: int | None = None) -> SearchResult:
+        """Search one decision; ``simulations`` overrides the configured budget."""
+        budget = self.config.simulations if simulations is None else simulations
+        if budget < 1:
+            raise ValueError("simulations must be positive")
         candidates = tuple(self.candidates(state))
         point = env.snapshot()
         # A fresh pool per decision: siblings are compared in the same worlds, and no
@@ -175,7 +179,7 @@ class CombatSearch:
         self._low, self._high = math.inf, -math.inf
         deadline = None if self.config.seconds is None else time.perf_counter() + self.config.seconds
         try:
-            for index in range(self.config.simulations):
+            for index in range(budget):
                 if deadline is not None and index > 0 and time.perf_counter() > deadline:
                     break
                 world = env.restore(point)

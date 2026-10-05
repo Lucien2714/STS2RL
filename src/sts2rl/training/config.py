@@ -142,6 +142,9 @@ class TrainingConfig:
     search_rooms: tuple[str, ...] = ("monster", "elite", "boss")
     search_simulations: int = 50
     search_turn_depth: int = 2
+    # Budgets for elite and boss fights in place of search_simulations; None keeps it.
+    search_elite_simulations: int | None = None
+    search_boss_simulations: int | None = None
     search_weights: str | None = None
     # False: searched fights are folded into the transition between the macro
     # decisions around them instead of entering the rollout as steps.
@@ -235,6 +238,15 @@ class TrainingConfig:
             value = getattr(self, name)
             if isinstance(value, bool) or not isinstance(value, int) or value < 1:
                 raise ValueError(f"{name} must be a positive integer")
+        for name in ("search_elite_simulations", "search_boss_simulations"):
+            value = getattr(self, name)
+            if value is not None and (isinstance(value, bool) or not isinstance(value, int) or value < 1):
+                raise ValueError(f"{name} must be a positive integer or None")
+
+    def search_room_simulations(self) -> dict[str, int]:
+        """The rooms whose fights search with their own budget."""
+        rooms = {"elite": self.search_elite_simulations, "boss": self.search_boss_simulations}
+        return {room: budget for room, budget in rooms.items() if budget is not None}
 
     def validate_runtime_device(self) -> torch.device:
         """Resolve the configured device and reject unavailable CUDA devices."""

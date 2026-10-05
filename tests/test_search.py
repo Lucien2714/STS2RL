@@ -250,6 +250,13 @@ def test_the_environment_is_left_at_the_decision_with_its_own_world():
     assert game.state == {"turns": 0, "score": 1.0, "world": 4}
 
 
+def test_a_budget_given_with_the_decision_replaces_the_configured_one():
+    game = BranchingGame()
+    search = search_for(game, simulations=400)
+    assert search.search(game, game.state, simulations=7).root.visits == 7
+    assert search.search(game, game.state).root.visits == 400
+
+
 def test_a_time_budget_stops_the_search_early_but_always_simulates_once():
     game = BranchingGame()
     result = search_for(game, simulations=100_000, seconds=0.0).search(game, game.state)

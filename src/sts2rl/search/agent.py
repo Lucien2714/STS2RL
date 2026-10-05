@@ -118,6 +118,7 @@ class SearchCombatAgent(Agent):
         recorder: SearchDecisionRecorder | None = None,
         run_label: str = "lane",
         record_fights: bool = True,
+        room_simulations: Mapping[str, int] | None = None,
     ) -> None:
         self.inner = lane
         # The trainer reads ``agent.lane`` as the lane's number (as on a LaneView),
@@ -131,6 +132,10 @@ class SearchCombatAgent(Agent):
         # False: a searched fight is part of the environment's transition, not a
         # sequence of rollout steps (``CandidatePPOAgent.choose_external``).
         self.record_fights = record_fights
+        # A budget per room type (elite, boss) in place of the search's own: the act 1
+        # boss decides most runs, and MCTS-200 beat MCTS-50 there (step 1-d).
+        self.room_simulations = dict(room_simulations or {})
+        self._room: str | None = None
         self.searched = 0
         self._episode = 0
         self._step = 0
@@ -153,6 +158,7 @@ class SearchCombatAgent(Agent):
             # A fight's own screen says which room it is; the overlays inside it
             # (a hand or pile pick) do not, so the room is remembered until it ends.
             self._in_fight = state_type in self.rooms
+            self._room = state_type
         elif is_fight_over(raw):
             self._in_fight = False
         if not self._in_fight:
@@ -162,7 +168,7 @@ class SearchCombatAgent(Agent):
         candidates = self.search.candidates(raw)
         self._node_before = self._node
         if state_type in BRANCHABLE and len(candidates) > 1:
-            result = self.search.search(self.sim, raw)
+            result = self.search.search(self.sim, raw, simulations=self.room_simulations.get(self._room))
             self.searched += 1
             if self.recorder is not None:
                 self.recorder.record(

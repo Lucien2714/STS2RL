@@ -42,9 +42,11 @@ class FakeSearch(CombatSearch):
     def __init__(self) -> None:
         super().__init__(MctsConfig(simulations=1), candidates=candidates, key=key)
         self.calls = 0
+        self.budgets: list[int | None] = []
 
-    def search(self, env, state):
+    def search(self, env, state, simulations=None):
         self.calls += 1
+        self.budgets.append(simulations)
         offered = tuple(candidates(state))
         after_defend = Node(visits=10, children={key(HAND_SELECT, PICK_A): Node(visits=2),
                                                   key(HAND_SELECT, PICK_B): Node(visits=8)})
@@ -115,6 +117,16 @@ def test_an_elite_fight_is_searched_and_handed_to_ppo_as_external():
     assert search.calls == 1
     assert action.to_dict() == DEFEND.to_dict()
     assert lane.calls[-1] == ("external", DEFEND.to_dict())
+
+
+def test_elite_and_boss_fights_search_with_their_own_budget():
+    """The act 1 boss decides most runs; an ordinary fight keeps the cheap budget."""
+    lane, search = FakeLane(), FakeSearch()
+    wrapped = SearchCombatAgent(lane, env=object(), search=search, room_simulations={"elite": 200, "boss": 400})
+    wrapped.reset(obs(MAP))
+    for room in ("monster", "elite", "boss"):
+        wrapped.choose_action(obs(fight(room)))
+    assert search.budgets == [None, 200, 400]  # None: the search's own budget
 
 
 def test_an_overlay_inside_a_searched_fight_is_answered_from_the_tree():
