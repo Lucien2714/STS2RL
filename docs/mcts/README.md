@@ -19,3 +19,4 @@
 | Step 3-a：蒸馏战斗 actor | [step3a-distillation.md](step3a-distillation.md) | 2026-10-04 |
 | Step 2-e：稳定宏观训练（KL 上限、战斗移出 rollout） | [step2e-stabilisation.md](step2e-stabilisation.md) | 2026-10-04 |
 | Step 2-f：模型迁移工具（surgery、`--init-from`） | [step2f-surgery.md](step2f-surgery.md) | 2026-10-04 |
+| Step 2-g：稳定后的宏观训练（600 局） | [step2g-stable-run.md](step2g-stable-run.md) | 2026-10-05 |
