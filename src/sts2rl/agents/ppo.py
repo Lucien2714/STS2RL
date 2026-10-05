@@ -484,6 +484,20 @@ class CandidatePPOAgent(Agent):
         self.last_update = {}
         self._completed_update_metrics.clear()
 
+    def initialize_from(
+        self, encoder_state: Mapping[str, Tensor], return_scale: Mapping[str, object]
+    ) -> None:
+        """Start from another run's model: its weights and return scale, nothing else.
+
+        The return scale comes with the critic it calibrates -- a critic reading its
+        own predictions at the wrong scale is worse than an untrained one. The
+        optimizer stays fresh: its moments belong to the old run's learning rate and,
+        after a migration, to rows and columns that may have moved.
+        """
+        self._require_clean_checkpoint_boundary("initialize")
+        self.game_encoder.load_state_dict(dict(encoder_state))
+        self._return_scale.load(return_scale)
+
     def drain_update_metrics(self) -> tuple[dict[str, float], ...]:
         """Return completed PPO update metrics once, in completion order."""
         metrics = tuple(dict(item) for item in self._completed_update_metrics)

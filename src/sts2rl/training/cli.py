@@ -28,6 +28,7 @@ from sts2rl.training.config import (
     TrainingState,
 )
 from sts2rl.training.metrics import EpisodeMetrics, TrainingMetricsWriter
+from sts2rl.training.surgery import InitialWeights, load_initial_weights
 from sts2rl.training.trainer import Trainer
 
 DEFAULT_SEARCH_WEIGHTS = Path(__file__).resolve().parents[1] / "search" / "weights" / "act1_boss_step1b.json"
@@ -57,6 +58,17 @@ def create_parser() -> argparse.ArgumentParser:
             "weights (sts2rl-bc-train). Only the weights transfer: the "
             "optimizer state belongs to a different objective and the counters "
             "to a run that never happened. Cannot be combined with --resume."
+        ),
+    )
+    parser.add_argument(
+        "--init-from",
+        help=(
+            "start a NEW run from another run's whole model: actor, critic and "
+            "return scale, from a run directory (its latest checkpoint) or a "
+            "checkpoint file. The optimizer and counters start fresh, so the PPO "
+            "settings may differ. A checkpoint from an older vocabulary or schema "
+            "goes through `sts2rl-surgery migrate` first. Cannot be combined with "
+            "--resume or --init-encoder."
         ),
     )
     parser.add_argument(
@@ -213,11 +225,18 @@ def main(argv: Sequence[str] | None = None) -> int:
 def run_training(args: argparse.Namespace) -> int:
     """Build either a new or resumed runtime and train to its target."""
     init_encoder = getattr(args, "init_encoder", None)
+    init_from = getattr(args, "init_from", None)
     if init_encoder is not None and args.resume is not None:
         raise ValueError(
             "--init-encoder starts a new run from cloned weights; --resume "
             "continues one that already has its own. Pass one or the other."
         )
+    if init_from is not None and args.resume is not None:
+        raise ValueError(
+            "--init-from starts a new run from another run's weights; --resume "
+            "continues one that already has its own. Pass one or the other."
+        )
+    initial_weights: InitialWeights | None = None
 
     vocabulary = GameVocabulary.from_bundled_data()
     manager = CheckpointManager(args.run_dir, vocabulary)
@@ -225,6 +244,17 @@ def run_training(args: argparse.Namespace) -> int:
     if args.resume is None:
         plan = _new_plan(args)
         plan.training.validate_runtime_device()
+        if init_from is not None:
+            # Before the run directory exists, so an incompatible source leaves
+            # nothing half-built behind.
+            initial_weights = load_initial_weights(
+                init_from, vocabulary=vocabulary, encoder_config=plan.encoder
+            )
+            # The file, not the directory: a run's latest checkpoint moves on.
+            plan = replace(
+                plan,
+                training=replace(plan.training, init_from=str(initial_weights.source)),
+            )
         torch.manual_seed(plan.training.torch_seed)
         if torch.cuda.is_available():
             torch.cuda.manual_seed_all(plan.training.torch_seed)
@@ -270,6 +300,8 @@ def run_training(args: argparse.Namespace) -> int:
             )
         )
         encoder.to(agent.device)
+    elif initial_weights is not None:
+        agent.initialize_from(initial_weights.encoder, initial_weights.return_scale)
 
     with TrainingMetricsWriter(
         plan.training.run_dir,
@@ -398,6 +430,7 @@ def _new_plan(args: argparse.Namespace) -> TrainingPlan:
                 if getattr(args, "init_encoder", None) is None
                 else str(args.init_encoder)
             ),
+            init_from=getattr(args, "init_from", None),
             search_combat=bool(args.search_combat),
             search_rooms=(
                 tuple(room.strip() for room in args.search_rooms.split(",") if room.strip())

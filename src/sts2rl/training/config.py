@@ -130,6 +130,10 @@ class TrainingConfig:
     # every other field are different experiments if one started from cloned
     # weights, and nothing else in the run directory would say so.
     init_encoder: str | None = None
+    # The checkpoint (or run directory) whose whole model -- actor, critic and
+    # return scale -- this run started from, or None. Recorded for the same
+    # reason as init_encoder; the optimizer and counters always start fresh.
+    init_from: str | None = None
     # Step 2 of docs/mcts: the combat search plays these rooms' fights on each
     # lane's simulator and PPO learns only the rest (the critic still sees the
     # fights). Recorded and refused on resume like the backend: a run whose
@@ -186,6 +190,12 @@ class TrainingConfig:
             not isinstance(self.init_encoder, str) or not self.init_encoder
         ):
             raise ValueError("init_encoder must be a non-empty path or None")
+        if self.init_from is not None and (
+            not isinstance(self.init_from, str) or not self.init_from
+        ):
+            raise ValueError("init_from must be a non-empty path or None")
+        if self.init_from is not None and self.init_encoder is not None:
+            raise ValueError("a run starts from init_encoder or init_from, not both")
         try:
             torch.device(self.device)
         except (RuntimeError, TypeError) as exc:

@@ -18,3 +18,4 @@
 | Step 2-d：MCTS 打战斗的 PPO 训练与评估 | [step2d-training-run.md](step2d-training-run.md) | 2026-10-04 |
 | Step 3-a：蒸馏战斗 actor | [step3a-distillation.md](step3a-distillation.md) | 2026-10-04 |
 | Step 2-e：稳定宏观训练（KL 上限、战斗移出 rollout） | [step2e-stabilisation.md](step2e-stabilisation.md) | 2026-10-04 |
+| Step 2-f：模型迁移工具（surgery、`--init-from`） | [step2f-surgery.md](step2f-surgery.md) | 2026-10-04 |

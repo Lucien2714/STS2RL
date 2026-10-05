@@ -14,6 +14,7 @@ import torch
 
 from sts2rl.agents import CandidatePPOAgent
 from sts2rl.encoder import GameVocabulary
+from sts2rl.encoder.spec import model_spec
 from sts2rl.training.config import TrainingPlan, TrainingState
 
 
@@ -179,6 +180,9 @@ class CheckpointManager:
             "tensorboard_log_dir": tensorboard_log_dir,
             "training_plan": plan.to_dict(),
             "vocabulary_fingerprint": self.vocabulary.fingerprint(),
+            # Optional and read only by sts2rl-surgery, so loading is unchanged:
+            # what the input weights mean, for when this code is gone.
+            "model_spec": model_spec(self.vocabulary),
             "torch_rng_state": torch.get_rng_state(),
             "cuda_rng_states": (
                 tuple(torch.cuda.get_rng_state_all())
