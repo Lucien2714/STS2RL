@@ -98,6 +98,8 @@ _DAMAGE = re.compile(
 _BLOCK = re.compile(r"Gain (\d+) Block", re.IGNORECASE)
 # A fight longer than this is as good as never ending, for either side.
 TURNS_CAP = 20.0
+# An enemy at this many max HP is a placeholder the game keeps after a kill (see is_dying).
+DYING_HP = 100_000_000
 
 
 def is_fight_over(state: RawState) -> bool:
@@ -133,20 +135,32 @@ def intent_damage(intent: Mapping[str, Any]) -> float:
         return 0.0
 
 
+def is_dying(enemy: Mapping[str, Any]) -> bool:
+    """An enemy the game keeps on the board after it was killed, at a placeholder HP.
+
+    Waterfall Giant's Steam Eruption: "When killed, deals damage at the end of your next
+    turn." The killed Giant stays for that turn at 999,999,999 of 999,999,999 HP. Read as
+    an ordinary enemy it is a boss back at full health, and the search avoided the
+    killing blow: 176 of 298 lost Giant fights ended with it below 15% HP.
+    """
+    return _number(enemy.get("max_hp")) >= DYING_HP
+
+
 def features(state: RawState) -> dict[str, float]:
     """The features of a fight in progress, each roughly on a unit scale."""
     player = _player(state)
-    enemies = [
+    present = [
         enemy
         for enemy in _records((state.get("battle") or {}).get("enemies"))
         if _number(enemy.get("hp")) > 0
     ]
+    enemies = [enemy for enemy in present if not is_dying(enemy)]
     hp = _number(player.get("hp"))
     max_hp = max(_number(player.get("max_hp")), 1.0)
     effective = hp + _number(player.get("block"))
     incoming = sum(
         intent_damage(intent) for enemy in enemies for intent in _records(enemy.get("intents"))
-    )
+    ) + sum(_powers(enemy).get("STEAM_ERUPTION_POWER", 0.0) for enemy in present if is_dying(enemy))
     enemy_hp = sum(_number(e.get("hp")) for e in enemies)
     enemy_max = max(sum(_number(e.get("max_hp")) for e in enemies), 1.0)
     enemy_block = sum(_number(e.get("block")) for e in enemies)

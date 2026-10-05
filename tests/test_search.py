@@ -226,6 +226,32 @@ def test_intent_damage_reads_single_and_multi_hit_labels():
     assert intent_damage({"type": "Buff", "label": ""}) == 0
 
 
+def _killed_giant(hp=50, block=0, eruption=30):
+    """Waterfall Giant after the killing blow: a placeholder HP until it erupts."""
+    state = _combat(hp=hp, block=block)
+    state["battle"]["enemies"] = [{
+        "name": "Waterfall Giant", "hp": 999_999_999, "max_hp": 999_999_999, "block": 0,
+        "status": [{"id": "STEAM_ERUPTION_POWER", "amount": eruption, "type": "Buff"}], "intents": [],
+    }]
+    return state
+
+
+def test_killing_waterfall_giant_is_progress_not_a_boss_at_full_health():
+    """The killed Giant reads 999,999,999 of 999,999,999 HP; the search avoided the kill."""
+    value = LeafEvaluator()
+    almost_dead = _combat(enemy_hp=10)
+    almost_dead["battle"]["enemies"][0]["max_hp"] = 240
+    killed = _killed_giant(eruption=10)  # the same threat as the living Giant's attack
+    assert features(killed)["enemy_hp_ratio"] == 0.0
+    assert value(killed) > value(almost_dead)
+
+
+def test_the_eruption_of_a_killed_giant_counts_as_incoming_damage():
+    assert features(_killed_giant(hp=20, eruption=30))["lethal_incoming"] == 1.0
+    assert features(_killed_giant(hp=20, block=15, eruption=30))["lethal_incoming"] == 0.0
+    assert LeafEvaluator()(_killed_giant(hp=20, block=15)) > LeafEvaluator()(_killed_giant(hp=20))
+
+
 def test_lethal_incoming_is_flagged():
     assert features(_combat(hp=8, intents=(("Attack", "5x2"),)))["lethal_incoming"] == 1.0
     assert features(_combat(hp=8, block=5, intents=(("Attack", "5x2"),)))["lethal_incoming"] == 0.0
