@@ -261,7 +261,9 @@ def resolve_source(source: str | Path, vocabulary: GameVocabulary) -> tuple[Chec
     path = Path(source)
     if path.is_dir():
         manager = CheckpointManager(path, vocabulary)
-        return manager, manager.resolve("latest")
+        # Absolute: ``CheckpointManager.load`` reads a relative path as relative to
+        # its own checkpoint directory, which ``resolve`` has already prefixed.
+        return manager, manager.resolve("latest").resolve()
     if not path.is_file():
         raise SurgeryError(f"no run directory or checkpoint at {path}")
     return CheckpointManager(path.parent, vocabulary), path.resolve()

@@ -377,6 +377,20 @@ def test_a_checkpoint_without_a_spec_needs_one_given(tmp_path, vocabulary):
 # ------------------------------------------------------------- --init-from
 
 
+def test_a_run_directory_given_as_a_relative_path_resolves(tmp_path, vocabulary, monkeypatch):
+    """``--init-from runs/x`` and ``outputs --from runs/x``: the latest checkpoint's path
+    was relative, and loading it prefixed the checkpoint directory a second time."""
+    path, _ = _save_run(tmp_path / "old", vocabulary)
+    _dataset(tmp_path / "data")
+    monkeypatch.chdir(tmp_path)
+
+    weights = load_initial_weights("old", vocabulary=vocabulary, encoder_config=CONFIG)
+    outputs = decision_outputs("old", "data")
+
+    assert weights.source == path.resolve()
+    assert len(outputs["rows"]) == 2
+
+
 def test_initial_weights_are_the_model_without_its_optimizer(tmp_path, vocabulary):
     _, trained = _save_run(tmp_path / "old", vocabulary)
 
