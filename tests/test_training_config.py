@@ -184,3 +184,9 @@ def test_a_plan_saved_before_search_existed_loads_without_it(tmp_path: Path):
     for name in ("search_combat", "search_rooms", "search_simulations", "search_turn_depth", "search_weights"):
         values.pop(name)
     assert TrainingConfig.from_dict(values).search_combat is False
+
+
+def test_a_plan_saved_before_fights_could_leave_the_rollout_keeps_them_in(tmp_path: Path):
+    values = TrainingConfig(run_dir=tmp_path).to_dict()
+    values.pop("search_fights_in_rollout")
+    assert TrainingConfig.from_dict(values).search_fights_in_rollout is True

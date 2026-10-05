@@ -67,6 +67,8 @@ def _agent(
     *,
     rollout_size: int = 256,
     update_epochs: int = 1,
+    target_kl: float | None = None,
+    minibatch_size: int = 32,
 ) -> CandidatePPOAgent:
     vocabulary = GameVocabulary.from_bundled_data()
     tokenizer = GameTokenizer(vocabulary)
@@ -80,6 +82,8 @@ def _agent(
         config=PPOConfig(
             rollout_size=rollout_size,
             update_epochs=update_epochs,
+            target_kl=target_kl,
+            minibatch_size=minibatch_size,
         ),
     )
 
@@ -839,3 +843,118 @@ def test_a_lane_view_passes_external_actions_to_its_lane():
     assert view.choose_external(observation, action).to_dict() == action.to_dict()
     assert agent._lane(3).pending is not None
     assert agent._lane(0).pending is None
+
+
+
+def _fill_policy_rollout(agent, size: int) -> None:
+    """Sampled map decisions with large, varied rewards, so an update moves the policy."""
+    for index in range(size):
+        observation = _observation(_map_state(3))
+        action = agent.choose_action(observation)
+        agent.observe(
+            Transition(
+                state=observation,
+                action=action,
+                reward=10.0 if action.params.get("index") == index % 3 else -10.0,
+                next_state=_observation(_map_state(3)),
+                done=index % 4 == 3,
+            )
+        )
+
+
+def test_without_a_kl_limit_every_epoch_and_minibatch_runs():
+    torch.manual_seed(61)
+    agent = _agent(rollout_size=32, update_epochs=4, minibatch_size=8)
+    _fill_policy_rollout(agent, 32)
+    metrics = agent.last_update
+    assert metrics["optimizer_steps"] == 16
+    assert metrics["kl_early_stop"] == 0.0
+
+
+def test_a_kl_limit_stops_the_update_before_the_step_that_crosses_it():
+    torch.manual_seed(61)
+    agent = _agent(rollout_size=32, update_epochs=4, minibatch_size=8, target_kl=1e-9)
+    _fill_policy_rollout(agent, 32)
+    metrics = agent.last_update
+    # The first minibatch sees the unchanged policy (KL 0) and steps; the next one
+    # measures a moved policy and stops the update there.
+    assert metrics["optimizer_steps"] == 1
+    assert metrics["kl_early_stop"] == 1.0
+    assert metrics["approx_kl"] > 1.5e-9
+
+
+def test_the_kl_limit_must_be_positive():
+    with pytest.raises(ValueError, match="target_kl"):
+        PPOConfig(target_kl=0.0)
+
+
+
+def _macro_step(agent, lane: int, *, reward: float, done: bool = False) -> None:
+    observation = _observation(_map_state(2))
+    action = agent.choose_action(observation, lane=lane)
+    agent.observe(
+        Transition(state=observation, action=action, reward=reward,
+                   next_state=_observation(_map_state(2)), done=done),
+        lane=lane,
+    )
+
+
+def _unrecorded_fight_step(agent, lane: int, *, reward: float, done: bool = False, marker: int = 0) -> None:
+    observation = _observation(_map_state(3))
+    action = agent.action_provider.require_candidates(observation.raw_state)[0]
+    agent.choose_external(observation, action, lane=lane, record=False)
+    agent.observe(
+        Transition(state=observation, action=action, reward=reward,
+                   next_state=_observation(_map_state(2 + marker)), done=done),
+        lane=lane,
+    )
+
+
+def test_an_unrecorded_fight_adds_its_reward_to_the_decision_before_it():
+    agent = _agent()
+    _macro_step(agent, 0, reward=1.0)
+    _unrecorded_fight_step(agent, 0, reward=-0.01)
+    _unrecorded_fight_step(agent, 0, reward=10.0, marker=1)
+    steps = agent._lane(0).steps
+    assert len(steps) == 1
+    assert steps[0].reward == pytest.approx(1.0 - 0.01 + 10.0)
+    # The decision's transition now ends where the fight ended.
+    assert len(steps[0].next_observation.raw_state["map"]["next_options"]) == 3
+    assert agent.environment_steps == 3
+
+
+def test_a_death_in_an_unrecorded_fight_ends_the_decision_before_it():
+    agent = _agent()
+    _macro_step(agent, 0, reward=1.0)
+    _unrecorded_fight_step(agent, 0, reward=-0.01, done=True)
+    step = agent._lane(0).steps[0]
+    assert step.done and step.episode_end
+
+
+def test_an_unrecorded_fight_never_extends_a_terminal_and_carries_its_reward_forward():
+    agent = _agent()
+    _macro_step(agent, 0, reward=1.0, done=True)
+    _unrecorded_fight_step(agent, 0, reward=5.0)
+    terminal = agent._lane(0).steps[0]
+    assert terminal.reward == 1.0 and terminal.done
+    _macro_step(agent, 0, reward=2.0)
+    assert agent._lane(0).steps[1].reward == pytest.approx(2.0 + 5.0)
+
+
+def test_unrecorded_fights_stay_in_their_own_lane():
+    agent = _agent()
+    _macro_step(agent, 0, reward=1.0)
+    _macro_step(agent, 1, reward=1.0)
+    _unrecorded_fight_step(agent, 1, reward=7.0)
+    assert agent._lane(0).steps[0].reward == 1.0
+    assert agent._lane(1).steps[0].reward == 8.0
+
+
+def test_a_rollout_of_only_macro_decisions_fills_with_their_own_choices():
+    agent = _agent(rollout_size=4)
+    for _ in range(4):
+        _macro_step(agent, 0, reward=1.0)
+        _unrecorded_fight_step(agent, 0, reward=0.5)
+    # The update ran on four recorded decisions; the fights never entered it.
+    assert agent.last_update["rollout_steps"] == 4.0
+    assert agent.environment_steps == 8

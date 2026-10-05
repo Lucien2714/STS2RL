@@ -34,6 +34,13 @@ class PPOConfig:
     rollout_size: int = 256
     update_epochs: int = 4
     minibatch_size: int = 32
+    # Stop an update's epochs once the policy has moved this far (approximate KL
+    # against the policy that collected the rollout), as Baselines' target_kl does.
+    # The clip limits the ratio only for the actions in the batch, and four epochs
+    # of minibatches can still carry the policy far; on a state absent from the
+    # batch -- a card reward screen, a few per episode -- the clip limits nothing,
+    # and one update took P(skip card reward) from 0.21 to 1.00. None: no limit.
+    target_kl: float | None = None
 
     def __post_init__(self) -> None:
         if self.rollout_size < 1 or self.update_epochs < 1:
@@ -46,6 +53,8 @@ class PPOConfig:
             raise ValueError("gamma and gae_lambda must be between 0 and 1")
         if self.clip_ratio < 0:
             raise ValueError("clip_ratio must not be negative")
+        if self.target_kl is not None and not self.target_kl > 0:
+            raise ValueError("target_kl must be positive or None")
 
 
 @dataclass
@@ -130,6 +139,12 @@ class _Lane:
 
     pending: _PendingDecision | None = None
     steps: list[_RolloutStep] = field(default_factory=list)
+    # An external action taken without a rollout entry is awaiting its observation;
+    # its reward is folded into the decision before it (see ``choose_external``).
+    folding: bool = False
+    # Reward folded while the lane had no decision of this episode to fold into:
+    # paid to the next recorded decision, the one that earned it.
+    carried_reward: float = 0.0
 
 
 class LaneView(Agent):
@@ -149,8 +164,10 @@ class LaneView(Agent):
     def choose_action(self, state: GameObservation) -> GameAction:
         return self.agent.choose_action(state, lane=self.lane)
 
-    def choose_external(self, state: GameObservation, action: GameAction) -> GameAction:
-        return self.agent.choose_external(state, action, lane=self.lane)
+    def choose_external(
+        self, state: GameObservation, action: GameAction, *, record: bool = True
+    ) -> GameAction:
+        return self.agent.choose_external(state, action, lane=self.lane, record=record)
 
     def observe(self, transition: Transition) -> None:
         self.agent.observe(transition, lane=self.lane)
@@ -226,6 +243,8 @@ class CandidatePPOAgent(Agent):
             if entry.steps:
                 self._close_episode(entry, entry.steps[-1].next_observation)
             entry.pending = None
+            entry.folding = False
+            entry.carried_reward = 0.0
 
     def choose_action(self, state: GameObservation, lane: int = 0) -> GameAction:
         entry = self._lane(lane)
@@ -260,7 +279,12 @@ class CandidatePPOAgent(Agent):
         return candidates[action_index]
 
     def choose_external(
-        self, state: GameObservation, action: GameAction, lane: int = 0
+        self,
+        state: GameObservation,
+        action: GameAction,
+        lane: int = 0,
+        *,
+        record: bool = True,
     ) -> GameAction:
         """Take an action another policy chose, and learn its value but not its choice.
 
@@ -272,6 +296,15 @@ class CandidatePPOAgent(Agent):
         has no log probability to form a ratio with and gets no policy
         gradient. It is handled exactly like a forced step: in GAE and the
         critic loss, out of the policy loss and the advantage normalisation.
+
+        ``record=False`` leaves it out of the rollout altogether: the whole fight
+        becomes part of the environment's transition from the decision before it
+        to the decision after. Its reward is folded into the last recorded
+        decision of this lane, and a death in it ends that decision's episode.
+        That puts only this policy's own choices in a rollout -- three times as
+        many per update -- and shortens the path from a card pick to the boss it
+        meets from a hundred steps to a dozen decisions. The critic then values
+        only the states between fights, which is what it is for here.
         """
         entry = self._lane(lane)
         if entry.pending is not None:
@@ -285,6 +318,9 @@ class CandidatePPOAgent(Agent):
             raise ValueError(f"{action} is not one of this state's candidates")
         action_index = matches[0]
         if not self.training_enabled:
+            return candidates[action_index]
+        if not record:
+            entry.folding = True
             return candidates[action_index]
         decision = self.tokenizer.tokenize_decision(state, candidates)
         with self._lock:
@@ -304,10 +340,15 @@ class CandidatePPOAgent(Agent):
 
         with self._lock:
             self.environment_steps += 1
+            if entry.pending is None and entry.folding:
+                self._fold(entry, transition)
+                return
             if entry.pending is None:
                 raise RuntimeError(
                     "choose_action() must be called before observe()"
                 )
+            reward = float(transition.reward) + entry.carried_reward
+            entry.carried_reward = 0.0
             entry.steps.append(
                 _RolloutStep(
                     decision=entry.pending.decision,
@@ -315,7 +356,7 @@ class CandidatePPOAgent(Agent):
                     action_index=entry.pending.action_index,
                     old_log_probability=entry.pending.log_probability,
                     old_value=entry.pending.value,
-                    reward=float(transition.reward),
+                    reward=reward,
                     done=transition.done,
                     episode_end=transition.done,
                     policy_trainable=entry.pending.policy_trainable,
@@ -327,6 +368,28 @@ class CandidatePPOAgent(Agent):
             self.update()
             if self.on_update is not None:
                 self.on_update()
+
+    def _fold(self, entry: _Lane, transition: Transition) -> None:
+        """Merge an unrecorded step into the decision before it.
+
+        Never across an episode boundary: a terminal step is never extended --
+        that once erased every terminal in the rollout (CLAUDE.md, "Forced steps
+        are folded") -- and its reward goes forward to the next decision instead.
+        """
+        entry.folding = False
+        last = entry.steps[-1] if entry.steps else None
+        if last is None or last.episode_end:
+            if transition.done:
+                # Died before this episode recorded a decision: nothing to credit.
+                entry.carried_reward = 0.0
+            else:
+                entry.carried_reward += float(transition.reward)
+            return
+        last.reward += float(transition.reward)
+        last.next_observation = transition.next_state
+        if transition.done:
+            last.done = True
+            last.episode_end = True
 
     def _raw_value(self, state: GameObservation) -> Tensor:
         """Read one bootstrap in reward units while the caller holds the lock."""
@@ -437,6 +500,7 @@ class CandidatePPOAgent(Agent):
         """
         with self._lock:
             self._lane(lane).pending = None
+            self._lane(lane).folding = False
 
     def abort_lane(self, lane: int) -> None:
         """Discard one environment's whole trajectory after its episode failed.
@@ -455,6 +519,8 @@ class CandidatePPOAgent(Agent):
             entry = self._lane(lane)
             entry.pending = None
             entry.steps.clear()
+            entry.folding = False
+            entry.carried_reward = 0.0
 
     def abort_episode(self) -> None:
         """Discard incomplete actions and rollouts without undoing prior updates."""
@@ -507,15 +573,27 @@ class CandidatePPOAgent(Agent):
             advantages[policy_mask] = policy_advantages
 
             metrics: dict[str, float] = {}
+            optimizer_steps = 0
+            stopped = False
             for _ in range(self.config.update_epochs):
                 order = torch.randperm(len(steps)).tolist()
                 for start in range(0, len(order), self.config.minibatch_size):
-                    metrics = self._optimize_minibatch(
+                    result = self._optimize_minibatch(
                         order[start : start + self.config.minibatch_size],
                         steps,
                         advantages,
                         returns,
                     )
+                    if result.get("kl_stopped"):
+                        stopped = True
+                        metrics["approx_kl"] = result["approx_kl"]
+                        break
+                    metrics = result
+                    optimizer_steps += 1
+                if stopped:
+                    break
+            metrics["optimizer_steps"] = float(optimizer_steps)
+            metrics["kl_early_stop"] = float(stopped)
 
             self.optimizer_updates += 1
             metrics["environment_steps"] = float(self.environment_steps)
@@ -539,6 +617,7 @@ class CandidatePPOAgent(Agent):
         policy_losses: list[Tensor] = []
         value_losses: list[Tensor] = []
         entropies: list[Tensor] = []
+        kl_terms: list[Tensor] = []
         for index in indices:
             step = steps[index]
             if not _policy_step(step):
@@ -549,9 +628,10 @@ class CandidatePPOAgent(Agent):
             distribution = Categorical(logits=output.logits)
             action_index = torch.tensor(step.action_index, device=self.device)
             new_log_probability = distribution.log_prob(action_index)
-            ratio = torch.exp(
-                new_log_probability - step.old_log_probability.to(self.device)
-            )
+            log_ratio = new_log_probability - step.old_log_probability.to(self.device)
+            ratio = torch.exp(log_ratio)
+            # The low-variance estimator of KL(old || new): (r - 1) - log r >= 0.
+            kl_terms.append(((ratio - 1.0) - log_ratio).detach())
             advantage = advantages[index]
             unclipped = ratio * advantage
             clipped = (
@@ -567,6 +647,11 @@ class CandidatePPOAgent(Agent):
             entropies.append(distribution.entropy())
 
         zero = torch.zeros((), device=self.device)
+        approx_kl = float(torch.stack(kl_terms).mean().cpu()) if kl_terms else 0.0
+        if self.config.target_kl is not None and approx_kl > 1.5 * self.config.target_kl:
+            # Measured before stepping, so the step that would cross the limit is
+            # never taken (Stable-Baselines3 uses the same 1.5 margin).
+            return {"kl_stopped": 1.0, "approx_kl": approx_kl}
         policy_loss = torch.stack(policy_losses).mean() if policy_losses else zero
         value_loss = torch.stack(value_losses).mean()
         entropy = torch.stack(entropies).mean() if entropies else zero
@@ -588,6 +673,7 @@ class CandidatePPOAgent(Agent):
             "entropy": float(entropy.detach().cpu()),
             "gradient_norm": float(gradient_norm.detach().cpu()),
             "rollout_steps": float(len(steps)),
+            "approx_kl": approx_kl,
         }
 
     def _advantages_and_returns(

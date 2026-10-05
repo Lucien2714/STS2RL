@@ -42,7 +42,9 @@ class ExternalLane(Protocol):
 
     def choose_action(self, state: GameObservation) -> GameAction: ...
 
-    def choose_external(self, state: GameObservation, action: GameAction) -> GameAction: ...
+    def choose_external(
+        self, state: GameObservation, action: GameAction, *, record: bool = True
+    ) -> GameAction: ...
 
     def observe(self, transition: Transition) -> None: ...
 
@@ -115,6 +117,7 @@ class SearchCombatAgent(Agent):
         rooms: frozenset[str] = SEARCHED_ROOMS,
         recorder: SearchDecisionRecorder | None = None,
         run_label: str = "lane",
+        record_fights: bool = True,
     ) -> None:
         self.inner = lane
         # The trainer reads ``agent.lane`` as the lane's number (as on a LaneView),
@@ -125,6 +128,9 @@ class SearchCombatAgent(Agent):
         self.rooms = rooms
         self.recorder = recorder
         self.run_label = run_label
+        # False: a searched fight is part of the environment's transition, not a
+        # sequence of rollout steps (``CandidatePPOAgent.choose_external``).
+        self.record_fights = record_fights
         self.searched = 0
         self._episode = 0
         self._step = 0
@@ -170,7 +176,7 @@ class SearchCombatAgent(Agent):
             action = _from_subtree(self.search, self._node, raw, candidates)
         if self._node is not None:
             self._node = self._node.children.get(self.search.key(raw, action))
-        return self.inner.choose_external(state, action)
+        return self.inner.choose_external(state, action, record=self.record_fights)
 
     def observe(self, transition: Transition) -> None:
         self.inner.observe(transition)

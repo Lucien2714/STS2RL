@@ -466,3 +466,19 @@ def test_search_episode_labels_differ_after_a_resume(tmp_path: Path):
     first = cli._lane_agent(Agent(), 2, env=object(), plan=plan, recorder=None, start=0)
     resumed = cli._lane_agent(Agent(), 2, env=object(), plan=plan, recorder=None, start=1000)
     assert first.run_label != resumed.run_label
+
+
+
+def test_the_kl_limit_reaches_a_new_plan_and_is_off_by_default(tmp_path: Path):
+    parser = cli.create_parser()
+    assert cli._new_plan(parser.parse_args(["--run-dir", str(tmp_path / "a")])).ppo.target_kl is None
+    plan = cli._new_plan(parser.parse_args(["--run-dir", str(tmp_path / "b"), "--target-kl", "0.02"]))
+    assert plan.ppo.target_kl == 0.02
+
+
+def test_searched_fights_can_be_kept_out_of_the_rollout(tmp_path: Path):
+    parser = cli.create_parser()
+    base = ["--backend", "sim", "--seed-pool", "AAAA", "--search-combat"]
+    assert cli._new_plan(parser.parse_args(["--run-dir", str(tmp_path / "a"), *base])).training.search_fights_in_rollout
+    out = cli._new_plan(parser.parse_args(["--run-dir", str(tmp_path / "b"), *base, "--search-fights-out-of-rollout"]))
+    assert out.training.search_fights_in_rollout is False

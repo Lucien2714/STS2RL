@@ -63,8 +63,8 @@ class FakeLane:
         self.calls.append(("ppo", state.raw_state["state_type"]))
         return candidates(state.raw_state)[0]
 
-    def choose_external(self, state, action):
-        self.calls.append(("external", action.to_dict()))
+    def choose_external(self, state, action, *, record=True):
+        self.calls.append(("external", action.to_dict()) if record else ("unrecorded", action.to_dict()))
         return action
 
     def observe(self, transition):
@@ -172,3 +172,13 @@ def test_the_wrapper_reports_its_lane_number_like_a_lane_view():
     wrapped = SearchCombatAgent(NumberedLane(), env=object(), search=FakeSearch())
     assert wrapped.lane == 4
     assert isinstance(wrapped.lane, int)
+
+
+
+def test_fights_can_be_played_without_rollout_entries():
+    lane, search = FakeLane(), FakeSearch()
+    wrapped = SearchCombatAgent(lane, env=object(), search=search, record_fights=False)
+    wrapped.reset(obs(MAP))
+    wrapped.choose_action(obs(fight("boss")))
+    wrapped.choose_action(obs(HAND_SELECT))
+    assert lane.calls[-2:] == [("unrecorded", DEFEND.to_dict()), ("unrecorded", PICK_B.to_dict())]

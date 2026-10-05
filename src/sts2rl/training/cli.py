@@ -76,6 +76,15 @@ def create_parser() -> argparse.ArgumentParser:
     parser.add_argument("--search-depth", type=int, help="turns the search tree reaches (default 2)")
     parser.add_argument("--search-weights", help="leaf evaluator weights (JSON); default: the step 1-b fit")
     parser.add_argument(
+        "--search-fights-out-of-rollout",
+        action="store_true",
+        default=None,
+        help=(
+            "with --search-combat: fold each searched fight into the transition between "
+            "the macro decisions around it, so the rollout holds only PPO's own choices"
+        ),
+    )
+    parser.add_argument(
         "--backend",
         choices=BACKENDS,
         help=(
@@ -182,6 +191,11 @@ def create_parser() -> argparse.ArgumentParser:
     parser.add_argument("--max-grad-norm", type=float)
     parser.add_argument("--rollout-size", type=int)
     parser.add_argument("--update-epochs", type=int)
+    parser.add_argument(
+        "--target-kl",
+        type=float,
+        help="stop an update's epochs once the policy's approximate KL from the rollout policy passes 1.5x this (default: no limit)",
+    )
     parser.add_argument("--no-tensorboard", action="store_true", default=None)
     parser.add_argument("--tensorboard-flush-secs", type=int)
     return parser
@@ -335,6 +349,7 @@ def _lane_agent(agent, lane: int, env: GameEnv, plan: TrainingPlan, recorder, st
         # Episode labels restart in every process; the run's completed count at
         # start keeps a resumed run's labels apart from the ones already recorded.
         run_label=f"s{start}-lane{lane}",
+        record_fights=plan.training.search_fights_in_rollout,
     )
 
 
@@ -392,6 +407,7 @@ def _new_plan(args: argparse.Namespace) -> TrainingPlan:
             search_simulations=_or_default(args.search_simulations, training_defaults.search_simulations),
             search_turn_depth=_or_default(args.search_depth, training_defaults.search_turn_depth),
             search_weights=args.search_weights,
+            search_fights_in_rollout=not args.search_fights_out_of_rollout,
             tensorboard_enabled=(
                 training_defaults.tensorboard_enabled
                 if args.no_tensorboard is None
@@ -426,6 +442,7 @@ def _new_plan(args: argparse.Namespace) -> TrainingPlan:
             max_grad_norm=_or_default(args.max_grad_norm, ppo_defaults.max_grad_norm),
             rollout_size=_or_default(args.rollout_size, ppo_defaults.rollout_size),
             update_epochs=_or_default(args.update_epochs, ppo_defaults.update_epochs),
+            target_kl=_or_default(args.target_kl, ppo_defaults.target_kl),
         ),
         reset=ResetSpec(
             character=_or_default(args.character, reset_defaults.character),
@@ -479,11 +496,15 @@ def _resumed_plan(
             "max_grad_norm": saved.ppo.max_grad_norm,
             "rollout_size": saved.ppo.rollout_size,
             "update_epochs": saved.ppo.update_epochs,
+            "target_kl": saved.ppo.target_kl,
             "backend": saved.training.backend,
             "search_combat": saved.training.search_combat,
             "search_simulations": saved.training.search_simulations,
             "search_depth": saved.training.search_turn_depth,
             "search_weights": saved.training.search_weights,
+            "search_fights_out_of_rollout": (
+                None if saved.training.search_fights_in_rollout else True
+            ),
             "sim_mode": saved.reset.sim_mode,
             "sim_max_fights": saved.reset.sim_max_fights,
             "sim_start_act": saved.reset.sim_start_act,

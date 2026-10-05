@@ -139,6 +139,9 @@ class TrainingConfig:
     search_simulations: int = 50
     search_turn_depth: int = 2
     search_weights: str | None = None
+    # False: searched fights are folded into the transition between the macro
+    # decisions around them instead of entering the rollout as steps.
+    search_fights_in_rollout: bool = True
 
     def __post_init__(self) -> None:
         for name in (
