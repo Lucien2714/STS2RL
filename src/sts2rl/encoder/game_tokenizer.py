@@ -146,15 +146,22 @@ class GameTokenizer:
         run = _mapping(state.get("run"))
         deck = _mapping(_mapping(observation.player_detail).get("deck"))
 
-        global_values = {
-            "state_type": _text(state.get("state_type")),
-            "character": _text(player.get("character")),
+        boss = _mapping(run.get("boss"))
+        global_indices = {
+            "state_type": self.vocabulary.lookup(
+                "state_types", _text(state.get("state_type"))
+            ),
+            "character": self.vocabulary.lookup(
+                "characters", _text(player.get("character"))
+            ),
+            # Absent before the act has a boss, and on recordings made before the
+            # API carried it: PAD, which reads as "unknown boss", not a wrong one.
+            "act_boss": self.vocabulary.lookup_first(
+                "encounters", (boss.get("id"), boss.get("name"))
+            ),
         }
         global_categorical = torch.tensor(
-            [
-                self.vocabulary.lookup(table, global_values[field])
-                for field, table in GLOBAL_CATEGORICAL
-            ],
+            [global_indices[field] for field, _ in GLOBAL_CATEGORICAL],
             dtype=torch.long,
         )
         global_numeric, global_numeric_mask = pack_numeric(

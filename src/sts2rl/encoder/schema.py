@@ -18,6 +18,11 @@ from typing import Mapping
 GLOBAL_CATEGORICAL: tuple[tuple[str, str], ...] = (
     ("state_type", "state_types"),
     ("character", "characters"),
+    # The act's boss, from ``run.boss`` on every screen. A deck is built for the
+    # boss it will meet -- act 1 bosses were won from 18% to 71% of the time in
+    # one run -- and the map, the one screen that used to name it, is never the
+    # screen a card reward, a rest site or a shop is decided on.
+    ("act_boss", "encounters"),
 )
 
 ACTION_NUMERIC_FIELDS = ("x", "y")

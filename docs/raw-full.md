@@ -36,7 +36,12 @@ Every response (except `menu`) includes these top-level fields alongside the sta
   "run": {
     "act": 1,               // Current act (1-indexed)
     "floor": 3,             // Total floors visited
-    "ascension": 0          // Ascension level
+    "ascension": 0,         // Ascension level
+    "boss": {               // The act's boss, on every screen (same id/name as map.boss).
+      "id": "WATERFALL_GIANT_BOSS",   //   Omitted while the act has no boss yet.
+      "name": "Waterfall Giant"
+    },
+    "second_boss": { ... }  // Only in an act with a second boss (map.bosses[1])
   },
   "player": { ... },        // Full player state (see Player Object below)
   // ... state-specific fields
@@ -625,11 +630,11 @@ Pick one card to add to your deck. Appears after claiming a card reward, or dire
     "boss": {
       "col": 3,
       "row": 15,
-      "id": "ENCOUNTER.VANTOM_BOSS",
+      "id": "VANTOM_BOSS",
       "name": "Vantom"
     },
     "bosses": [
-      { "col": 3, "row": 15, "id": "ENCOUNTER.VANTOM_BOSS", "name": "Vantom" }
+      { "col": 3, "row": 15, "id": "VANTOM_BOSS", "name": "Vantom" }
     ]
   },
   "run": { ... },

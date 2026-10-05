@@ -74,6 +74,39 @@ def _base_player(**changes: object) -> dict[str, object]:
     return player
 
 
+def _boss_column(tokenizer: GameTokenizer, boss: object) -> int:
+    run: dict[str, object] = {"act": 1, "floor": 5, "ascension": 0}
+    if boss is not None:
+        run["boss"] = boss
+    state = {"state_type": "card_reward", "run": run, "player": _base_player()}
+    tokenized = tokenizer.tokenize_state(GameObservation(state))
+    return int(tokenized.global_categorical[_column(GLOBAL_CATEGORICAL_FIELDS, "act_boss")])
+
+
+def test_the_act_boss_is_read_on_screens_that_are_not_the_map(
+    tokenizer: GameTokenizer,
+    vocabulary: GameVocabulary,
+):
+    """A card reward is decided without the map in view; run.boss carries it there."""
+    index = _boss_column(tokenizer, {"id": "WATERFALL_GIANT_BOSS", "name": "Waterfall Giant"})
+
+    assert index == vocabulary.lookup("encounters", "WATERFALL_GIANT_BOSS")
+    assert index not in (PAD_INDEX, UNKNOWN_INDEX)
+
+
+def test_the_act_boss_falls_back_to_its_name(tokenizer: GameTokenizer):
+    by_id = _boss_column(tokenizer, {"id": "CEREMONIAL_BEAST_BOSS"})
+    by_name = _boss_column(tokenizer, {"id": "NOT_A_REAL_BOSS_ID", "name": "Ceremonial Beast"})
+
+    assert by_name == by_id != UNKNOWN_INDEX
+
+
+def test_a_missing_boss_is_pad_and_an_unknown_one_is_unknown(tokenizer: GameTokenizer):
+    assert _boss_column(tokenizer, None) == PAD_INDEX
+    assert _boss_column(tokenizer, {}) == PAD_INDEX
+    assert _boss_column(tokenizer, {"id": "A_BOSS_FROM_A_LATER_PATCH"}) == UNKNOWN_INDEX
+
+
 def test_globals_come_from_the_single_state_the_api_returns(
     tokenizer: GameTokenizer,
     vocabulary: GameVocabulary,
@@ -90,6 +123,7 @@ def test_globals_come_from_the_single_state_the_api_returns(
     assert tokenized.global_categorical.tolist() == [
         vocabulary.lookup("state_types", "monster"),
         vocabulary.lookup("characters", "The Ironclad"),
+        PAD_INDEX,  # no run.boss: a recording from before the API carried it
     ]
     floor = _column(GLOBAL_NUMERIC_FIELDS, "floor")
     energy = _column(GLOBAL_NUMERIC_FIELDS, "energy")
