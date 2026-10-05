@@ -134,6 +134,9 @@ class TrainingConfig:
     # return scale -- this run started from, or None. Recorded for the same
     # reason as init_encoder; the optimizer and counters always start fresh.
     init_from: str | None = None
+    # With init_from: carry the source's Adam moments too, so the restart does not
+    # move the policy the way a fresh optimizer's first steps do.
+    init_optimizer: bool = False
     # Step 2 of docs/mcts: the combat search plays these rooms' fights on each
     # lane's simulator and PPO learns only the rest (the critic still sees the
     # fights). Recorded and refused on resume like the backend: a run whose
@@ -199,6 +202,10 @@ class TrainingConfig:
             raise ValueError("init_from must be a non-empty path or None")
         if self.init_from is not None and self.init_encoder is not None:
             raise ValueError("a run starts from init_encoder or init_from, not both")
+        if not isinstance(self.init_optimizer, bool):
+            raise TypeError("init_optimizer must be a boolean")
+        if self.init_optimizer and self.init_from is None:
+            raise ValueError("init_optimizer carries the optimizer of init_from, which is not set")
         try:
             torch.device(self.device)
         except (RuntimeError, TypeError) as exc:

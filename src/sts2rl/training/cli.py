@@ -72,6 +72,15 @@ def create_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--init-optimizer",
+        action="store_true",
+        default=None,
+        help=(
+            "with --init-from: also carry the source's optimizer moments (same model "
+            "only), so the restart does not jolt the policy the way a fresh Adam does"
+        ),
+    )
+    parser.add_argument(
         "--search-combat",
         action="store_true",
         default=None,
@@ -303,7 +312,11 @@ def run_training(args: argparse.Namespace) -> int:
         )
         encoder.to(agent.device)
     elif initial_weights is not None:
-        agent.initialize_from(initial_weights.encoder, initial_weights.return_scale)
+        agent.initialize_from(
+            initial_weights.encoder,
+            initial_weights.return_scale,
+            initial_weights.optimizer if plan.training.init_optimizer else None,
+        )
 
     with TrainingMetricsWriter(
         plan.training.run_dir,
@@ -434,6 +447,7 @@ def _new_plan(args: argparse.Namespace) -> TrainingPlan:
                 else str(args.init_encoder)
             ),
             init_from=getattr(args, "init_from", None),
+            init_optimizer=bool(getattr(args, "init_optimizer", None)),
             search_combat=bool(args.search_combat),
             search_rooms=(
                 tuple(room.strip() for room in args.search_rooms.split(",") if room.strip())

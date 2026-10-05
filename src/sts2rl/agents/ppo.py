@@ -485,18 +485,52 @@ class CandidatePPOAgent(Agent):
         self._completed_update_metrics.clear()
 
     def initialize_from(
-        self, encoder_state: Mapping[str, Tensor], return_scale: Mapping[str, object]
+        self,
+        encoder_state: Mapping[str, Tensor],
+        return_scale: Mapping[str, object],
+        optimizer_state: Mapping[str, object] | None = None,
     ) -> None:
-        """Start from another run's model: its weights and return scale, nothing else.
+        """Start from another run's model: its weights and return scale, and optionally
+        its optimizer's moments.
 
         The return scale comes with the critic it calibrates -- a critic reading its
-        own predictions at the wrong scale is worse than an untrained one. The
-        optimizer stays fresh: its moments belong to the old run's learning rate and,
-        after a migration, to rows and columns that may have moved.
+        own predictions at the wrong scale is worse than an untrained one.
+
+        The optimizer is fresh unless ``optimizer_state`` is given. A fresh Adam moves
+        every weight by about the full learning rate in its first steps, and measured
+        after two restarts the card choices moved three times as far in 18 updates as
+        in a settled run, and each run lost about two floors for its first 100+
+        episodes. The moments are carried only onto the same parameters in the same
+        shapes; this run's learning rate replaces the old one.
         """
         self._require_clean_checkpoint_boundary("initialize")
         self.game_encoder.load_state_dict(dict(encoder_state))
         self._return_scale.load(return_scale)
+        if optimizer_state is not None:
+            self._load_optimizer_moments(optimizer_state)
+
+    def _load_optimizer_moments(self, state: Mapping[str, object]) -> None:
+        parameters = list(self.game_encoder.parameters())
+        groups = state.get("param_groups")
+        moments = state.get("state")
+        if (
+            not isinstance(groups, list)
+            or len(groups) != 1
+            or len(groups[0].get("params", ())) != len(parameters)
+            or not isinstance(moments, Mapping)
+        ):
+            raise ValueError("optimizer state does not belong to this model's parameters")
+        for index, entry in moments.items():
+            for name in ("exp_avg", "exp_avg_sq"):
+                tensor = entry.get(name) if isinstance(entry, Mapping) else None
+                if not isinstance(tensor, Tensor) or tensor.shape != parameters[int(index)].shape:
+                    raise ValueError(
+                        f"optimizer moment {name} of parameter {index} does not match its shape"
+                    )
+        self.optimizer.load_state_dict(dict(state))
+        for group in self.optimizer.param_groups:
+            group["lr"] = self.config.learning_rate
+        self._move_optimizer_state_to_device()
 
     def drain_update_metrics(self) -> tuple[dict[str, float], ...]:
         """Return completed PPO update metrics once, in completion order."""

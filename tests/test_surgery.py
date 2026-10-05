@@ -408,6 +408,57 @@ def test_initial_weights_are_the_model_without_its_optimizer(tmp_path, vocabular
     assert agent.optimizer.param_groups[0]["lr"] == 1e-5
 
 
+def _stepped(agent):
+    """Give the agent's Adam real moments: one step on a constant gradient."""
+    for parameter in agent.game_encoder.parameters():
+        parameter.grad = torch.ones_like(parameter)
+    agent.optimizer.step()
+    agent.optimizer.zero_grad()
+    return agent
+
+
+def test_the_optimizer_moments_come_along_only_when_asked(tmp_path, vocabulary):
+    """A fresh Adam moved the card choices three times as far after a restart."""
+    plan = _plan(tmp_path / "old")
+    trained = _stepped(CandidatePPOAgent(GameTokenizer(vocabulary), _encoder(vocabulary), config=plan.ppo))
+    manager = CheckpointManager(tmp_path / "old", vocabulary)
+    manager.initialize_run(plan, resume=False)
+    manager.save("update_000004.pt", trained, plan, TrainingState(), "tensorboard")
+    weights = load_initial_weights(tmp_path / "old", vocabulary=vocabulary, encoder_config=CONFIG)
+
+    fresh = CandidatePPOAgent(GameTokenizer(vocabulary), GameEncoder(vocabulary, CONFIG), config=PPOConfig(learning_rate=1e-5))
+    fresh.initialize_from(weights.encoder, weights.return_scale)
+    assert fresh.optimizer.state_dict()["state"] == {}
+
+    warm = CandidatePPOAgent(GameTokenizer(vocabulary), GameEncoder(vocabulary, CONFIG), config=PPOConfig(learning_rate=1e-5))
+    warm.initialize_from(weights.encoder, weights.return_scale, weights.optimizer)
+    old_state, new_state = trained.optimizer.state_dict()["state"], warm.optimizer.state_dict()["state"]
+    assert set(new_state) == set(old_state) and len(new_state) > 0
+    for index in old_state:
+        assert torch.equal(new_state[index]["exp_avg"], old_state[index]["exp_avg"])
+        assert torch.equal(new_state[index]["exp_avg_sq"], old_state[index]["exp_avg_sq"])
+    assert warm.optimizer.param_groups[0]["lr"] == 1e-5  # this run's rate, not the old one
+
+
+def test_moments_of_another_model_are_refused(vocabulary):
+    other = _stepped(CandidatePPOAgent(
+        GameTokenizer(vocabulary), GameEncoder(vocabulary, EncoderConfig(hidden_dim=8, entity_heads=4, entity_ff_dim=16))
+    ))
+    agent = CandidatePPOAgent(GameTokenizer(vocabulary), GameEncoder(vocabulary, CONFIG))
+    with pytest.raises(ValueError, match="does not match its shape"):
+        agent.initialize_from(agent.game_encoder.state_dict(), {"var": 1.0, "count": 1.0}, other.optimizer.state_dict())
+
+
+def test_init_optimizer_needs_init_from(tmp_path):
+    with pytest.raises(ValueError, match="init_optimizer"):
+        TrainingConfig(run_dir=tmp_path, init_optimizer=True)
+    args = cli.create_parser().parse_args(
+        ["--run-dir", str(tmp_path / "run"), "--init-from", str(tmp_path / "old"), "--init-optimizer"]
+    )
+    assert cli._new_plan(args).training.init_optimizer is True
+    assert TrainingConfig(run_dir=tmp_path).init_optimizer is False
+
+
 def test_initial_weights_refuse_another_width_or_vocabulary(tmp_path, vocabulary):
     path, _ = _save_run(tmp_path / "old", vocabulary)
 

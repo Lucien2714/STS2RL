@@ -271,11 +271,13 @@ def resolve_source(source: str | Path, vocabulary: GameVocabulary) -> tuple[Chec
 
 @dataclass(frozen=True)
 class InitialWeights:
-    """What a new run takes from an old one: the model, not the optimizer or counters."""
+    """What a new run takes from an old one: the model and its optimizer's moments,
+    never the counters. The moments are used only when the new run asks for them."""
 
     source: Path
     encoder: dict[str, Tensor]
     return_scale: Mapping[str, Any]
+    optimizer: Mapping[str, Any] | None = None
 
 
 def load_initial_weights(
@@ -299,7 +301,10 @@ def load_initial_weights(
     return_scale = loaded.agent_state.get("return_scale")
     if not isinstance(encoder, Mapping) or not isinstance(return_scale, Mapping):
         raise SurgeryError(f"{path}: the checkpoint has no encoder or return scale")
-    return InitialWeights(path, dict(encoder), dict(return_scale))
+    optimizer = loaded.agent_state.get("optimizer")
+    return InitialWeights(
+        path, dict(encoder), dict(return_scale), dict(optimizer) if isinstance(optimizer, Mapping) else None
+    )
 
 
 def migrate_checkpoint(
