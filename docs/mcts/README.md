@@ -15,3 +15,5 @@
 | Step 1-c：选搜索深度 | [step1c-depth.md](step1c-depth.md) | 2026-10-03 |
 | Step 1-d：全量实验 | [step1d-full-experiment.md](step1d-full-experiment.md) | 2026-10-03 |
 | Step 2-a/b/c：分层 agent 与冒烟测试 | [step2abc-layered-agent.md](step2abc-layered-agent.md) | 2026-10-03 |
+| Step 2-d：MCTS 打战斗的 PPO 训练与评估 | [step2d-training-run.md](step2d-training-run.md) | 2026-10-04 |
+| Step 3-a：蒸馏战斗 actor | [step3a-distillation.md](step3a-distillation.md) | 2026-10-04 |
