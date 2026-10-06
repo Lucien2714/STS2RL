@@ -26,6 +26,7 @@ class BranchingGame:
         self.state = {"turns": 0, "score": 0.0, "world": world}
         self.points: dict[int, dict] = {}
         self.reseeds: list[int] = []
+        self.restores: list[tuple[int, int | None]] = []
         self.released: list[int] = []
 
     def snapshot(self) -> int:
@@ -33,8 +34,11 @@ class BranchingGame:
         self.points[point] = dict(self.state)
         return point
 
-    def restore(self, point: int) -> dict:
+    def restore(self, point: int, seed: int | None = None) -> dict:
+        self.restores.append((point, seed))
         self.state = dict(self.points[point])
+        if seed is not None:
+            self.reseed(seed)
         return self.state
 
     def release(self, point: int) -> None:
@@ -118,6 +122,25 @@ def test_the_seed_pool_is_cycled_and_fresh_per_decision():
 
     search.search(game, game.state)
     assert set(game.reseeds[64:]).isdisjoint(first)
+
+
+def test_each_simulation_restores_and_reseeds_in_one_call():
+    """The seed rides on the restore (one simulator request), and the final restore,
+    which leaves the game where the decision was taken, carries none."""
+    game = BranchingGame()
+    search = search_for(game, simulations=5, seed_pool=8)
+    search.search(game, game.state)
+    seeded, final = game.restores[:-1], game.restores[-1]
+    assert [seed for _, seed in seeded] == game.reseeds
+    assert len(seeded) == 5 and None not in game.reseeds
+    assert final == (1, None)
+
+    game = BranchingGame()
+    search = search_for(game, simulations=5, reseed=True)
+    search.config = MctsConfig(simulations=5, turn_depth=1, reseed=False)
+    search.search(game, game.state)
+    assert [seed for _, seed in game.restores] == [None] * 6
+    assert game.reseeds == []
 
 
 def test_availability_counts_only_the_worlds_that_offered_an_action():

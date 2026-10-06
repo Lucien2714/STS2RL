@@ -32,8 +32,13 @@ class SimulatorSearchEnv:
     def snapshot(self) -> int:
         return self.env.client.sim_snapshot()
 
-    def restore(self, point: int) -> RawState:
-        return extract_raw_state(self.env.client.sim_restore(point))
+    def restore(self, point: int, seed: int | None = None) -> RawState:
+        """Return to ``point``; with ``seed``, also redraw its hidden future, in one request.
+
+        The state returned is the one after the reseed.  ``STS2Client.sim_restore``
+        falls back to a separate reseed when the simulator does not confirm it.
+        """
+        return extract_raw_state(self.env.client.sim_restore(point, reseed=seed))
 
     def release(self, point: int) -> None:
         self.env.client.sim_release(point)

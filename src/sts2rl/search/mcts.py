@@ -52,7 +52,9 @@ class SearchEnv(Protocol):
 
     def snapshot(self) -> int: ...
 
-    def restore(self, point: int) -> RawState: ...
+    def restore(self, point: int, seed: int | None = None) -> RawState:
+        """Return to ``point``, then ``reseed(seed)`` when a seed is given; the state after both."""
+        ...
 
     def release(self, point: int) -> None: ...
 
@@ -182,9 +184,9 @@ class CombatSearch:
             for index in range(budget):
                 if deadline is not None and index > 0 and time.perf_counter() > deadline:
                     break
-                world = env.restore(point)
-                if self.config.reseed:
-                    env.reseed(seeds[index % len(seeds)])
+                # Restore and reseed travel as one request against the simulator.
+                seed = seeds[index % len(seeds)] if self.config.reseed else None
+                world = env.restore(point, seed)
                 self._simulate(env, root, world)
         finally:
             # The environment is left where the decision was taken, with its own hidden

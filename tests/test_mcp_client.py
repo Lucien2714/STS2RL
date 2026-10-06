@@ -1,91 +1,158 @@
+import json
+import logging
+import socket
+import threading
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
 import pytest
-import requests
+import urllib3
+from urllib3.exceptions import (
+    ConnectTimeoutError,
+    DecodeError,
+    MaxRetryError,
+    NewConnectionError,
+    ProtocolError,
+    ReadTimeoutError,
+)
 
 from sts2rl.env import mcp_client
 from sts2rl.env.mcp_client import STS2Client, STS2ClientError
 
 
 class FakeResponse:
-    def __init__(self, data, status_code=200, text=""):
-        self.data = data
-        self.status_code = status_code
-        self.text = text
+    """What the client reads from a urllib3 response: the status and the body."""
 
-    def json(self):
-        return self.data
+    def __init__(self, data=None, status=200, raw: bytes | None = None):
+        self.status = status
+        self.data = raw if raw is not None else json.dumps(data).encode()
 
 
-class FakeSession:
-    def __init__(self, response=None):
-        self.response = response or FakeResponse({"state_type": "menu"})
-        self.requests = []
+class FakePool:
+    """A urllib3 connection pool that records each request and answers it.
+
+    ``answer`` is a response, or a function of the decoded request returning one.
+    """
+
+    def __init__(self, answer=None):
+        self.answer = answer if answer is not None else FakeResponse({"state_type": "menu"})
+        self.requests: list[dict] = []
         self.closed = False
 
-    def request(self, **kwargs):
-        self.requests.append(kwargs)
-        return self.response
+    def urlopen(self, method, url, body=None, headers=None, **kwargs):
+        request = {
+            "method": method,
+            "url": url,
+            "json": json.loads(body) if body is not None else None,
+            "headers": headers,
+            **kwargs,
+        }
+        self.requests.append(request)
+        return self.answer(request) if callable(self.answer) else self.answer
 
     def close(self):
         self.closed = True
 
 
 def test_client_builds_request_from_complete_base_url():
-    session = FakeSession()
-    client = STS2Client(
-        base_url="http://localhost:16666/api/v1/",
-        timeout=3.5,
-        session=session,
-    )
+    pool = FakePool()
+    client = STS2Client(base_url="http://localhost:16666/api/v1/", timeout=3.5, pool=pool)
 
     state = client.get_state()
 
     assert state == {"state_type": "menu"}
-    assert session.requests == [
-        {
-            "method": "GET",
-            "url": "http://localhost:16666/api/v1/singleplayer",
-            "params": {"format": "json"},
-            "json": None,
-            "timeout": 3.5,
-        }
-    ]
+    (request,) = pool.requests
+    assert (request["method"], request["url"], request["json"]) == (
+        "GET",
+        "/api/v1/singleplayer?format=json",
+        None,
+    )
+    timeout = request["timeout"]
+    assert (timeout.connect_timeout, timeout.read_timeout) == (3.5, 3.5)
+    # urllib3 never retries on its own: the client's rule is the only one.
+    assert request["retries"] is False
 
 
-def test_client_does_not_close_injected_session():
-    session = FakeSession()
-    client = STS2Client(session=session)
+def test_query_parameters_are_url_encoded():
+    pool = FakePool(FakeResponse({"results": []}))
+
+    STS2Client(pool=pool).search_wiki("Perfected Strike & co", limit=3)
+
+    assert pool.requests[0]["url"] == (
+        "/api/v1/wiki?query=Perfected+Strike+%26+co&item_type=all&limit=3"
+    )
+
+
+def test_an_action_posts_its_json_body():
+    pool = FakePool(FakeResponse({"status": "ok"}))
+
+    STS2Client(pool=pool, action_delay_seconds=0).play_card(2, target="JAW_WORM_0")
+
+    (request,) = pool.requests
+    assert request["method"] == "POST"
+    assert request["url"] == "/api/v1/singleplayer"
+    assert request["json"] == {"action": "play_card", "card_index": 2, "target": "JAW_WORM_0"}
+    assert request["headers"]["Content-Type"] == "application/json"
+
+
+def test_client_does_not_close_injected_pool():
+    pool = FakePool()
+    client = STS2Client(pool=pool)
 
     client.close()
 
-    assert session.closed is False
+    assert pool.closed is False
 
 
-def test_context_manager_closes_owned_session(monkeypatch):
-    session = FakeSession()
-    monkeypatch.setattr(mcp_client.requests, "Session", lambda: session)
-
+def test_context_manager_closes_owned_pool():
     with STS2Client() as client:
-        assert client.session is session
-        assert session.closed is False
+        assert isinstance(client.pool, urllib3.HTTPConnectionPool)
+        assert client.pool.pool is not None
 
-    assert session.closed is True
+    # HTTPConnectionPool.close drops its queue of connections.
+    assert client.pool.pool is None
+
+
+def test_https_is_verified_and_other_schemes_are_refused():
+    with STS2Client(base_url="https://sim.example:15600/api/v1") as client:
+        assert isinstance(client.pool, urllib3.HTTPSConnectionPool)
+        # None resolves to CERT_REQUIRED against the system trust store.
+        assert client.pool.cert_reqs in (None, "CERT_REQUIRED")
+        assert client.pool.ca_certs is None
+
+    with pytest.raises(ValueError, match="http:// or https://"):
+        STS2Client(base_url="ftp://localhost:15600/api/v1")
+
+
+def test_a_redirect_is_not_followed():
+    """Neither the mod nor the simulator redirects; a 3xx is an answer, not a hop."""
+    pool = FakePool(FakeResponse({"error": "moved"}, status=302))
+
+    with pytest.raises(STS2ClientError, match="HTTP 302: moved"):
+        STS2Client(pool=pool).get_state()
+
+    assert pool.requests[0]["redirect"] is False
+    assert len(pool.requests) == 1
 
 
 def test_http_error_with_non_object_json_has_clear_message():
-    session = FakeSession(FakeResponse(["backend failure"], status_code=500))
-    client = STS2Client(session=session)
+    client = STS2Client(pool=FakePool(FakeResponse(["backend failure"], status=500)))
 
-    try:
+    with pytest.raises(STS2ClientError) as caught:
         client.get_state()
-    except STS2ClientError as exc:
-        assert str(exc) == "HTTP 500: ['backend failure']"
-    else:
-        raise AssertionError("Expected STS2ClientError")
+
+    assert str(caught.value) == "HTTP 500: ['backend failure']"
+
+
+def test_a_non_json_response_is_an_error_with_its_text():
+    client = STS2Client(pool=FakePool(FakeResponse(raw=b"<html>oops</html>", status=502)))
+
+    with pytest.raises(STS2ClientError, match="Non-JSON response: HTTP 502: <html>oops</html>"):
+        client.get_state()
 
 
 def test_rejected_actions_carry_the_unchanged_state():
     """The API returns HTTP 200 with status=error and the state it did not change."""
-    session = FakeSession(
+    pool = FakePool(
         FakeResponse(
             {
                 "status": "error",
@@ -96,16 +163,16 @@ def test_rejected_actions_carry_the_unchanged_state():
     )
 
     with pytest.raises(STS2ClientError, match="out of range") as caught:
-        STS2Client(session=session).play_card(99)
+        STS2Client(pool=pool).play_card(99)
 
     assert caught.value.state == {"state_type": "monster"}
 
 
 def test_errors_without_a_state_carry_none():
-    session = FakeSession(FakeResponse({"error": "Not found"}, status_code=404))
+    pool = FakePool(FakeResponse({"error": "Not found"}, status=404))
 
     with pytest.raises(STS2ClientError) as caught:
-        STS2Client(session=session).get_state()
+        STS2Client(pool=pool).get_state()
 
     assert caught.value.state is None
 
@@ -114,7 +181,7 @@ def test_accepted_actions_pause_before_the_next_request(monkeypatch):
     """The next action must not reach a game still resolving the last one."""
     slept: list[float] = []
     monkeypatch.setattr(mcp_client.time, "sleep", slept.append)
-    client = STS2Client(session=FakeSession(), action_delay_seconds=0.1)
+    client = STS2Client(pool=FakePool(), action_delay_seconds=0.1)
 
     client.play_card(0)
     client.end_turn()
@@ -126,7 +193,7 @@ def test_reading_state_does_not_pause(monkeypatch):
     """Only actions change the game, so only actions are worth waiting on."""
     slept: list[float] = []
     monkeypatch.setattr(mcp_client.time, "sleep", slept.append)
-    client = STS2Client(session=FakeSession(), action_delay_seconds=0.1)
+    client = STS2Client(pool=FakePool(), action_delay_seconds=0.1)
 
     client.get_state()
 
@@ -137,10 +204,10 @@ def test_rejected_actions_do_not_pause(monkeypatch):
     """A rejected action changed nothing, so there is nothing to settle."""
     slept: list[float] = []
     monkeypatch.setattr(mcp_client.time, "sleep", slept.append)
-    session = FakeSession(
+    pool = FakePool(
         FakeResponse({"status": "error", "error": "no", "state": {"state_type": "map"}})
     )
-    client = STS2Client(session=session, action_delay_seconds=0.1)
+    client = STS2Client(pool=pool, action_delay_seconds=0.1)
 
     with pytest.raises(STS2ClientError):
         client.play_card(0)
@@ -151,7 +218,7 @@ def test_rejected_actions_do_not_pause(monkeypatch):
 def test_a_zero_delay_skips_the_call_entirely(monkeypatch):
     slept: list[float] = []
     monkeypatch.setattr(mcp_client.time, "sleep", slept.append)
-    client = STS2Client(session=FakeSession(), action_delay_seconds=0.0)
+    client = STS2Client(pool=FakePool(), action_delay_seconds=0.0)
 
     client.end_turn()
 
@@ -163,68 +230,107 @@ def test_a_negative_delay_is_rejected():
         STS2Client(action_delay_seconds=-0.1)
 
 
-class FlakySession(FakeSession):
-    """A session that drops the connection a fixed number of times first."""
+# Every way urllib3 reports a request that produced no response, with
+# ``retries=False`` (which raises the underlying error, not MaxRetryError) and
+# without.  requests mapped each of them onto ConnectionError or Timeout.
+TRANSPORT_FAILURES = [
+    pytest.param(lambda: ProtocolError("Connection aborted.", ConnectionResetError(10054)), id="reset"),
+    pytest.param(lambda: NewConnectionError(None, "refused"), id="refused"),
+    pytest.param(lambda: ConnectTimeoutError("connect timed out"), id="connect-timeout"),
+    pytest.param(lambda: ReadTimeoutError(None, "/x", "read timed out"), id="read-timeout"),
+    pytest.param(lambda: MaxRetryError(None, "/x", NewConnectionError(None, "refused")), id="max-retry"),
+    pytest.param(lambda: ConnectionRefusedError(10061, "refused"), id="oserror"),
+]
 
-    def __init__(self, failures: int, response=None, error=None):
-        super().__init__(response)
+
+class FlakyPool(FakePool):
+    """A pool whose first ``failures`` requests die in transport."""
+
+    def __init__(self, failures: int, error=None, answer=None):
+        super().__init__(answer)
         self.remaining = failures
-        self.error = error or requests.ConnectionError("connection reset")
+        self.error = error or (lambda: ProtocolError("Connection aborted.", ConnectionResetError()))
         self.attempts = 0
 
-    def request(self, **kwargs):
+    def urlopen(self, method, url, body=None, headers=None, **kwargs):
         self.attempts += 1
         if self.remaining:
             self.remaining -= 1
-            raise self.error
-        return super().request(**kwargs)
+            raise self.error()
+        return super().urlopen(method, url, body=body, headers=headers, **kwargs)
 
 
-def test_a_dropped_read_is_retried(monkeypatch):
-    """Four clients on one machine drop connections; a read replays for free."""
-    monkeypatch.setattr(mcp_client.time, "sleep", lambda _: None)
-    session = FlakySession(failures=2)
-    client = STS2Client(session=session)
+@pytest.mark.parametrize("error", TRANSPORT_FAILURES)
+def test_a_dropped_read_is_retried(monkeypatch, error):
+    """Clients on one machine drop connections; a read replays for free."""
+    slept: list[float] = []
+    monkeypatch.setattr(mcp_client.time, "sleep", slept.append)
+    pool = FlakyPool(failures=2, error=error)
+    client = STS2Client(pool=pool, retry_backoff_seconds=0.5)
 
     state = client.get_state()
 
     assert state == {"state_type": "menu"}
-    assert session.attempts == 3
+    assert pool.attempts == 3
+    assert slept == [0.5, 1.0]
 
 
 def test_a_read_that_never_recovers_still_fails(monkeypatch):
     monkeypatch.setattr(mcp_client.time, "sleep", lambda _: None)
-    session = FlakySession(failures=99)
-    client = STS2Client(session=session, max_retries=2)
+    pool = FlakyPool(failures=99)
+    client = STS2Client(pool=pool, max_retries=2)
 
     with pytest.raises(STS2ClientError, match="Request failed"):
         client.get_state()
 
-    assert session.attempts == 3
+    assert pool.attempts == 3
 
 
-def test_a_dropped_action_is_never_replayed(monkeypatch):
+@pytest.mark.parametrize("error", TRANSPORT_FAILURES)
+def test_a_dropped_action_is_never_replayed(monkeypatch, error):
     """The game may have applied it before the socket died; replaying it twice
     would play the card twice, so an action surfaces instead."""
     monkeypatch.setattr(mcp_client.time, "sleep", lambda _: None)
-    session = FlakySession(failures=1)
-    client = STS2Client(session=session)
+    pool = FlakyPool(failures=1, error=error)
+    client = STS2Client(pool=pool)
 
     with pytest.raises(STS2ClientError, match="Request failed"):
         client.play_card(0)
 
-    assert session.attempts == 1
+    assert pool.attempts == 1
+
+
+def test_a_dropped_release_is_never_replayed(monkeypatch):
+    """DELETE is not a read either: only GET replays."""
+    monkeypatch.setattr(mcp_client.time, "sleep", lambda _: None)
+    pool = FlakyPool(failures=1)
+
+    with pytest.raises(STS2ClientError, match="Request failed"):
+        STS2Client(pool=pool).sim_release(3)
+
+    assert pool.attempts == 1
+
+
+def test_a_failure_that_is_not_transport_is_not_retried(monkeypatch):
+    """A response that arrived but could not be decoded is an answer, not a drop."""
+    monkeypatch.setattr(mcp_client.time, "sleep", lambda _: None)
+    pool = FlakyPool(failures=5, error=lambda: DecodeError("bad gzip"))
+
+    with pytest.raises(STS2ClientError, match="bad gzip"):
+        STS2Client(pool=pool).get_state()
+
+    assert pool.attempts == 1
 
 
 def test_an_http_error_is_a_real_answer_and_is_not_retried(monkeypatch):
     monkeypatch.setattr(mcp_client.time, "sleep", lambda _: None)
-    session = FakeSession(FakeResponse({"error": "nope"}, status_code=500))
-    client = STS2Client(session=session)
+    pool = FakePool(FakeResponse({"error": "nope"}, status=500))
+    client = STS2Client(pool=pool)
 
     with pytest.raises(STS2ClientError, match="HTTP 500"):
         client.get_state()
 
-    assert len(session.requests) == 1
+    assert len(pool.requests) == 1
 
 
 def test_a_negative_retry_count_is_rejected():
@@ -233,135 +339,311 @@ def test_a_negative_retry_count_is_rejected():
 
 
 def test_branch_points_use_the_simulator_endpoints():
-    session = FakeSession(FakeResponse({"status": "ok", "id": 7}))
-    client = STS2Client(base_url="http://localhost:15600/api/v1", session=session)
+    pool = FakePool(FakeResponse({"status": "ok", "id": 7}))
+    client = STS2Client(base_url="http://localhost:15600/api/v1", pool=pool)
 
     assert client.sim_snapshot() == 7
     client.sim_restore(7)
     client.sim_release(7)
 
-    assert [(r["method"], r["url"], r["json"]) for r in session.requests] == [
-        ("POST", "http://localhost:15600/api/v1/sim/snapshot", {}),
-        ("POST", "http://localhost:15600/api/v1/sim/restore", {"id": 7}),
-        ("DELETE", "http://localhost:15600/api/v1/sim/snapshot/7", None),
+    assert [(r["method"], r["url"], r["json"]) for r in pool.requests] == [
+        ("POST", "/api/v1/sim/snapshot", {}),
+        ("POST", "/api/v1/sim/restore", {"id": 7}),
+        ("DELETE", "/api/v1/sim/snapshot/7", None),
     ]
 
 
 def test_restoring_an_unknown_branch_point_fails_loudly():
-    session = FakeSession(
-        FakeResponse({"status": "error", "error": "No branch point 9."}, status_code=400)
-    )
-    client = STS2Client(session=session)
+    pool = FakePool(FakeResponse({"status": "error", "error": "No branch point 9."}, status=400))
+    client = STS2Client(pool=pool)
 
     with pytest.raises(STS2ClientError, match="No branch point 9"):
         client.sim_restore(9)
 
 
 def test_reseed_and_seeded_reset_reach_the_simulator():
-    session = FakeSession(FakeResponse({"status": "ok"}))
-    client = STS2Client(base_url="http://localhost:15600/api/v1", session=session)
+    pool = FakePool(FakeResponse({"status": "ok"}))
+    client = STS2Client(base_url="http://localhost:15600/api/v1", pool=pool)
 
     client.sim_reseed(123)
     client.sim_reset("IRONCLAD", "ABC", start_boss=True, reseed=9)
     client.sim_reset("IRONCLAD", "ABC")
 
-    reseed, seeded, plain = session.requests
-    assert (reseed["url"], reseed["json"]) == (
-        "http://localhost:15600/api/v1/sim/reseed",
-        {"seed": 123},
-    )
+    reseed, seeded, plain = pool.requests
+    assert (reseed["url"], reseed["json"]) == ("/api/v1/sim/reseed", {"seed": 123})
     assert seeded["json"]["reseed"] == 9
     # Without a reseed the field is left out, so the simulator restores streams as saved.
     assert "reseed" not in plain["json"]
 
 
-class CannedAdapter(requests.adapters.BaseAdapter):
-    """A transport under a real ``requests.Session``: records what it is sent.
+def _simulator(echoes: bool):
+    """Answer restore and reseed as a simulator does, with or without the echo."""
 
-    It sits below everything the session does per request -- environment
-    lookups, cookies, header merging -- so those still run for real.
-    """
+    def answer(request):
+        body = request["json"]
+        if request["url"].endswith("/sim/restore"):
+            response = {"status": "ok", "state": {"state_type": "monster", "from": "restore"}}
+            if echoes and "reseed" in body:
+                response["reseeded"] = body["reseed"]
+            return FakeResponse(response)
+        return FakeResponse({"status": "ok", "state": {"state_type": "monster", "from": "reseed"}})
 
-    def __init__(self, failures: int = 0) -> None:
-        super().__init__()
-        self.sent: list[tuple[requests.PreparedRequest, dict]] = []
-        self.failures = failures
-
-    def send(self, request, **kwargs):
-        self.sent.append((request, kwargs))
-        if self.failures:
-            self.failures -= 1
-            raise requests.ConnectionError("connection reset")
-        response = requests.Response()
-        response.status_code = 200
-        response._content = b'{"state_type": "menu"}'
-        response.encoding = "utf-8"
-        response.request = request
-        response.url = request.url
-        return response
-
-    def close(self):
-        pass
+    return answer
 
 
-def _client_over(adapter: CannedAdapter, session: requests.Session | None = None) -> STS2Client:
-    client = STS2Client(session=session, action_delay_seconds=0)
-    client.session.mount("http://", adapter)
-    return client
+def test_a_restore_with_a_reseed_is_one_request():
+    pool = FakePool(_simulator(echoes=True))
+    client = STS2Client(pool=pool)
+
+    response = client.sim_restore(4, reseed=77)
+    client.sim_restore(4, reseed=78)
+
+    assert response["reseeded"] == 77
+    assert [(r["url"], r["json"]) for r in pool.requests] == [
+        ("/api/v1/sim/restore", {"id": 4, "reseed": 77}),
+        ("/api/v1/sim/restore", {"id": 4, "reseed": 78}),
+    ]
 
 
-def test_the_client_session_reads_nothing_from_the_environment():
-    """netrc and proxy lookups ran on every request and cost a third of its time."""
-    assert STS2Client().session.trust_env is False
+@pytest.mark.parametrize("echoes, requests_sent", [(True, 1), (False, 2)])
+def test_the_search_env_restores_and_reseeds_through_the_client(echoes, requests_sent):
+    from sts2rl.env.game_env import GameEnv
+    from sts2rl.search.sim_env import SimulatorSearchEnv
+
+    pool = FakePool(_simulator(echoes=echoes))
+    sim = SimulatorSearchEnv(GameEnv(client=STS2Client(pool=pool), backend="sim"))
+
+    state = sim.restore(4, 9)
+    plain = sim.restore(4)
+
+    # Either way the state comes from the response that applied the reseed.
+    assert state == {"state_type": "monster", "from": "reseed" if not echoes else "restore"}
+    assert plain["from"] == "restore"
+    assert len(pool.requests) == requests_sent + 1
+    assert pool.requests[-1]["json"] == {"id": 4}
 
 
-def test_no_proxy_or_netrc_reaches_a_request(monkeypatch):
-    monkeypatch.setenv("HTTP_PROXY", "http://proxy.invalid:9")
+def test_seed_zero_is_a_seed():
+    pool = FakePool(_simulator(echoes=True))
 
-    def no_netrc(*args, **kwargs):
-        raise AssertionError("netrc must not be read")
+    response = STS2Client(pool=pool).sim_restore(4, reseed=0)
 
-    monkeypatch.setattr(requests.sessions, "get_netrc_auth", no_netrc)
-    adapter = CannedAdapter()
-
-    assert _client_over(adapter).get_state() == {"state_type": "menu"}
-
-    request, kwargs = adapter.sent[0]
-    assert "http" not in kwargs["proxies"]
-    assert "Authorization" not in request.headers
-    # Keep-alive is untouched: the connection is reused across requests.
-    assert request.headers["Connection"] == "keep-alive"
+    assert response["reseeded"] == 0
+    assert [r["json"] for r in pool.requests] == [{"id": 4, "reseed": 0}]
 
 
-def test_an_injected_session_is_left_as_given(monkeypatch):
-    """A caller that needs a proxy brings its own session, and keeps it.
+def test_a_restore_without_a_reseed_sends_no_reseed_field():
+    pool = FakePool(_simulator(echoes=True))
 
-    This is also the control for the test above: the same environment does
-    reach a request through a session that trusts it.
-    """
-    monkeypatch.setenv("HTTP_PROXY", "http://proxy.invalid:9")
+    STS2Client(pool=pool).sim_restore(4)
+
+    assert [r["json"] for r in pool.requests] == [{"id": 4}]
+
+
+def test_a_simulator_that_ignores_the_reseed_gets_a_separate_one(caplog):
+    """An old simulator restores, ignores ``reseed``, and does not echo it. Trusting
+    that would plan against the real future; the client reseeds itself instead."""
+    pool = FakePool(_simulator(echoes=False))
+    client = STS2Client(pool=pool)
+
+    with caplog.at_level(logging.WARNING, logger=mcp_client.__name__):
+        first = client.sim_restore(4, reseed=77)
+        second = client.sim_restore(4, reseed=78)
+
+    # The state handed back is the one after the reseed.
+    assert first["state"]["from"] == second["state"]["from"] == "reseed"
+    assert [(r["url"], r["json"]) for r in pool.requests] == [
+        ("/api/v1/sim/restore", {"id": 4, "reseed": 77}),
+        ("/api/v1/sim/reseed", {"seed": 77}),
+        # Known now: restore plainly and reseed separately, without asking again.
+        ("/api/v1/sim/restore", {"id": 4}),
+        ("/api/v1/sim/reseed", {"seed": 78}),
+    ]
+    assert len([r for r in caplog.records if "ignores 'reseed'" in r.getMessage()]) == 1
+
+
+def test_a_restore_that_reseeds_another_seed_fails():
+    def answer(request):
+        return FakeResponse({"status": "ok", "reseeded": 5, "state": {"state_type": "monster"}})
+
+    with pytest.raises(STS2ClientError, match="reseeded 5, asked for 77") as caught:
+        STS2Client(pool=FakePool(answer)).sim_restore(4, reseed=77)
+
+    assert caught.value.state == {"state_type": "monster"}
+
+
+def test_a_refused_reseed_on_restore_carries_the_restored_state():
+    pool = FakePool(
+        FakeResponse(
+            {"status": "error", "error": "No fight to reseed", "state": {"state_type": "map"}},
+            status=409,
+        )
+    )
+
+    with pytest.raises(STS2ClientError, match="No fight to reseed") as caught:
+        STS2Client(pool=pool).sim_restore(4, reseed=77)
+
+    assert caught.value.state == {"state_type": "map"}
+    assert len(pool.requests) == 1
+
+
+# ---------------------------------------------------------------------------
+# Against a real socket: keep-alive, timeouts, dropped connections, proxies.
+# ---------------------------------------------------------------------------
+
+
+class _Server:
+    """A local HTTP/1.1 server that counts connections and requests."""
+
+    def __init__(self) -> None:
+        owner = self
+        self.connections = 0
+        self.paths: list[str] = []
+        self.delay = 0.0
+        self.drops = 0
+        self.lock = threading.Lock()
+
+        class Handler(BaseHTTPRequestHandler):
+            protocol_version = "HTTP/1.1"
+
+            def setup(self):
+                super().setup()
+                with owner.lock:
+                    owner.connections += 1
+
+            def _answer(self):
+                length = int(self.headers.get("Content-Length") or 0)
+                if length:
+                    self.rfile.read(length)
+                with owner.lock:
+                    owner.paths.append(self.path)
+                    drop = owner.drops > 0
+                    owner.drops -= drop
+                if drop:
+                    # Close without a response: the client sees a reset connection.
+                    self.close_connection = True
+                    self.connection.shutdown(socket.SHUT_RDWR)
+                    return
+                if owner.delay:
+                    # Not time.sleep: the tests stub that out for the client's backoff.
+                    threading.Event().wait(owner.delay)
+                payload = b'{"state_type": "menu"}'
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(payload)))
+                self.end_headers()
+                self.wfile.write(payload)
+
+            do_GET = do_POST = do_DELETE = _answer
+
+            def log_message(self, *args):
+                pass
+
+        class Server(ThreadingHTTPServer):
+            daemon_threads = True
+
+            def handle_error(self, request, client_address):
+                pass  # a client that timed out leaves a write to a closed socket
+
+        self.httpd = Server(("127.0.0.1", 0), Handler)
+        self.port = self.httpd.server_address[1]
+        self.thread = threading.Thread(
+            target=self.httpd.serve_forever, kwargs={"poll_interval": 0.05}, daemon=True
+        )
+        self.thread.start()
+
+    @property
+    def base_url(self) -> str:
+        return f"http://127.0.0.1:{self.port}/api/v1"
+
+    def close(self) -> None:
+        self.httpd.shutdown()
+        self.httpd.server_close()
+
+
+@pytest.fixture
+def server():
+    running = _Server()
+    yield running
+    running.close()
+
+
+def test_keep_alive_sends_every_request_over_one_connection(server):
+    with STS2Client(base_url=server.base_url, action_delay_seconds=0) as client:
+        for _ in range(20):
+            client.get_state()
+            client.end_turn()
+
+    assert len(server.paths) == 40
+    assert server.connections == 1
+
+
+def test_environment_proxies_and_netrc_are_ignored(server, monkeypatch, tmp_path):
+    """A system proxy could only capture a local request it was never meant for."""
+    for name in ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY"):
+        monkeypatch.setenv(name, "http://proxy.invalid:9")
+        monkeypatch.setenv(name.lower(), "http://proxy.invalid:9")
     monkeypatch.setenv("NO_PROXY", "")
-    adapter = CannedAdapter()
-    session = requests.Session()
+    monkeypatch.setenv("no_proxy", "")
+    monkeypatch.setenv("REQUESTS_CA_BUNDLE", str(tmp_path / "missing.pem"))
+    monkeypatch.setenv("CURL_CA_BUNDLE", str(tmp_path / "missing.pem"))
+    netrc = tmp_path / ".netrc"
+    netrc.write_text("machine 127.0.0.1 login user password secret\n")
+    monkeypatch.setenv("NETRC", str(netrc))
 
-    _client_over(adapter, session).get_state()
+    with STS2Client(base_url=server.base_url) as client:
+        assert client.get_state() == {"state_type": "menu"}
+        assert client.pool.proxy is None
 
-    assert session.trust_env is True
-    assert adapter.sent[0][1]["proxies"]["http"] == "http://proxy.invalid:9"
+    # Origin-form, straight to the server: a proxy would have been sent the absolute URL.
+    assert server.paths == ["/api/v1/singleplayer?format=json"]
 
 
-def test_the_client_session_still_retries_a_dropped_read(monkeypatch):
+def test_a_read_timeout_is_retried_on_reads_only(server, monkeypatch):
     monkeypatch.setattr(mcp_client.time, "sleep", lambda _: None)
-    adapter = CannedAdapter(failures=2)
+    server.delay = 0.5
+    with STS2Client(base_url=server.base_url, timeout=0.1, max_retries=2) as client:
+        with pytest.raises(STS2ClientError, match="timed out"):
+            client.get_state()
+        assert len(server.paths) == 3
 
-    assert _client_over(adapter).get_state() == {"state_type": "menu"}
-    assert len(adapter.sent) == 3
+        with pytest.raises(STS2ClientError, match="timed out"):
+            client.end_turn()
+        assert len(server.paths) == 4
 
 
-def test_the_client_session_never_replays_an_action(monkeypatch):
+def test_a_connection_reset_mid_request_is_retried_for_a_read(server, monkeypatch):
     monkeypatch.setattr(mcp_client.time, "sleep", lambda _: None)
-    adapter = CannedAdapter(failures=1)
+    server.drops = 1
+    with STS2Client(base_url=server.base_url) as client:
+        assert client.get_state() == {"state_type": "menu"}
 
-    with pytest.raises(STS2ClientError, match="Request failed"):
-        _client_over(adapter).play_card(0)
-    assert len(adapter.sent) == 1
+    assert len(server.paths) == 2
+
+
+def test_a_connection_reset_mid_action_is_not_replayed(server, monkeypatch):
+    monkeypatch.setattr(mcp_client.time, "sleep", lambda _: None)
+    server.drops = 1
+    with STS2Client(base_url=server.base_url, action_delay_seconds=0) as client:
+        with pytest.raises(STS2ClientError, match="Request failed"):
+            client.end_turn()
+        # The connection is replaced, and the next request works.
+        assert client.get_state() == {"state_type": "menu"}
+
+    assert server.paths == ["/api/v1/singleplayer", "/api/v1/singleplayer?format=json"]
+
+
+def test_an_unreachable_server_is_retried_for_a_read_and_then_fails(monkeypatch):
+    attempts: list[float] = []
+    monkeypatch.setattr(mcp_client.time, "sleep", attempts.append)
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        port = probe.getsockname()[1]
+    # Nothing listens on ``port`` now.  Linux refuses at once; Windows retries the
+    # SYN for about two seconds, which the short timeout turns into a connect timeout.
+    url = f"http://127.0.0.1:{port}/api/v1"
+    with STS2Client(base_url=url, max_retries=2, timeout=0.3) as client:
+        with pytest.raises(STS2ClientError, match="Request failed"):
+            client.get_state()
+
+    assert len(attempts) == 2

@@ -12,13 +12,22 @@ processes falls on all of them alike, and the report gives medians over rounds.
 
 Variants:
 
-* ``old``  -- ``STS2Client`` over a stock ``requests.Session`` (``trust_env``
-  on), which is what the client created before it stopped reading the
-  environment.
-* ``new``  -- ``STS2Client`` with its own session (``trust_env`` off).
-* ``urllib3`` -- ``STS2Client`` over a minimal session that calls a urllib3
-  connection pool directly, skipping requests.  Measurement only: it is the
-  ceiling for dropping requests, not something the client ships.
+* ``requests-env`` -- the client as it was before d43fcfc: ``requests`` with
+  ``trust_env`` on (netrc and proxy lookups on every request).
+* ``requests`` -- the client as of d43fcfc: ``requests`` with ``trust_env``
+  off.  Restore and reseed are two requests.
+* ``urllib3`` -- the current ``STS2Client``, over a urllib3 connection pool.
+  Restore and reseed are still two requests, so against ``requests`` this
+  isolates the transport.
+* ``urllib3-1call`` -- the current client with ``restore(point, seed)``: one
+  request when the simulator applies ``reseed`` on ``/sim/restore``.  An older
+  simulator does not echo ``reseeded``, and the client then falls back to two
+  requests; the report says which happened.
+
+Two costs are reported.  Per request (``ms/req``) compares transports; per
+cycle (``ms/cyc``, one restore + reseed + up to ``--steps`` steps) compares
+the one-call restore with the two-call one, since it sends fewer requests for
+the same work.
 
 CPU time is ``time.process_time`` of this process; on Windows it ticks in
 15.6 ms steps, so each round runs enough requests to keep that under a few
@@ -33,76 +42,127 @@ import json
 import random
 import statistics
 import time
-from typing import Any
-from urllib.parse import urlencode, urlsplit
+from typing import Any, Optional
 
 import requests
 import urllib3
 
 from sts2rl.agents.action_space import LegalActionProvider, NoLegalActionsError
 from sts2rl.env.game_env import GameEnv
-from sts2rl.env.mcp_client import STS2Client
+from sts2rl.env.mcp_client import (
+    RETRYABLE_METHODS,
+    STS2Client,
+    STS2ClientError,
+    _state_of,
+)
 from sts2rl.env.reset import ResetSpec
 from sts2rl.search.evaluate import is_fight_over
 from sts2rl.search.sim_env import BRANCHABLE, SimulatorSearchEnv
 
 DEFAULT_SEED = "0357NDTC82"
+VARIANTS = ("requests-env", "requests", "urllib3", "urllib3-1call")
 
 
-class _Urllib3Response:
-    def __init__(self, raw: urllib3.BaseHTTPResponse) -> None:
-        self.status_code = raw.status
-        self.content = raw.data
+class RequestsClient(STS2Client):
+    """``STS2Client`` with the transport of d43fcfc: a ``requests.Session``.
 
-    @property
-    def text(self) -> str:
-        return self.content.decode("utf-8", errors="replace")
+    ``_request`` and ``_send`` are that commit's code, so the comparison is
+    against what shipped, not against a re-creation of it.  Measurement only.
+    """
 
-    def json(self) -> Any:
-        return json.loads(self.content)
-
-
-class Urllib3Session:
-    """Just enough of ``requests.Session`` for ``STS2Client``, over urllib3."""
-
-    def __init__(self, base_url: str) -> None:
-        parts = urlsplit(base_url)
-        self.pool = urllib3.HTTPConnectionPool(
-            parts.hostname, parts.port, maxsize=1, retries=False
-        )
-
-    def request(self, *, method, url, params, json, timeout):  # noqa: A002
-        path = urlsplit(url).path
-        if params:
-            path = f"{path}?{urlencode(params)}"
-        body = None
-        headers = None
-        if json is not None:
-            body = _dumps(json)
-            headers = {"Content-Type": "application/json"}
-        raw = self.pool.urlopen(
-            method, path, body=body, headers=headers, timeout=timeout, retries=False
-        )
-        return _Urllib3Response(raw)
+    def __init__(self, base_url: str, trust_env: bool) -> None:
+        super().__init__(base_url=base_url, action_delay_seconds=0)
+        self.pool.close()
+        self.session = requests.Session()
+        self.session.trust_env = trust_env
 
     def close(self) -> None:
-        self.pool.close()
+        # STS2Client.close() would close the pool, already closed; the session is ours.
+        self.session.close()
 
+    def _request(
+        self,
+        method: str,
+        endpoint: str,
+        *,
+        params: Optional[dict[str, Any]] = None,
+        json_body: Optional[dict[str, Any]] = None,
+    ) -> Any:
+        response = self._send(method, endpoint, params, json_body)
+        try:
+            data = response.json()
+        except ValueError as exc:
+            raise STS2ClientError(
+                f"Non-JSON response: HTTP {response.status_code}: {response.text}"
+            ) from exc
+        if response.status_code >= 400:
+            if isinstance(data, dict):
+                msg = data.get("error") or data.get("message") or str(data)
+            else:
+                msg = str(data)
+            raise STS2ClientError(f"HTTP {response.status_code}: {msg}", _state_of(data))
+        if isinstance(data, dict) and data.get("status") == "error":
+            raise STS2ClientError(data.get("error", "Unknown API error"), _state_of(data))
+        return data
 
-def _dumps(value: Any) -> bytes:
-    return json.dumps(value).encode()
+    def _send(self, method, endpoint, params, json_body):  # type: ignore[override]
+        attempt = 0
+        while True:
+            try:
+                return self.session.request(
+                    method=method,
+                    url=self._url(endpoint),
+                    params=params,
+                    json=json_body,
+                    timeout=self.timeout,
+                )
+            except requests.RequestException as exc:
+                retry = (
+                    method in RETRYABLE_METHODS
+                    and attempt < self.max_retries
+                    and isinstance(exc, (requests.ConnectionError, requests.Timeout))
+                )
+                if retry:
+                    time.sleep(self.retry_backoff_seconds * (2**attempt))
+                    attempt += 1
+                    continue
+                raise STS2ClientError(f"Request failed: {exc}") from exc
 
 
 def make_client(variant: str, base_url: str) -> STS2Client:
-    if variant == "old":
-        return STS2Client(base_url=base_url, session=requests.Session(), action_delay_seconds=0)
-    if variant == "new":
+    if variant == "requests-env":
+        return RequestsClient(base_url, trust_env=True)
+    if variant == "requests":
+        return RequestsClient(base_url, trust_env=False)
+    if variant in ("urllib3", "urllib3-1call"):
         return STS2Client(base_url=base_url, action_delay_seconds=0)
-    if variant == "urllib3":
-        return STS2Client(
-            base_url=base_url, session=Urllib3Session(base_url), action_delay_seconds=0
-        )
     raise ValueError(variant)
+
+
+class ConnectCounter:
+    """Count TCP connects per variant, by wrapping urllib3's ``HTTPConnection.connect``.
+
+    Both transports open their sockets there (requests sits on urllib3).  A pool's
+    ``num_connections`` would not do: it counts connection objects, and urllib3
+    reconnects a dropped keep-alive connection inside the same object.  The bench
+    is single-threaded, so the variant running now owns every connect.
+    """
+
+    def __init__(self) -> None:
+        self.current: str | None = None
+        self.connects: dict[str, int] = {}
+        self._original = urllib3.connection.HTTPConnection.connect
+        counter = self
+
+        def connect(conn, *args, **kwargs):
+            if counter.current is not None:
+                counter.connects[counter.current] = counter.connects.get(counter.current, 0) + 1
+            return counter._original(conn, *args, **kwargs)
+
+        urllib3.connection.HTTPConnection.connect = connect  # type: ignore[method-assign]
+
+    def restore(self) -> None:
+        urllib3.connection.HTTPConnection.connect = self._original  # type: ignore[method-assign]
 
 
 class Counter:
@@ -135,10 +195,15 @@ def run_cycles(
     cycles: int,
     steps: int,
     rng: random.Random,
+    one_call: bool,
 ) -> None:
-    for index in range(cycles):
-        state = sim.restore(point)
-        sim.reseed(rng.getrandbits(32))
+    for _ in range(cycles):
+        seed = rng.getrandbits(32)
+        if one_call:
+            state = sim.restore(point, seed)
+        else:
+            state = sim.restore(point)
+            sim.reseed(seed)
         for _ in range(steps):
             if is_fight_over(state):
                 break
@@ -149,15 +214,8 @@ def run_cycles(
             state = sim.step(rng.choice(offered))
 
 
-def json_probe(sim: SimulatorSearchEnv, point: int, repeats: int) -> None:
-    client = sim.env.client
-    body = client.session.request(
-        method="POST",
-        url=client._url("sim/restore"),
-        params=None,
-        json={"id": point},
-        timeout=client.timeout,
-    ).content
+def json_probe(client: STS2Client, point: int, repeats: int) -> None:
+    _, body = client._send("POST", "sim/restore", None, {"id": point})
     print(f"json probe: one restore response is {len(body)} bytes")
 
     def timed(name, loads):
@@ -185,11 +243,14 @@ def main() -> None:
     parser.add_argument("--rounds", type=int, default=7)
     parser.add_argument("--cycles", type=int, default=400)
     parser.add_argument("--steps", type=int, default=4, help="combat steps per cycle")
-    parser.add_argument("--variants", default="old,new,urllib3")
+    parser.add_argument("--variants", default="requests,urllib3,urllib3-1call")
     parser.add_argument("--json-probe", action="store_true")
     args = parser.parse_args()
     base_url = f"http://localhost:{args.port}/api/v1"
     variants = args.variants.split(",")
+    unknown = set(variants) - set(VARIANTS)
+    if unknown:
+        parser.error(f"unknown variants {sorted(unknown)}; choose from {VARIANTS}")
     legal = LegalActionProvider()
 
     # One simulator serves every variant in turn: each resets its own run on the same
@@ -199,57 +260,92 @@ def main() -> None:
         client = make_client(variant, base_url)
         env = GameEnv(client=client, backend="sim")
         lanes[variant] = (client, env)
+    connects = ConnectCounter()
+    try:
+        results = measure(args, variants, lanes, legal, connects)
+        report(args, variants, lanes, results, connects)
+        if args.json_probe:
+            client, env = lanes[variants[-1]]
+            reach_fight(env, args.seed, legal)
+            sim = SimulatorSearchEnv(env)
+            point = sim.snapshot()
+            try:
+                json_probe(client, point, 300)
+            finally:
+                sim.release(point)
+    finally:
+        connects.restore()
+        for client, _ in lanes.values():
+            client.close()
 
-    results: dict[str, list[tuple[float, float]]] = {v: [] for v in variants}
+
+def measure(args, variants, lanes, legal, connects):
+    # Per round: (requests/s, cpu ms per request, cycles/s, cpu ms per cycle, requests per cycle)
+    results: dict[str, list[tuple[float, float, float, float, float]]] = {v: [] for v in variants}
     for round_index in range(args.rounds):
         order = variants if round_index % 2 == 0 else variants[::-1]
         for variant in order:
             client, env = lanes[variant]
+            connects.current = variant
             reach_fight(env, args.seed, legal)
             sim = SimulatorSearchEnv(env)
             point = sim.snapshot()
             counter = Counter(client)
-            rng = random.Random(round_index)
-            wall, cpu = time.perf_counter(), time.process_time()
-            run_cycles(sim, point, legal, args.cycles, args.steps, rng)
-            wall, cpu = time.perf_counter() - wall, time.process_time() - cpu
-            sim.release(point)
-            del client._send  # drop the counting wrapper
-            requests_sent = counter.count
-            results[variant].append((requests_sent / wall, cpu / requests_sent * 1e3))
-            print(
-                f"round {round_index} {variant:8s} {requests_sent:5d} requests "
-                f"{requests_sent / wall:7.1f} req/s  cpu {cpu / requests_sent * 1e3:6.3f} ms/req"
+            try:
+                rng = random.Random(round_index)
+                wall, cpu = time.perf_counter(), time.process_time()
+                run_cycles(
+                    sim, point, legal, args.cycles, args.steps, rng, variant.endswith("-1call")
+                )
+                wall, cpu = time.perf_counter() - wall, time.process_time() - cpu
+                # Read where the clock stops: releasing the point is one more request.
+                sent = counter.count
+            finally:
+                del client._send  # drop the counting wrapper
+                sim.release(point)
+            row = (
+                sent / wall,
+                cpu / sent * 1e3,
+                args.cycles / wall,
+                cpu / args.cycles * 1e3,
+                sent / args.cycles,
             )
+            results[variant].append(row)
+            print(
+                f"round {round_index} {variant:13s} {sent:5d} req {row[0]:7.1f} req/s "
+                f"cpu {row[1]:6.3f} ms/req  {row[2]:6.1f} cyc/s cpu {row[3]:6.3f} ms/cyc"
+            )
+    connects.current = None
+    return results
 
-    print("\nmedian over rounds")
-    base = statistics.median(rate for rate, _ in results[variants[0]])
-    base_cpu = statistics.median(c for _, c in results[variants[0]])
+
+def report(args, variants, lanes, results, connects) -> None:
+    print(f"\nmedian over {args.rounds} rounds ({args.cycles} cycles of up to {args.steps} steps)")
+    base = variants[0]
+
+    def median(variant: str, column: int) -> float:
+        return statistics.median(row[column] for row in results[variant])
+
     for variant in variants:
-        rate = statistics.median(r for r, _ in results[variant])
-        cpu = statistics.median(c for _, c in results[variant])
         print(
-            f"  {variant:8s} {rate:7.1f} req/s ({rate / base - 1:+.0%})  "
-            f"cpu {cpu:6.3f} ms/req ({cpu / base_cpu - 1:+.0%})"
+            f"  {variant:13s} {median(variant, 4):4.2f} req/cyc  "
+            f"{median(variant, 0):7.1f} req/s ({median(variant, 0) / median(base, 0) - 1:+.0%})  "
+            f"cpu {median(variant, 1):6.3f} ms/req ({median(variant, 1) / median(base, 1) - 1:+.0%})  "
+            f"{median(variant, 2):6.1f} cyc/s ({median(variant, 2) / median(base, 2) - 1:+.0%})  "
+            f"cpu {median(variant, 3):6.3f} ms/cyc ({median(variant, 3) / median(base, 3) - 1:+.0%})"
         )
 
     for variant, (client, _) in lanes.items():
-        # Keep-alive check: every variant should have opened one connection in total.
-        adapter = getattr(client.session, "adapters", {}).get("http://")
-        if adapter is not None:
-            pools = adapter.poolmanager.pools
-            opened = sum(pools[key].num_connections for key in pools.keys())
-        else:
-            opened = client.session.pool.num_connections
-        print(f"{variant}: connections opened {opened}")
-
-    if args.json_probe:
-        _, env = lanes[variants[-1]]
-        reach_fight(env, args.seed, legal)
-        sim = SimulatorSearchEnv(env)
-        point = sim.snapshot()
-        json_probe(sim, point, 300)
-        sim.release(point)
+        # Keep-alive check: TCP connects over every round, resets included.  One
+        # means every request of the variant reused one socket.
+        line = f"{variant}: TCP connects {connects.connects.get(variant, 0)}"
+        if variant.endswith("-1call"):
+            line += (
+                "; simulator reseeds on restore (one request)"
+                if client._restore_reseeds
+                else "; simulator ignores reseed on restore (fell back to two requests)"
+            )
+        print(line)
 
 
 if __name__ == "__main__":

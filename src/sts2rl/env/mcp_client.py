@@ -7,10 +7,24 @@ https://github.com/Gennadiyev/STS2MCP/blob/main/docs/raw-full.md
 
 from __future__ import annotations
 
+import json
+import logging
 import time
 from typing import Any, Literal, Optional
+from urllib.parse import urlencode, urlsplit
 
-import requests
+import urllib3
+from urllib3.exceptions import HTTPError as Urllib3Error
+from urllib3.exceptions import (
+    ClosedPoolError,
+    MaxRetryError,
+    ProtocolError,
+    ProxyError,
+    SSLError,
+)
+from urllib3.exceptions import TimeoutError as Urllib3TimeoutError
+
+logger = logging.getLogger(__name__)
 
 
 GameMode = Literal["singleplayer", "multiplayer"]
@@ -47,26 +61,75 @@ DEFAULT_MAX_RETRIES = 3
 DEFAULT_RETRY_BACKOFF_SECONDS = 0.5
 
 
-def _new_session() -> requests.Session:
-    """Return a keep-alive session that reads nothing from the environment.
+# Transport failures: the request never produced a response, so nothing about
+# the game changed.  urllib3's ``TimeoutError`` covers connect and read timeouts
+# and a refused connection (``NewConnectionError`` derives from it);
+# ``ProtocolError`` is a connection reset or aborted mid-request (WinError
+# 10054); ``OSError`` is a socket error urllib3 did not wrap.  These are the
+# failures requests reported as ``ConnectionError`` or ``Timeout``, so the
+# classification is unchanged with one exception: a body cut short mid-read
+# also arrives as ``ProtocolError`` (requests raised ``ChunkedEncodingError``,
+# not retried).  Replaying a GET for it is as safe as for any other drop.
+# Everything else urllib3 raises (``DecodeError``, ``LocationValueError``, ...)
+# is not a drop and fails at once.  An HTTP error status is not here either:
+# it is a real answer.
+TRANSPORT_ERRORS: tuple[type[BaseException], ...] = (
+    Urllib3TimeoutError,
+    ProtocolError,
+    MaxRetryError,
+    ClosedPoolError,
+    SSLError,
+    ProxyError,
+    OSError,
+)
 
-    With ``trust_env`` on, requests looks up ``.netrc`` credentials and the
-    proxy settings on *every* request -- environment variables and, on
-    Windows, two registry reads.  A profile of a ten-lane search trainer put
-    those lookups at about a third of all time spent inside
-    ``Session.request``; against one local simulator, turning them off cut
-    the client's CPU per request by 17-25%.
+_JSON_HEADERS = {"Content-Type": "application/json"}
 
-    The API needs none of them.  It is a game client or simulator on this
-    machine or the LAN: it takes no credentials, so a ``.netrc`` entry can
-    only leak one, and a system proxy can only add a hop or capture a
-    ``localhost`` request it was never meant for.  That holds for any base
-    URL, so the lookups are dropped unconditionally.  A caller that really
-    needs a proxy injects its own session, which is left as given.
+
+def _new_pool(base_url: str, timeout: Optional[float]) -> urllib3.HTTPConnectionPool:
+    """Return one keep-alive connection pool for the API's host.
+
+    The client talks to urllib3 directly, below ``requests``.  Against one
+    local simulator that cuts the client's CPU per request by about half
+    (0.47 ms to 0.27 ms), and the trainer is one GIL-bound process whose
+    search sends thousands of local requests per decision.  What requests
+    adds per request is work this API never needs: ``.netrc`` and proxy
+    lookups (two registry reads on Windows), cookies, redirects, and header
+    merging.
+
+    Nothing is read from the environment: no ``HTTP_PROXY``/``HTTPS_PROXY``/
+    ``NO_PROXY`` (either case), no ``.netrc``, and no ``REQUESTS_CA_BUNDLE`` or
+    ``CURL_CA_BUNDLE``.  The API is a game client or simulator on this machine
+    or the LAN: it takes no credentials, and a system proxy can only add a hop
+    or capture a ``localhost`` request it was never meant for.  A caller that
+    needs a proxy or a custom CA injects its own pool.
+
+    Schemes: ``http://`` is what the mod and the simulator serve.
+    ``https://`` is supported with urllib3's default verification -- the
+    certificate must chain to the operating system's trust store and match
+    the host.  Anything else is refused here.
+
+    Redirects are not followed (requests followed them): neither the mod nor
+    the simulator ever redirects, so a 3xx raises ``STS2ClientError`` like a
+    4xx, and is not retried.  No cookies are kept and no ``Accept-Encoding``
+    is sent; the API uses neither.
+
+    One connection: each trainer lane owns its own ``STS2Client`` and sends
+    one request at a time.  ``block=False`` keeps a second concurrent caller
+    working instead of waiting: it gets a temporary connection, closed after
+    use.  urllib3's own retries are off; ``STS2Client._send`` holds the one
+    retry rule.
     """
-    session = requests.Session()
-    session.trust_env = False
-    return session
+    scheme = urlsplit(base_url).scheme
+    if scheme not in ("http", "https"):
+        raise ValueError(f"base_url must be http:// or https://, got {base_url!r}")
+    return urllib3.connection_from_url(
+        base_url,
+        maxsize=1,
+        block=False,
+        retries=False,
+        timeout=urllib3.Timeout(connect=timeout, read=timeout),
+    )
 
 
 def _state_of(data: Any) -> Optional[dict[str, Any]]:
@@ -98,6 +161,10 @@ class STS2Client:
     Default base URL:
         http://localhost:15526/api/v1
 
+    Transport: one urllib3 keep-alive pool per client (``_new_pool``), which
+    reads no proxy, ``.netrc`` or CA bundle from the environment and follows
+    no redirects.  ``pool`` injects another; the client then leaves it open.
+
     Example:
         client = STS2Client()
 
@@ -114,7 +181,7 @@ class STS2Client:
         base_url: str = "http://localhost:15526/api/v1",
         mode: GameMode = "singleplayer",
         timeout: float = 10.0,
-        session: requests.Session | None = None,
+        pool: urllib3.HTTPConnectionPool | None = None,
         action_delay_seconds: float = DEFAULT_ACTION_DELAY_SECONDS,
         max_retries: int = DEFAULT_MAX_RETRIES,
         retry_backoff_seconds: float = DEFAULT_RETRY_BACKOFF_SECONDS,
@@ -131,17 +198,24 @@ class STS2Client:
         self.action_delay_seconds = action_delay_seconds
         self.max_retries = max_retries
         self.retry_backoff_seconds = retry_backoff_seconds
-        self._owns_session = session is None
-        self.session = session if session is not None else _new_session()
+        self._base_path = urlsplit(self.base_url).path
+        # Connect and read limits of ``timeout`` seconds each, as requests
+        # applied one number.  Passed per request, so an injected pool obeys it.
+        self._timeout = urllib3.Timeout(connect=timeout, read=timeout)
+        self._owns_pool = pool is None
+        self.pool = pool if pool is not None else _new_pool(self.base_url, timeout)
+        # Whether /sim/restore applies a reseed itself: None until a response
+        # tells (see ``sim_restore``).
+        self._restore_reseeds: Optional[bool] = None
 
     def close(self) -> None:
-        """Close the internally created HTTP session.
+        """Close the internally created connection pool.
 
-        An injected session remains owned by its caller and is deliberately not
+        An injected pool remains owned by its caller and is deliberately not
         closed here.
         """
-        if self._owns_session:
-            self.session.close()
+        if self._owns_pool:
+            self.pool.close()
 
     def __enter__(self) -> "STS2Client":
         return self
@@ -158,6 +232,13 @@ class STS2Client:
         endpoint = endpoint.lstrip("/")
         return f"{self.base_url}/{endpoint}"
 
+    def _target(self, endpoint: str, params: Optional[dict[str, Any]]) -> str:
+        """Build what the pool requests: the endpoint's path and query string."""
+        target = f"{self._base_path}/{endpoint.lstrip('/')}"
+        if params:
+            target = f"{target}?{urlencode(params, doseq=True)}"
+        return target
+
     def _request(
         self,
         method: str,
@@ -166,21 +247,23 @@ class STS2Client:
         params: Optional[dict[str, Any]] = None,
         json_body: Optional[dict[str, Any]] = None,
     ) -> Any:
-        response = self._send(method, endpoint, params, json_body)
+        status, content = self._send(method, endpoint, params, json_body)
 
         try:
-            data = response.json()
+            data = json.loads(content)
         except ValueError as exc:
-            raise STS2ClientError(
-                f"Non-JSON response: HTTP {response.status_code}: {response.text}"
-            ) from exc
+            # UnicodeDecodeError is a ValueError too: undecodable bytes land here.
+            text = content.decode("utf-8", errors="replace")
+            raise STS2ClientError(f"Non-JSON response: HTTP {status}: {text}") from exc
 
-        if response.status_code >= 400:
+        # A 3xx is an error too: redirects are not followed (see ``_new_pool``),
+        # and its body is not the game state.
+        if status >= 300:
             if isinstance(data, dict):
                 msg = data.get("error") or data.get("message") or str(data)
             else:
                 msg = str(data)
-            raise STS2ClientError(f"HTTP {response.status_code}: {msg}", _state_of(data))
+            raise STS2ClientError(f"HTTP {status}: {msg}", _state_of(data))
 
         if isinstance(data, dict) and data.get("status") == "error":
             raise STS2ClientError(
@@ -196,19 +279,36 @@ class STS2Client:
         endpoint: str,
         params: Optional[dict[str, Any]],
         json_body: Optional[dict[str, Any]],
-    ) -> requests.Response:
-        """Send one request, retrying a dropped connection on reads only."""
+    ) -> tuple[int, bytes]:
+        """Send one request, retrying a dropped connection on reads only.
+
+        Returns the HTTP status and the whole response body; the connection
+        goes back to the pool for the next request.
+        """
+        target = self._target(endpoint, params)
+        if json_body is None:
+            body, headers = None, None
+        else:
+            # As requests encoded ``json=``: ASCII-escaped, NaN refused.
+            body = json.dumps(json_body, allow_nan=False).encode("utf-8")
+            headers = _JSON_HEADERS
         attempt = 0
         while True:
             try:
-                return self.session.request(
-                    method=method,
-                    url=self._url(endpoint),
-                    params=params,
-                    json=json_body,
-                    timeout=self.timeout,
+                response = self.pool.urlopen(
+                    method,
+                    target,
+                    body=body,
+                    headers=headers,
+                    retries=False,
+                    redirect=False,
+                    timeout=self._timeout,
+                    # Read the whole body now, which hands the connection back
+                    # to the pool for the next request.
+                    preload_content=True,
                 )
-            except requests.RequestException as exc:
+                return response.status, response.data
+            except (Urllib3Error, OSError) as exc:
                 if self._should_retry(method, exc, attempt):
                     time.sleep(self.retry_backoff_seconds * (2**attempt))
                     attempt += 1
@@ -221,7 +321,7 @@ class STS2Client:
     def _should_retry(
         self,
         method: str,
-        exc: requests.RequestException,
+        exc: BaseException,
         attempt: int,
     ) -> bool:
         """Return whether replaying this request is both safe and useful."""
@@ -230,7 +330,7 @@ class STS2Client:
         # Only transport failures: the request never produced a response, so
         # nothing about the game changed.  An HTTP error is a real answer and
         # is not retried.
-        return isinstance(exc, (requests.ConnectionError, requests.Timeout))
+        return isinstance(exc, TRANSPORT_ERRORS)
 
     def _get(self, endpoint: str, params: Optional[dict[str, Any]] = None) -> Any:
         """Send a GET request to an API endpoint."""
@@ -332,9 +432,46 @@ class STS2Client:
         """
         return int(self._post("sim/snapshot", {})["id"])
 
-    def sim_restore(self, snapshot_id: int) -> Any:
-        """Return the simulator to a branch point; the response carries the state."""
-        return self._post("sim/restore", {"id": snapshot_id})
+    def sim_restore(self, snapshot_id: int, reseed: int | None = None) -> Any:
+        """Return the simulator to a branch point, then redraw its future if asked.
+
+        The response carries the state, after the reseed when there is one.
+        ``reseed`` is the seed ``sim_reseed`` takes, an unsigned 32-bit
+        integer.  A search restores and reseeds once per simulation; one
+        request builds and serialises the state once instead of twice.
+
+        Contract with the simulator: ``POST /sim/restore`` with
+        ``{"id": ..., "reseed": ...}`` restores, then reseeds, and answers
+        ``{"status": "ok", "reseeded": <seed>, "state": ...}``.  ``reseeded``
+        echoes the seed it applied.  A refused reseed is an error response, and
+        the restore stands.
+
+        An older simulator ignores the unknown field: it restores, does not
+        reseed, and answers without ``reseeded``.  A search would then plan
+        against the one real future and nothing would fail.  So a missing echo
+        is never trusted: the client sends ``sim_reseed`` itself, logs once,
+        and from then on uses two requests (restore, then reseed).
+        """
+        if reseed is None or self._restore_reseeds is False:
+            restored = self._post("sim/restore", {"id": snapshot_id})
+            return restored if reseed is None else self.sim_reseed(reseed)
+        restored = self._post("sim/restore", {"id": snapshot_id, "reseed": reseed})
+        echoed = restored.get("reseeded") if isinstance(restored, dict) else None
+        if echoed is None:
+            self._restore_reseeds = False
+            logger.warning(
+                "%s/sim/restore ignores 'reseed' (no 'reseeded' in its response): "
+                "reseeding with a separate /sim/reseed request from now on",
+                self.base_url,
+            )
+            return self.sim_reseed(reseed)
+        if echoed != reseed:
+            raise STS2ClientError(
+                f"sim/restore reseeded {echoed!r}, asked for {reseed!r}",
+                _state_of(restored),
+            )
+        self._restore_reseeds = True
+        return restored
 
     def sim_release(self, snapshot_id: int) -> None:
         """Release a branch point the caller no longer needs."""
