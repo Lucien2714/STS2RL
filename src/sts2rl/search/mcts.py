@@ -153,7 +153,7 @@ class CombatSearch:
     def __init__(
         self,
         config: MctsConfig | None = None,
-        evaluator: Callable[[RawState, RawState], float] | None = None,
+        evaluator: Callable[[RawState, RawState, RawState], float] | None = None,
         candidates: Callable[[RawState], Sequence[GameAction]] | None = None,
         key: Callable[[RawState, GameAction], ActionKey] = action_key,
         rng: random.Random | None = None,
@@ -196,6 +196,7 @@ class CombatSearch:
         return self._result(root, state, candidates)
 
     def _simulate(self, env: SearchEnv, root: Node, state: RawState) -> None:
+        root_state = state
         path = [root]
         node = root
         turns = 0
@@ -220,7 +221,7 @@ class CombatSearch:
                 turns += 1
             node = node.children.setdefault(key, Node())
             path.append(node)
-        value = self.evaluate(state, last_combat)
+        value = self.evaluate(state, last_combat, root_state)
         self._low, self._high = min(self._low, value), max(self._high, value)
         for visited in path:
             visited.visits += 1

@@ -9,7 +9,7 @@ import pytest
 
 from sts2rl.actions import GameAction
 from sts2rl.search import CombatSearch, LeafEvaluator, MctsConfig, action_key, fit_weights
-from sts2rl.search.evaluate import features, intent_damage
+from sts2rl.search.evaluate import features, intent_damage, pending_summons
 
 GOOD, BAD, RISKY, RARE, END = (GameAction(name) for name in ("good", "bad", "risky", "rare", "end_turn"))
 
@@ -65,7 +65,7 @@ def candidates(state: dict) -> list[GameAction]:
     return offered
 
 
-def evaluate(state: dict, last_combat: dict | None = None) -> float:
+def evaluate(state: dict, last_combat: dict | None = None, root: dict | None = None) -> float:
     return 1 / (1 + math.exp(-state["score"] / 4))
 
 
@@ -141,7 +141,7 @@ def test_small_value_differences_still_concentrate_the_budget():
     """Leaves a thousandth apart: normalised against the tree's range, the best still wins out."""
     game = BranchingGame()
     search = search_for(game, simulations=200)
-    search.evaluate = lambda state, last=None: 0.5 + 0.001 * state["score"]
+    search.evaluate = lambda state, last=None, root=None: 0.5 + 0.001 * state["score"]
     search.candidates = lambda state: [GOOD, BAD, END]
     result = search.search(game, game.state)
     assert result.action == GOOD
@@ -151,7 +151,7 @@ def test_small_value_differences_still_concentrate_the_budget():
 def test_the_branch_point_is_released_even_when_the_search_fails():
     game = BranchingGame()
 
-    def broken(state: dict, last_combat: dict | None = None) -> float:
+    def broken(state: dict, last_combat: dict | None = None, root: dict | None = None) -> float:
         raise RuntimeError("evaluator failed")
 
     search = CombatSearch(MctsConfig(simulations=4, turn_depth=1), evaluator=broken, candidates=candidates)
@@ -250,6 +250,61 @@ def test_the_eruption_of_a_killed_giant_counts_as_incoming_damage():
     assert features(_killed_giant(hp=20, eruption=30))["lethal_incoming"] == 1.0
     assert features(_killed_giant(hp=20, block=15, eruption=30))["lethal_incoming"] == 0.0
     assert LeafEvaluator()(_killed_giant(hp=20, block=15)) > LeafEvaluator()(_killed_giant(hp=20))
+
+
+def _fight(*enemies, hp=50):
+    """A fight against ``enemies``: (entity id, hp, max hp, powers, intents) each."""
+    state = _combat(hp=hp)
+    state["battle"]["enemies"] = [
+        {
+            "entity_id": eid, "name": eid, "hp": e_hp, "max_hp": e_max, "block": 0,
+            "status": [{"id": i, "amount": a, "type": "Buff"} for i, a in powers],
+            "intents": [{"type": t, "label": label} for t, label in intents],
+        }
+        for eid, e_hp, e_max, powers, intents in enemies
+    ]
+    return state
+
+
+def test_killing_one_of_several_enemies_is_progress():
+    """The game drops a killed enemy from the list; against the enemies still standing the
+    kill raised the share of health left (22/40 -> 20/20), so the search scored it as a
+    setback. Against the search root's enemies it is the progress it is."""
+    value = LeafEvaluator()
+    root = _fight(("SLIME_0", 2, 20, (), ()), ("SLIME_1", 20, 20, (), ()))
+    killed = _fight(("SLIME_1", 20, 20, (), ()))
+    assert features(killed, root)["enemy_hp_ratio"] < features(root, root)["enemy_hp_ratio"]
+    assert value(killed, root=root) > value(root, root=root)
+
+
+def test_the_search_root_changes_nothing_when_no_enemy_left_or_arrived():
+    root = _fight(("SLIME_0", 12, 20, (), ()), ("SLIME_1", 20, 20, (), ()))
+    hurt = _fight(("SLIME_0", 4, 20, (), ()), ("SLIME_1", 20, 20, (), ()))
+    assert features(root, root) == features(root)
+    assert features(hurt, root) == features(hurt)
+
+
+def test_a_summoner_stands_for_what_it_summons_on_death():
+    """Gremlin Merc summons two gremlins when it dies; read as fresh enemies at full health,
+    they made the nearly dead Merc the better position and the search held back the kill."""
+    value = LeafEvaluator()
+    merc = _fight(("GREMLIN_MERC_0", 5, 48, (("SURPRISE_POWER", 1),), (("Attack", "8x2"),)))
+    after = _fight(("FAT_GREMLIN_0", 16, 16, (), ()), ("SNEAKY_GREMLIN_0", 13, 13, (), (("Attack", "9"),)))
+    assert features(after, merc)["enemy_hp_ratio"] < features(merc, merc)["enemy_hp_ratio"]
+    assert value(after, root=merc) > value(merc, root=merc)
+    # Without the summons in the totals, a Merc at full health would look like a short fight.
+    plain = _fight(("GREMLIN_MERC_0", 48, 48, (), (("Attack", "8x2"),)))
+    summoner = _fight(("GREMLIN_MERC_0", 48, 48, (("SURPRISE_POWER", 1),), (("Attack", "8x2"),)))
+    assert features(summoner)["enemy_hp_ratio"] == 1.0
+    assert features(summoner)["race"] < features(plain)["race"]
+
+
+def test_an_infested_parasite_stands_for_each_wriggler():
+    parasite = _fight(("PHROG_PARASITE_0", 3, 63, (("INFESTED_POWER", 4),), (("Attack", "4x4"),)))
+    wrigglers = _fight(*[(f"WRIGGLER_{i}", 19, 19, (), ()) for i in range(4)])
+    assert pending_summons(parasite["battle"]["enemies"][0]) == 4 * 19.0
+    assert features(wrigglers, parasite)["enemy_hp_ratio"] < features(parasite, parasite)["enemy_hp_ratio"]
+    assert LeafEvaluator()(wrigglers, root=parasite) > LeafEvaluator()(parasite, root=parasite)
 
 
 def test_lethal_incoming_is_flagged():

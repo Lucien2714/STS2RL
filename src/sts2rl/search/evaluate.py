@@ -100,6 +100,14 @@ _BLOCK = re.compile(r"Gain (\d+) Block", re.IGNORECASE)
 TURNS_CAP = 20.0
 # An enemy at this many max HP is a placeholder the game keeps after a kill (see is_dying).
 DYING_HP = 100_000_000
+# Enemies that summon others when they die, by the power that says so: the health each
+# stack of it brings back, from the summons' HP ranges in the monster table. Phrog
+# Parasite's Infested summons one Wriggler (17-21) per stack; Gremlin Merc's Surprise
+# summons a Fat Gremlin (13-17) and a Sneaky Gremlin (10-14).
+ON_DEATH_SUMMON_HP: Mapping[str, float] = {
+    "INFESTED_POWER": 19.0,
+    "SURPRISE_POWER": 27.0,
+}
 
 
 def is_fight_over(state: RawState) -> bool:
@@ -146,23 +154,65 @@ def is_dying(enemy: Mapping[str, Any]) -> bool:
     return _number(enemy.get("max_hp")) >= DYING_HP
 
 
-def features(state: RawState) -> dict[str, float]:
-    """The features of a fight in progress, each roughly on a unit scale."""
-    player = _player(state)
+def pending_summons(enemy: Mapping[str, Any]) -> float:
+    """The health an enemy will summon when it dies, which it still stands for."""
+    powers = _powers(enemy)
+    return sum(hp * powers.get(name, 0.0) for name, hp in ON_DEATH_SUMMON_HP.items())
+
+
+def _enemies(state: RawState) -> tuple[list[Mapping[str, Any]], list[Mapping[str, Any]]]:
+    """The enemies on the board, and those of them still alive (not dying)."""
     present = [
         enemy
         for enemy in _records((state.get("battle") or {}).get("enemies"))
         if _number(enemy.get("hp")) > 0
     ]
-    enemies = [enemy for enemy in present if not is_dying(enemy)]
+    return present, [enemy for enemy in present if not is_dying(enemy)]
+
+
+def _identity(enemy: Mapping[str, Any]) -> object:
+    return enemy.get("entity_id") or enemy.get("name")
+
+
+def features(state: RawState, root: RawState | None = None) -> dict[str, float]:
+    """The features of a fight in progress, each roughly on a unit scale.
+
+    ``root`` is the state the search started from. The enemies' share of health left is
+    measured against the enemies there, because the game drops a killed enemy from the
+    list: measured against the enemies still standing, a kill took the dead enemy's
+    health out of the total along with its share of what is left, and the share rose
+    whenever the dead enemy had been hurt more than the rest -- in 56% of 2310 recorded
+    kills of a non-last enemy, so the search scored killing one as a setback in 29%.
+    An enemy that summons others on its death stands for their health until then, or
+    the kill turned a nearly dead summoner into fresh enemies and the search held back
+    the killing blow: Phrog Parasite and Gremlin Merc killed the agent with 3-19 HP left
+    in 80 of 83 lost fights, against a death rate of 7-20% for the other act 1 elites.
+    """
+    player = _player(state)
+    present, enemies = _enemies(state)
     hp = _number(player.get("hp"))
     max_hp = max(_number(player.get("max_hp")), 1.0)
     effective = hp + _number(player.get("block"))
     incoming = sum(
         intent_damage(intent) for enemy in enemies for intent in _records(enemy.get("intents"))
     ) + sum(_powers(enemy).get("STEAM_ERUPTION_POWER", 0.0) for enemy in present if is_dying(enemy))
-    enemy_hp = sum(_number(e.get("hp")) for e in enemies)
-    enemy_max = max(sum(_number(e.get("max_hp")) for e in enemies), 1.0)
+    pending = sum(pending_summons(e) for e in enemies)
+    enemy_hp = sum(_number(e.get("hp")) for e in enemies) + pending
+    if root is None:
+        enemy_max = sum(_number(e.get("max_hp")) for e in enemies) + pending
+    else:
+        # The root's enemies, plus any that arrived since, less the promised summons
+        # that arrival has made good on (they are counted as arrivals now).
+        _, at_root = _enemies(root)
+        known = {_identity(e) for e in at_root}
+        root_pending = sum(pending_summons(e) for e in at_root)
+        enemy_max = (
+            sum(_number(e.get("max_hp")) for e in at_root)
+            + root_pending
+            + sum(_number(e.get("max_hp")) for e in enemies if _identity(e) not in known)
+            - max(0.0, root_pending - pending)
+        )
+    enemy_max = max(enemy_max, enemy_hp, 1.0)
     enemy_block = sum(_number(e.get("block")) for e in enemies)
     own = _powers(player)
     theirs = [_powers(e) for e in enemies]
@@ -265,27 +315,32 @@ class LeafEvaluator:
 
     weights: Mapping[str, float] = field(default_factory=lambda: dict(DEFAULT_WEIGHTS))
 
-    def __call__(self, state: RawState, last_combat: RawState | None = None) -> float:
+    def __call__(
+        self, state: RawState, last_combat: RawState | None = None, root: RawState | None = None
+    ) -> float:
         """Score ``state``; ``last_combat`` is the last state still in the fight, which a
-        loss needs because ``game_over`` no longer shows the enemies."""
+        loss needs because ``game_over`` no longer shows the enemies, and ``root`` is the
+        state the search started from (see ``features``)."""
         if is_fight_over(state):
-            return self.terminal(state, last_combat)
-        p = self.win_probability(state)
-        return p * self._win_value(state) + (1.0 - p) * self._loss_value(state)
+            return self.terminal(state, last_combat, root)
+        p = self.win_probability(state, root)
+        return p * self._win_value(state) + (1.0 - p) * self._loss_value(state, root)
 
-    def terminal(self, state: RawState, last_combat: RawState | None = None) -> float:
+    def terminal(
+        self, state: RawState, last_combat: RawState | None = None, root: RawState | None = None
+    ) -> float:
         if is_loss(state):
-            return self._loss_value(last_combat) if last_combat is not None else 0.0
+            return self._loss_value(last_combat, root) if last_combat is not None else 0.0
         return self._win_value(state)
 
-    def win_probability(self, state: RawState) -> float:
-        phi = features(state)
+    def win_probability(self, state: RawState, root: RawState | None = None) -> float:
+        phi = features(state, root)
         score = sum(self.weights.get(name, 0.0) * value for name, value in phi.items())
         return 1.0 / (1.0 + math.exp(-max(-30.0, min(30.0, score))))
 
     @staticmethod
-    def _loss_value(state: RawState) -> float:
-        return LOSS_PROGRESS_WEIGHT * (1.0 - features(state)["enemy_hp_ratio"])
+    def _loss_value(state: RawState, root: RawState | None = None) -> float:
+        return LOSS_PROGRESS_WEIGHT * (1.0 - features(state, root)["enemy_hp_ratio"])
 
     @staticmethod
     def _win_value(state: RawState) -> float:
