@@ -111,8 +111,8 @@ def _new_pool(base_url: str, timeout: Optional[float]) -> urllib3.HTTPConnection
 
     Redirects are not followed (requests followed them): neither the mod nor
     the simulator ever redirects, so a 3xx raises ``STS2ClientError`` like a
-    4xx, and is not retried.  No cookies are kept and no ``Accept-Encoding``
-    is sent; the API uses neither.
+    4xx, and is not retried.  No cookies are kept.  urllib3 sends
+    ``Accept-Encoding: identity``, so no response arrives compressed.
 
     One connection: each trainer lane owns its own ``STS2Client`` and sends
     one request at a time.  ``block=False`` keeps a second concurrent caller

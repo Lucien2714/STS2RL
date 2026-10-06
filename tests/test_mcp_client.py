@@ -499,9 +499,15 @@ class _Server:
         owner = self
         self.connections = 0
         self.paths: list[str] = []
-        self.delay = 0.0
+        # True: hold every response until ``release`` is set (at close), so a
+        # client timeout fires whatever the machine's load.
+        self.stall = False
+        self.release = threading.Event()
         self.drops = 0
-        self.lock = threading.Lock()
+        # Responses to cut short mid-body: "length" (a fixed Content-Length) or
+        # "chunked", one entry per response.
+        self.cuts: list[str] = []
+        self.lock = threading.Condition()
 
         class Handler(BaseHTTPRequestHandler):
             protocol_version = "HTTP/1.1"
@@ -517,22 +523,38 @@ class _Server:
                     self.rfile.read(length)
                 with owner.lock:
                     owner.paths.append(self.path)
+                    owner.lock.notify_all()
                     drop = owner.drops > 0
                     owner.drops -= drop
+                    cut = owner.cuts.pop(0) if owner.cuts else None
                 if drop:
                     # Close without a response: the client sees a reset connection.
                     self.close_connection = True
                     self.connection.shutdown(socket.SHUT_RDWR)
                     return
-                if owner.delay:
-                    # Not time.sleep: the tests stub that out for the client's backoff.
-                    threading.Event().wait(owner.delay)
+                if owner.stall:
+                    owner.release.wait(10)
                 payload = b'{"state_type": "menu"}'
                 self.send_response(200)
                 self.send_header("Content-Type", "application/json")
-                self.send_header("Content-Length", str(len(payload)))
-                self.end_headers()
-                self.wfile.write(payload)
+                if cut == "chunked":
+                    # One chunk announced at its full size, half of it sent, no
+                    # terminating chunk.
+                    self.send_header("Transfer-Encoding", "chunked")
+                    self.end_headers()
+                    self.wfile.write(b"%x\r\n" % len(payload) + payload[: len(payload) // 2])
+                elif cut == "length":
+                    self.send_header("Content-Length", str(len(payload)))
+                    self.end_headers()
+                    self.wfile.write(payload[: len(payload) // 2])
+                else:
+                    self.send_header("Content-Length", str(len(payload)))
+                    self.end_headers()
+                    self.wfile.write(payload)
+                    return
+                self.wfile.flush()
+                self.close_connection = True
+                self.connection.shutdown(socket.SHUT_RDWR)
 
             do_GET = do_POST = do_DELETE = _answer
 
@@ -556,7 +578,18 @@ class _Server:
     def base_url(self) -> str:
         return f"http://127.0.0.1:{self.port}/api/v1"
 
+    def wait_for_requests(self, count: int) -> int:
+        """Wait until the server has read ``count`` requests; return how many it read.
+
+        A client gives up on its own clock, and the server thread can read the
+        request after that, so counts are synchronised here rather than by timing.
+        """
+        with self.lock:
+            self.lock.wait_for(lambda: len(self.paths) >= count, timeout=10)
+            return len(self.paths)
+
     def close(self) -> None:
+        self.release.set()
         self.httpd.shutdown()
         self.httpd.server_close()
 
@@ -601,15 +634,16 @@ def test_environment_proxies_and_netrc_are_ignored(server, monkeypatch, tmp_path
 
 def test_a_read_timeout_is_retried_on_reads_only(server, monkeypatch):
     monkeypatch.setattr(mcp_client.time, "sleep", lambda _: None)
-    server.delay = 0.5
-    with STS2Client(base_url=server.base_url, timeout=0.1, max_retries=2) as client:
-        with pytest.raises(STS2ClientError, match="timed out"):
+    server.stall = True  # no response until the test ends
+    with STS2Client(base_url=server.base_url, timeout=0.3, max_retries=2) as client:
+        with pytest.raises(STS2ClientError, match="Read timed out"):
             client.get_state()
-        assert len(server.paths) == 3
+        assert server.wait_for_requests(3) == 3
 
-        with pytest.raises(STS2ClientError, match="timed out"):
+        with pytest.raises(STS2ClientError, match="Read timed out"):
             client.end_turn()
-        assert len(server.paths) == 4
+        assert server.wait_for_requests(4) == 4
+        assert server.paths[-1] == "/api/v1/singleplayer"
 
 
 def test_a_connection_reset_mid_request_is_retried_for_a_read(server, monkeypatch):
@@ -636,14 +670,40 @@ def test_a_connection_reset_mid_action_is_not_replayed(server, monkeypatch):
 def test_an_unreachable_server_is_retried_for_a_read_and_then_fails(monkeypatch):
     attempts: list[float] = []
     monkeypatch.setattr(mcp_client.time, "sleep", attempts.append)
+    # The port stays bound, and never listens, until the assertions are done: no
+    # other process can take it in between.  Linux refuses at once; Windows retries
+    # the SYN for about two seconds, which the short timeout turns into a connect
+    # timeout.
     with socket.socket() as probe:
         probe.bind(("127.0.0.1", 0))
-        port = probe.getsockname()[1]
-    # Nothing listens on ``port`` now.  Linux refuses at once; Windows retries the
-    # SYN for about two seconds, which the short timeout turns into a connect timeout.
-    url = f"http://127.0.0.1:{port}/api/v1"
-    with STS2Client(base_url=url, max_retries=2, timeout=0.3) as client:
-        with pytest.raises(STS2ClientError, match="Request failed"):
-            client.get_state()
+        url = f"http://127.0.0.1:{probe.getsockname()[1]}/api/v1"
+        with STS2Client(base_url=url, max_retries=2, timeout=0.3) as client:
+            with pytest.raises(STS2ClientError, match="Request failed"):
+                client.get_state()
 
-    assert len(attempts) == 2
+        assert len(attempts) == 2
+
+
+@pytest.mark.parametrize("cut", ["length", "chunked"])
+def test_a_body_cut_short_is_retried_for_a_read(server, monkeypatch, cut):
+    """The connection dies mid-body: the response never arrived whole."""
+    monkeypatch.setattr(mcp_client.time, "sleep", lambda _: None)
+    server.cuts = [cut]
+    with STS2Client(base_url=server.base_url) as client:
+        assert client.get_state() == {"state_type": "menu"}
+
+    assert server.wait_for_requests(2) == 2
+    assert server.paths == ["/api/v1/singleplayer?format=json"] * 2
+
+
+@pytest.mark.parametrize("cut", ["length", "chunked"])
+def test_a_body_cut_short_is_not_resent_for_an_action(server, monkeypatch, cut):
+    """The game applied the action before answering; resending would apply it twice."""
+    monkeypatch.setattr(mcp_client.time, "sleep", lambda _: None)
+    server.cuts = [cut]
+    with STS2Client(base_url=server.base_url, action_delay_seconds=0) as client:
+        with pytest.raises(STS2ClientError, match="Request failed"):
+            client.end_turn()
+
+    assert server.wait_for_requests(1) == 1
+    assert server.paths == ["/api/v1/singleplayer"]
