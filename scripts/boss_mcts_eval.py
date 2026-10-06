@@ -167,12 +167,16 @@ def main() -> int:
     parser.add_argument("--bc-artifact", help="actor: a cloned actor (bc_best.pt) instead of a run's checkpoint")
     parser.add_argument("--checkpoint", default="latest")
     parser.add_argument("--sample", action="store_true", help="actor: sample instead of argmax")
+    parser.add_argument("--only", type=Path, help="play only the snapshots listed in this file, one per line")
     args = parser.parse_args()
+    only = set(args.only.read_text(encoding="utf-8").split()) if args.only else None
 
     jobs: queue.Queue = queue.Queue()
     for pool in args.pools.split(","):
         seeds = (SNAPSHOTS / f"act1_boss_{pool}_seeds.txt").read_text(encoding="utf-8").strip().split(",")
         for seed in seeds[: args.count or None]:
+            if only is not None and seed not in only:
+                continue
             for world in range(args.worlds):
                 jobs.put((pool, seed, world))
     done = set()
