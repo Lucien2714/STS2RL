@@ -28,3 +28,4 @@
 | Step 2-n：修复评估之后的宏观训练（600 局；宝箱不拿遗物） | [step2n-training.md](step2n-training.md) | 2026-10-06 |
 | Step 2-o：宝箱必须先拿遗物，再离开 | [step2o-treasure.md](step2o-treasure.md) | 2026-10-06 |
 | Step 2-p（修复）：PPO 更新时保留正在打战斗的决策 | [step2p-held-steps.md](step2p-held-steps.md) | 2026-10-06 |
+| Step 2-p（性能）：训练进程的 HTTP 开销（urllib3、restore 带 reseed） | [step2p-perf.md](step2p-perf.md) | 2026-10-06 |
