@@ -273,3 +273,95 @@ def test_reseed_and_seeded_reset_reach_the_simulator():
     assert seeded["json"]["reseed"] == 9
     # Without a reseed the field is left out, so the simulator restores streams as saved.
     assert "reseed" not in plain["json"]
+
+
+class CannedAdapter(requests.adapters.BaseAdapter):
+    """A transport under a real ``requests.Session``: records what it is sent.
+
+    It sits below everything the session does per request -- environment
+    lookups, cookies, header merging -- so those still run for real.
+    """
+
+    def __init__(self, failures: int = 0) -> None:
+        super().__init__()
+        self.sent: list[tuple[requests.PreparedRequest, dict]] = []
+        self.failures = failures
+
+    def send(self, request, **kwargs):
+        self.sent.append((request, kwargs))
+        if self.failures:
+            self.failures -= 1
+            raise requests.ConnectionError("connection reset")
+        response = requests.Response()
+        response.status_code = 200
+        response._content = b'{"state_type": "menu"}'
+        response.encoding = "utf-8"
+        response.request = request
+        response.url = request.url
+        return response
+
+    def close(self):
+        pass
+
+
+def _client_over(adapter: CannedAdapter, session: requests.Session | None = None) -> STS2Client:
+    client = STS2Client(session=session, action_delay_seconds=0)
+    client.session.mount("http://", adapter)
+    return client
+
+
+def test_the_client_session_reads_nothing_from_the_environment():
+    """netrc and proxy lookups ran on every request and cost a third of its time."""
+    assert STS2Client().session.trust_env is False
+
+
+def test_no_proxy_or_netrc_reaches_a_request(monkeypatch):
+    monkeypatch.setenv("HTTP_PROXY", "http://proxy.invalid:9")
+
+    def no_netrc(*args, **kwargs):
+        raise AssertionError("netrc must not be read")
+
+    monkeypatch.setattr(requests.sessions, "get_netrc_auth", no_netrc)
+    adapter = CannedAdapter()
+
+    assert _client_over(adapter).get_state() == {"state_type": "menu"}
+
+    request, kwargs = adapter.sent[0]
+    assert "http" not in kwargs["proxies"]
+    assert "Authorization" not in request.headers
+    # Keep-alive is untouched: the connection is reused across requests.
+    assert request.headers["Connection"] == "keep-alive"
+
+
+def test_an_injected_session_is_left_as_given(monkeypatch):
+    """A caller that needs a proxy brings its own session, and keeps it.
+
+    This is also the control for the test above: the same environment does
+    reach a request through a session that trusts it.
+    """
+    monkeypatch.setenv("HTTP_PROXY", "http://proxy.invalid:9")
+    monkeypatch.setenv("NO_PROXY", "")
+    adapter = CannedAdapter()
+    session = requests.Session()
+
+    _client_over(adapter, session).get_state()
+
+    assert session.trust_env is True
+    assert adapter.sent[0][1]["proxies"]["http"] == "http://proxy.invalid:9"
+
+
+def test_the_client_session_still_retries_a_dropped_read(monkeypatch):
+    monkeypatch.setattr(mcp_client.time, "sleep", lambda _: None)
+    adapter = CannedAdapter(failures=2)
+
+    assert _client_over(adapter).get_state() == {"state_type": "menu"}
+    assert len(adapter.sent) == 3
+
+
+def test_the_client_session_never_replays_an_action(monkeypatch):
+    monkeypatch.setattr(mcp_client.time, "sleep", lambda _: None)
+    adapter = CannedAdapter(failures=1)
+
+    with pytest.raises(STS2ClientError, match="Request failed"):
+        _client_over(adapter).play_card(0)
+    assert len(adapter.sent) == 1
