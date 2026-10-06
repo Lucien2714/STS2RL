@@ -271,14 +271,46 @@ class LegalActionProvider:
         return actions
 
     def _treasure_actions(self, state: RawState) -> list[GameAction]:
+        """Return the chest's relics, and ``proceed`` only once it is empty.
+
+        Leaving is not a choice here, for the reason it is not one on a reward
+        screen.  The reward model pays nothing directly for a relic, and the
+        claim adds one step charge, so the immediate difference is 0.01
+        against the relic; what the relic is worth shows up only later, and
+        noisily, as progress it helps buy.  Offered side by side, PPO learned
+        the immediate difference: over 600 episodes (``runs/step2n-train``,
+        2026-10-05/06) the probability of claiming on 53 human treasure
+        screens fell from 1.00 to between 0.02 and 0.17, relics held at the
+        act 1 boss from 4.1 to 3.2, and that boss's pass rate from 68% to 60%.
+
+        In single player, claiming empties the chest, so the claim is never a
+        loop: in 61 of 61 recorded human claims, and in the simulator, the
+        next state is still ``treasure`` with ``relics`` empty or absent and
+        ``can_proceed`` true, and ``proceed`` is then the only candidate.  A
+        one-relic chest is therefore two forced steps.  The multiplayer
+        bidding fields are unverified, and this rule makes no claim about
+        them.
+
+        Only an empty list or an absent key counts as an empty chest.  A
+        non-empty relic list with no readable index gives no candidates
+        rather than falling back to ``proceed``, which would abandon a listed
+        relic; a mixed list still yields the claims it can address.  A
+        ``relics`` value that is present but not a list proves nothing about
+        the chest and gives none either.  The runner then re-reads state, as
+        it does for a chest still opening, which reports only a ``message``.
+        """
         treasure = self._mapping(state.get("treasure"))
-        actions = [
-            GameAction("claim_treasure_relic", index=index)
-            for index in self._indices(treasure.get("relics"))
-        ]
+        relics = treasure.get("relics", [])
+        if not isinstance(relics, list):
+            return []
+        if relics:
+            return [
+                GameAction("claim_treasure_relic", index=index)
+                for index in self._indices(relics)
+            ]
         if treasure.get("can_proceed") is True:
-            actions.append(GameAction("proceed"))
-        return actions
+            return [GameAction("proceed")]
+        return []
 
     def _card_select_actions(self, state: RawState) -> list[GameAction]:
         """Return the picks, and cancelling only when there is nothing to pick.

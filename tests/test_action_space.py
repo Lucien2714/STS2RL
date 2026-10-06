@@ -135,10 +135,9 @@ def test_combat_candidates_expand_enemy_targets_and_filter_unplayable_cards():
                 "state_type": "treasure",
                 "treasure": {"relics": [{"index": 0}], "can_proceed": True},
             },
-            [
-                {"type": "claim_treasure_relic", "index": 0},
-                {"type": "proceed"},
-            ],
+            # Leaving beside a relic is withheld: claiming empties the chest,
+            # and proceed follows as the only candidate.
+            [{"type": "claim_treasure_relic", "index": 0}],
         ),
         (
             {
@@ -317,6 +316,61 @@ def test_an_opening_treasure_chest_is_not_skipped_by_a_proceed_fallback():
     }
 
     assert LegalActionProvider().candidates(state) == ()
+
+
+@pytest.mark.parametrize(
+    ("treasure", "expected"),
+    [
+        # One relic is a forced claim: proceed is cheaper by one step charge
+        # and pays nothing less, so offered beside it, PPO learned to skip.
+        (
+            {"relics": [{"index": 0}], "can_proceed": True},
+            [{"type": "claim_treasure_relic", "index": 0}],
+        ),
+        (
+            {"relics": [{"index": 0}, {"index": 1}], "can_proceed": True},
+            [
+                {"type": "claim_treasure_relic", "index": 0},
+                {"type": "claim_treasure_relic", "index": 1},
+            ],
+        ),
+        # After a claim the chest is empty, and both spellings of empty seen
+        # in recorded runs leave proceed as the only move.
+        ({"relics": [], "can_proceed": True}, [{"type": "proceed"}]),
+        ({"can_proceed": True}, [{"type": "proceed"}]),
+        # A relic is listed but cannot be addressed: proceed would abandon it,
+        # so nothing is offered and the runner re-reads state.
+        ({"relics": [{"name": "Anchor"}], "can_proceed": True}, []),
+        ({"relics": [{"index": None}], "can_proceed": True}, []),
+        # A mixed list still yields the claims it can address.
+        (
+            {
+                "relics": [{"index": 1}, {"index": "x"}, "LANTERN"],
+                "can_proceed": True,
+            },
+            [{"type": "claim_treasure_relic", "index": 1}],
+        ),
+        # A relics value that is present but not a list does not prove the
+        # chest is empty, so it does not fall back to proceed.
+        ({"relics": {"index": 0}, "can_proceed": True}, []),
+        ({"relics": "LANTERN", "can_proceed": True}, []),
+        ({"relics": None, "can_proceed": True}, []),
+        # can_proceed is read strictly: only True opens the exit.
+        ({"relics": [], "can_proceed": False}, []),
+        ({"relics": []}, []),
+        ({"relics": [], "can_proceed": 1}, []),
+        ({"relics": [], "can_proceed": "true"}, []),
+        ({"relics": [], "can_proceed": [True]}, []),
+        # The claim does not depend on the exit being open.
+        (
+            {"relics": [{"index": 0}], "can_proceed": False},
+            [{"type": "claim_treasure_relic", "index": 0}],
+        ),
+        ({"relics": [{"index": 0}]}, [{"type": "claim_treasure_relic", "index": 0}]),
+    ],
+)
+def test_a_treasure_chest_is_claimed_out_before_proceed(treasure, expected):
+    assert payloads({"state_type": "treasure", "treasure": treasure}) == expected
 
 
 def test_a_picked_card_leaves_the_list_and_so_is_never_re_offered():

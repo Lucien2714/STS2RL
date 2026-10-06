@@ -26,3 +26,4 @@
 | Step 2-k：从平台期继续训练，以及冻结策略的对照 | [step2k-plateau.md](step2k-plateau.md) | 2026-10-05 |
 | Step 2-l：叶子评估里的击杀和死亡召唤（A/B +1.9 层） | [step2l-kill-evaluation.md](step2l-kill-evaluation.md) | 2026-10-05 |
 | Step 2-n：修复评估之后的宏观训练（600 局；宝箱不拿遗物） | [step2n-training.md](step2n-training.md) | 2026-10-06 |
+| Step 2-o：宝箱必须先拿遗物，再离开 | [step2o-treasure.md](step2o-treasure.md) | 2026-10-06 |
