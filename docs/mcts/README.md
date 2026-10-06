@@ -20,3 +20,6 @@
 | Step 2-e：稳定宏观训练（KL 上限、战斗移出 rollout） | [step2e-stabilisation.md](step2e-stabilisation.md) | 2026-10-04 |
 | Step 2-f：模型迁移工具（surgery、`--init-from`） | [step2f-surgery.md](step2f-surgery.md) | 2026-10-04 |
 | Step 2-g：稳定后的宏观训练（600 局） | [step2g-stable-run.md](step2g-stable-run.md) | 2026-10-05 |
+| Step 2-h：当前幕 boss 特征（`act_boss`）和 boss run | [step2h-boss-column.md](step2h-boss-column.md) | 2026-10-05 |
+| Step 2-i：精英和 boss 战用 200 次模拟 | [step2i-mcts200.md](step2i-mcts200.md) | 2026-10-05 |
+| Step 2-j：Waterfall Giant 的评估错误、牌组诊断、`--init-optimizer` | [step2j-giant-fix.md](step2j-giant-fix.md) | 2026-10-05 |
