@@ -9,7 +9,7 @@ import pytest
 
 from sts2rl.actions import GameAction
 from sts2rl.search import CombatSearch, LeafEvaluator, MctsConfig, action_key, fit_weights
-from sts2rl.search.evaluate import features, intent_damage, pending_summons
+from sts2rl.search.evaluate import end_of_turn_damage, features, intent_damage, pending_summons
 
 GOOD, BAD, RISKY, RARE, END = (GameAction(name) for name in ("good", "bad", "risky", "rare", "end_turn"))
 
@@ -305,6 +305,28 @@ def test_an_infested_parasite_stands_for_each_wriggler():
     assert pending_summons(parasite["battle"]["enemies"][0]) == 4 * 19.0
     assert features(wrigglers, parasite)["enemy_hp_ratio"] < features(parasite, parasite)["enemy_hp_ratio"]
     assert LeafEvaluator()(wrigglers, root=parasite) > LeafEvaluator()(parasite, root=parasite)
+
+
+def _held(card_id, description, can_play=False):
+    return {"id": card_id, "type": "Status", "description": description, "can_play": can_play}
+
+
+INFECTION = _held("INFECTION", "Unplayable. At the end of your turn, if this is in your Hand, take 3 damage.")
+
+
+def test_an_unplayable_card_that_hurts_at_end_of_turn_is_incoming_damage():
+    assert end_of_turn_damage(INFECTION) == 3.0
+    assert end_of_turn_damage(_held("BAD_LUCK", "At the end of your turn, if this is in your Hand, lose 13 HP.")) == 13.0
+    # A card the player can still play is a choice the search makes, not certain damage.
+    toxic = _held("TOXIC", "At the end of your turn, if this is in your Hand, take 5 damage. Exhaust.", can_play=True)
+    assert end_of_turn_damage(toxic) == 0.0
+    assert end_of_turn_damage(_held("DAZED", "Unplayable. Ethereal.")) == 0.0
+    # Two Infections turn a survivable hit into a lethal one.
+    state = _combat(hp=15, intents=(("Attack", "10"),))
+    assert features(state)["lethal_incoming"] == 0.0
+    state["player"]["hand"] = [INFECTION, INFECTION]
+    assert features(state)["lethal_incoming"] == 1.0
+    assert LeafEvaluator()(state) < LeafEvaluator()(_combat(hp=15, intents=(("Attack", "10"),)))
 
 
 def test_lethal_incoming_is_flagged():

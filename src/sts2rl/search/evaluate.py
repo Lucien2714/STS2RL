@@ -96,6 +96,12 @@ _DAMAGE = re.compile(
     r"Deal (\d+) damage(?: to (?:ALL enemies|a random enemy))?(?: (\d+|X) times| (twice))?", re.IGNORECASE
 )
 _BLOCK = re.compile(r"Gain (\d+) Block", re.IGNORECASE)
+# A status or curse that hurts the player at the end of the turn while held: Infection
+# (3), Burn (2), Decay (2), Wither (3), Bad Luck (13 HP). Losing HP skips block and taking
+# damage does not; both are read as incoming damage, which is exact without block.
+_END_OF_TURN = re.compile(
+    r"At the end of your turn, if this is in your Hand,\s*(?:take|lose) (\d+) (?:damage|HP)", re.IGNORECASE
+)
 # A fight longer than this is as good as never ending, for either side.
 TURNS_CAP = 20.0
 # An enemy at this many max HP is a placeholder the game keeps after a kill (see is_dying).
@@ -154,6 +160,20 @@ def is_dying(enemy: Mapping[str, Any]) -> bool:
     return _number(enemy.get("max_hp")) >= DYING_HP
 
 
+def end_of_turn_damage(card: Mapping[str, Any]) -> float:
+    """What a card in hand will deal its holder at the end of the turn.
+
+    Only an unplayable card counts: it stays in hand until then, so the damage is
+    certain. One that can be played (Toxic, Beckon) is a choice the search makes.
+    Phrog Parasite fills the hand with Infections, and with these left out the leaf
+    overestimated how long the player lasts in exactly the fight that killed most often.
+    """
+    if card.get("can_play") is not False:
+        return 0.0
+    match = _END_OF_TURN.search(str(card.get("description") or ""))
+    return float(match.group(1)) if match else 0.0
+
+
 def pending_summons(enemy: Mapping[str, Any]) -> float:
     """The health an enemy will summon when it dies, which it still stands for."""
     powers = _powers(enemy)
@@ -196,6 +216,7 @@ def features(state: RawState, root: RawState | None = None) -> dict[str, float]:
     incoming = sum(
         intent_damage(intent) for enemy in enemies for intent in _records(enemy.get("intents"))
     ) + sum(_powers(enemy).get("STEAM_ERUPTION_POWER", 0.0) for enemy in present if is_dying(enemy))
+    incoming += sum(end_of_turn_damage(card) for card in _records(player.get("hand")))
     pending = sum(pending_summons(e) for e in enemies)
     enemy_hp = sum(_number(e.get("hp")) for e in enemies) + pending
     if root is None:
