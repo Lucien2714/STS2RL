@@ -25,3 +25,4 @@
 | Step 2-j：Waterfall Giant 的评估错误、牌组诊断、`--init-optimizer` | [step2j-giant-fix.md](step2j-giant-fix.md) | 2026-10-05 |
 | Step 2-k：从平台期继续训练，以及冻结策略的对照 | [step2k-plateau.md](step2k-plateau.md) | 2026-10-05 |
 | Step 2-l：叶子评估里的击杀和死亡召唤（A/B +1.9 层） | [step2l-kill-evaluation.md](step2l-kill-evaluation.md) | 2026-10-05 |
+| Step 2-n：修复评估之后的宏观训练（600 局；宝箱不拿遗物） | [step2n-training.md](step2n-training.md) | 2026-10-06 |
