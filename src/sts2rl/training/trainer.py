@@ -81,7 +81,9 @@ class Trainer:
         """Save right where the rollout is empty, if enough training has passed.
 
         This runs from inside the agent, immediately after an update, which is
-        the only moment the rollout is empty by construction.  Checkpointing at
+        the only moment the rollout is empty by construction (except one open
+        step per lane while a fight is folded into it; saving does not write
+        the rollout, so that step is not lost here).  Checkpointing at
         an episode boundary instead meant manufacturing that moment by force,
         updating on whatever had been collected since -- 13 transitions in one
         measured case -- and then saving the weights that update had moved.

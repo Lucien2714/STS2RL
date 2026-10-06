@@ -294,6 +294,12 @@ def run_training(args: argparse.Namespace) -> int:
         game_encoder=encoder,
         config=plan.ppo,
         device=plan.training.device,
+        # Fights folded out of the rollout: an update must not train the decision
+        # before a fight that is still running. Set here, not only on the first
+        # unrecorded step, so each lane's first fight is covered too.
+        hold_open_steps=(
+            plan.training.search_combat and not plan.training.search_fights_in_rollout
+        ),
     )
     if loaded is not None:
         manager.restore_agent(loaded, agent, plan)

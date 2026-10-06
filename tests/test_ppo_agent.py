@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import dataclasses
+
 import pytest
 import torch
 
@@ -69,6 +71,7 @@ def _agent(
     update_epochs: int = 1,
     target_kl: float | None = None,
     minibatch_size: int = 32,
+    hold_open_steps: bool = False,
 ) -> CandidatePPOAgent:
     vocabulary = GameVocabulary.from_bundled_data()
     tokenizer = GameTokenizer(vocabulary)
@@ -85,6 +88,7 @@ def _agent(
             target_kl=target_kl,
             minibatch_size=minibatch_size,
         ),
+        hold_open_steps=hold_open_steps,
     )
 
 
@@ -952,9 +956,371 @@ def test_unrecorded_fights_stay_in_their_own_lane():
 
 def test_a_rollout_of_only_macro_decisions_fills_with_their_own_choices():
     agent = _agent(rollout_size=4)
-    for _ in range(4):
+    for _ in range(5):
         _macro_step(agent, 0, reward=1.0)
         _unrecorded_fight_step(agent, 0, reward=0.5)
-    # The update ran on four recorded decisions; the fights never entered it.
+    # Four completed decisions filled the rollout when the fifth closed the
+    # fourth; the fights never entered it.  The fifth was held, so its fight
+    # reached it rather than the decision after it.
+    assert agent.optimizer_updates == 1
     assert agent.last_update["rollout_steps"] == 4.0
-    assert agent.environment_steps == 8
+    assert agent.last_update["held_steps"] == 1.0
+    assert agent.environment_steps == 10
+    assert [step.reward for step in agent._lane(0).steps] == [pytest.approx(1.5)]
+    assert agent._lane(0).carried_reward == 0.0
+
+
+def _rewards_seen_by_gae(agent) -> list[list[tuple[float, bool]]]:
+    """Record the (reward, done) of every trajectory an update walks."""
+    seen: list[list[tuple[float, bool]]] = []
+    original = agent._advantages_and_returns
+
+    def spy(steps, tail_value=None):
+        seen.append([(step.reward, step.done) for step in steps])
+        return original(steps, tail_value=tail_value)
+
+    agent._advantages_and_returns = spy
+    return seen
+
+
+def _fill_while_lane_one_fights(agent) -> None:
+    """Lane 1 enters a fight; lane 0 then fills the rollout and ends its episode."""
+    _macro_step(agent, 1, reward=1.0)
+    _unrecorded_fight_step(agent, 1, reward=0.5)
+    for _ in range(3):
+        _macro_step(agent, 0, reward=1.0)
+    _macro_step(agent, 0, reward=1.0, done=True)
+
+
+def test_an_update_keeps_the_decision_before_a_running_fight():
+    """The rollout fills on one lane while another is mid-fight.
+
+    Training that lane's last decision then trained it without the fight; the
+    clear left nothing to fold into, and the rest of the fight -- floors, the
+    boss -- was paid to the lane's next decision.
+    """
+    torch.manual_seed(71)
+    agent = _agent(rollout_size=4, hold_open_steps=True)
+    _fill_while_lane_one_fights(agent)
+
+    assert agent.optimizer_updates == 1
+    assert agent.last_update["rollout_steps"] == 4.0
+    assert agent.last_update["held_steps"] == 1.0
+    held = agent._lane(1).steps
+    assert len(held) == 1 and held[0].reward == pytest.approx(1.5)
+
+    _unrecorded_fight_step(agent, 1, reward=10.0, marker=1)
+    _macro_step(agent, 1, reward=2.0)
+
+    rewards = [step.reward for step in agent._lane(1).steps]
+    assert rewards == [pytest.approx(11.5), pytest.approx(2.0)]
+    assert len(agent._lane(1).steps[0].next_observation.raw_state["map"]["next_options"]) == 3
+
+
+def test_a_lane_with_no_fight_is_consumed_whole_and_unaffected():
+    torch.manual_seed(72)
+    agent = _agent(rollout_size=4, hold_open_steps=True)
+    seen = _rewards_seen_by_gae(agent)
+    _fill_while_lane_one_fights(agent)
+
+    # Lane 0 alone was walked, completely, with its own rewards and terminal.
+    assert seen == [[(1.0, False), (1.0, False), (1.0, False), (1.0, True)]]
+    assert agent._lane(0).steps == []
+    assert agent.last_update["lanes"] == 1.0
+
+
+def test_a_death_after_the_update_ends_the_held_decision():
+    """The death used to be dropped: nothing was left to mark as terminal."""
+    torch.manual_seed(73)
+    agent = _agent(rollout_size=4, hold_open_steps=True)
+    _fill_while_lane_one_fights(agent)
+
+    _unrecorded_fight_step(agent, 1, reward=-0.01, done=True)
+
+    held = agent._lane(1).steps[0]
+    assert held.done and held.episode_end
+    assert held.reward == pytest.approx(1.0 + 0.5 - 0.01)
+    assert agent._lane(1).carried_reward == 0.0
+
+
+def test_the_held_step_is_trained_next_time_with_its_whole_fight():
+    torch.manual_seed(74)
+    agent = _agent(rollout_size=4, hold_open_steps=True)
+    _fill_while_lane_one_fights(agent)
+    _unrecorded_fight_step(agent, 1, reward=10.0)
+    _unrecorded_fight_step(agent, 1, reward=-0.01, done=True)
+    seen = _rewards_seen_by_gae(agent)
+
+    for _ in range(2):
+        _macro_step(agent, 0, reward=1.0)
+    _macro_step(agent, 0, reward=1.0, done=True)
+
+    assert agent.optimizer_updates == 2
+    assert agent.last_update["rollout_steps"] == 4.0
+    assert agent.last_update["held_steps"] == 0.0
+    assert seen[0] == [(1.0, False), (1.0, False), (1.0, True)]
+    assert seen[1] == [(pytest.approx(1.0 + 0.5 + 10.0 - 0.01), True)]
+    assert agent._rollout_length() == 0
+
+
+def test_the_step_before_a_held_one_bootstraps_from_its_sampled_value():
+    """The same value the walk would read with the held step in the batch;
+    only the trace stops there, as the held step's reward is not known yet."""
+    torch.manual_seed(75)
+    agent = _agent(rollout_size=1000, hold_open_steps=True)
+    _macro_step(agent, 0, reward=1.0)
+    _macro_step(agent, 0, reward=2.0)
+    _macro_step(agent, 0, reward=3.0)
+    _unrecorded_fight_step(agent, 0, reward=0.5)
+    first, second, held = agent._lane(0).steps
+    values = [float(step.old_value) for step in (first, second, held)]
+    gamma, lam = agent.config.gamma, agent.config.gae_lambda
+
+    advantages, _ = agent._advantages_and_returns([first, second], tail_value=held.old_value)
+
+    expected_second = 2.0 + gamma * values[2] - values[1]
+    expected_first = 1.0 + gamma * values[1] - values[0] + gamma * lam * expected_second
+    assert float(advantages[1]) == pytest.approx(expected_second, rel=1e-5)
+    assert float(advantages[0]) == pytest.approx(expected_first, rel=1e-5)
+
+
+def test_an_update_with_only_held_steps_trains_nothing():
+    agent = _agent(rollout_size=1000, hold_open_steps=True)
+    _macro_step(agent, 0, reward=1.0)
+    _unrecorded_fight_step(agent, 0, reward=0.5)
+
+    assert agent.update() == {}
+    assert agent.optimizer_updates == 0
+    assert len(agent._lane(0).steps) == 1
+
+
+def test_an_episode_end_closes_the_last_step_and_a_pending_decision_does_not():
+    agent = _agent(rollout_size=1000, hold_open_steps=True)
+    _macro_step(agent, 0, reward=1.0)
+    _macro_step(agent, 1, reward=1.0)
+    _macro_step(agent, 2, reward=1.0)
+    agent.choose_action(_observation(_map_state(2)), lane=0)
+    agent.reset(_observation(_map_state(2)), lane=1)
+
+    assert agent._trainable_length() == 1  # Lane 1 alone is closed.
+    assert agent.update()["held_steps"] == 2.0
+    assert len(agent._lane(0).steps) == 1
+    assert len(agent._lane(2).steps) == 1
+
+
+def test_a_discarded_decision_then_a_fight_still_folds_into_the_held_step():
+    """A pending decision can be refused and discarded; the lane may then fight.
+
+    Had the pending decision closed the step, the update would have taken it,
+    and the fight's reward would have gone to the next decision, its death
+    nowhere.
+    """
+    agent = _agent(rollout_size=1000, hold_open_steps=True)
+    _macro_step(agent, 0, reward=1.0)
+    agent.choose_action(_observation(_map_state(2)), lane=0)
+    agent.update()
+    agent.discard_decision(lane=0)
+    _unrecorded_fight_step(agent, 0, reward=0.5, done=True)
+
+    steps = agent._lane(0).steps
+    assert len(steps) == 1
+    assert steps[0].reward == pytest.approx(1.5)
+    assert steps[0].done and steps[0].episode_end
+    assert agent._lane(0).carried_reward == 0.0
+
+
+def test_two_lanes_that_both_see_a_full_rollout_update_once():
+    """The threshold is checked again under the lock that selects the steps."""
+    agent = _agent(rollout_size=2)
+    hooks: list[int] = []
+    agent.on_update = lambda: hooks.append(agent.optimizer_updates)
+    _macro_step(agent, 0, reward=1.0)
+    _macro_step(agent, 1, reward=1.0)  # Fills the rollout: update 1.
+
+    # A second lane that judged the rollout full before the first update ran.
+    agent._update_if_ready()
+
+    assert agent.optimizer_updates == 1
+    assert hooks == [1]
+
+
+def test_a_count_that_drops_below_the_threshold_skips_the_update():
+    agent = _agent(rollout_size=1000, hold_open_steps=True)
+    hooks: list[int] = []
+    agent.on_update = lambda: hooks.append(agent.optimizer_updates)
+    _macro_step(agent, 0, reward=1.0)
+    _macro_step(agent, 0, reward=1.0, done=True)
+    _macro_step(agent, 1, reward=1.0)
+    _macro_step(agent, 1, reward=1.0)
+    agent.config = dataclasses.replace(agent.config, rollout_size=3)
+    assert agent._trainable_length() == 3  # The second lane judges it full ...
+    agent.abort_lane(0)  # ... and before its update, the first lane's work goes.
+
+    agent._update_if_ready()
+
+    assert agent.optimizer_updates == 0
+    assert hooks == []
+
+
+def test_a_truncation_that_completes_the_rollout_updates():
+    """Otherwise a run that ends here saves a final checkpoint without the batch."""
+    agent = _agent(rollout_size=4, hold_open_steps=True)
+    hooks: list[int] = []
+    agent.on_update = lambda: hooks.append(agent.optimizer_updates)
+    for _ in range(4):
+        _macro_step(agent, 0, reward=1.0)
+    assert agent._trainable_length() == 3
+    assert agent.optimizer_updates == 0
+
+    agent.finish_episode(_observation(_map_state(2)), truncated=True)
+
+    assert agent.optimizer_updates == 1
+    assert agent.last_update["rollout_steps"] == 4.0
+    assert hooks == [1]
+
+
+def test_a_reset_that_completes_the_rollout_updates():
+    agent = _agent(rollout_size=4, hold_open_steps=True)
+    for _ in range(4):
+        _macro_step(agent, 0, reward=1.0)
+
+    agent.reset(_observation(_map_state(2)))
+
+    assert agent.optimizer_updates == 1
+    assert agent._rollout_length() == 0
+
+
+def test_a_kl_stop_on_the_first_minibatch_still_reports_the_batch_size():
+    torch.manual_seed(77)
+    agent = _agent(rollout_size=1000, update_epochs=2, minibatch_size=4, target_kl=1e-3)
+    for _ in range(6):
+        _macro_step(agent, 0, reward=1.0, done=True)
+    # Pretend the rollout came from a far-away policy: every ratio is e.
+    for step in agent._lane(0).steps:
+        step.old_log_probability = step.old_log_probability - 1.0
+
+    metrics = agent.update()
+
+    assert metrics["optimizer_steps"] == 0.0
+    assert metrics["kl_early_stop"] == 1.0
+    assert metrics["rollout_steps"] == 6.0
+
+
+def test_a_held_step_survives_more_than_one_update():
+    torch.manual_seed(78)
+    agent = _agent(rollout_size=2, hold_open_steps=True)
+    _macro_step(agent, 1, reward=1.0)
+    _unrecorded_fight_step(agent, 1, reward=0.5)
+    held = agent._lane(1).steps[0]
+    for _ in range(2):
+        _macro_step(agent, 0, reward=1.0)
+        _macro_step(agent, 0, reward=1.0, done=True)
+        _unrecorded_fight_step(agent, 1, reward=1.0)
+
+    assert agent.optimizer_updates == 2
+    assert agent._lane(1).steps == [held]
+    assert held.reward == pytest.approx(1.0 + 0.5 + 2.0)
+
+
+def test_a_held_value_keeps_its_reward_units_across_a_scale_change():
+    torch.manual_seed(79)
+    agent = _agent(rollout_size=2, hold_open_steps=True)
+    _macro_step(agent, 1, reward=1.0)
+    _unrecorded_fight_step(agent, 1, reward=0.5)
+    held = agent._lane(1).steps[0]
+    value = held.old_value.clone()
+    scale = agent._return_scale.scale
+
+    _macro_step(agent, 0, reward=40.0)
+    _macro_step(agent, 0, reward=40.0, done=True)
+
+    assert agent._return_scale.scale > scale * 5
+    assert torch.equal(held.old_value, value)
+
+
+def test_initializing_refuses_an_agent_with_a_held_step():
+    agent = _agent(rollout_size=1000, hold_open_steps=True)
+    _macro_step(agent, 0, reward=1.0)
+    _unrecorded_fight_step(agent, 0, reward=0.5)
+    agent.update()
+    saved = agent.checkpoint_state()
+
+    with pytest.raises(RuntimeError, match="non-empty rollout"):
+        agent.initialize_from(saved["encoder"], saved["return_scale"])
+
+
+def test_an_update_bootstraps_the_trained_prefix_from_the_held_value():
+    agent = _agent(rollout_size=1000, hold_open_steps=True)
+    _macro_step(agent, 0, reward=1.0)
+    _macro_step(agent, 0, reward=2.0)
+    _unrecorded_fight_step(agent, 0, reward=0.5)
+    held = agent._lane(0).steps[-1]
+    tails: list[object] = []
+    original = agent._advantages_and_returns
+
+    def spy(steps, tail_value=None):
+        tails.append(tail_value)
+        return original(steps, tail_value=tail_value)
+
+    agent._advantages_and_returns = spy
+    agent.update()
+
+    assert len(tails) == 1 and tails[0] is held.old_value
+
+
+def test_an_unrecorded_step_turns_holding_on():
+    agent = _agent(rollout_size=1000)
+    assert agent.hold_open_steps is False
+    _macro_step(agent, 0, reward=1.0)
+    _unrecorded_fight_step(agent, 0, reward=0.5)
+    assert agent.hold_open_steps is True
+
+
+def test_a_held_step_is_work_in_flight_for_loading_and_is_lost_on_abort():
+    agent = _agent(rollout_size=1000, hold_open_steps=True)
+    _macro_step(agent, 0, reward=1.0)
+    _unrecorded_fight_step(agent, 0, reward=0.5)
+    agent.update()
+    saved = agent.checkpoint_state()  # Saving reads only; the held step stays.
+    assert len(agent._lane(0).steps) == 1
+
+    with pytest.raises(RuntimeError, match="non-empty rollout"):
+        agent.load_checkpoint_state(saved)
+    agent.abort_lane(0)
+    agent.load_checkpoint_state(saved)
+
+
+@pytest.mark.parametrize("hold", [False, True])
+def test_with_every_last_step_closed_holding_changes_nothing(hold: bool):
+    """No fight in progress: the same batch, the same targets, the same weights."""
+
+    def run(hold_open_steps: bool):
+        torch.manual_seed(76)
+        agent = _agent(rollout_size=1000, hold_open_steps=hold_open_steps)
+        walked: list[tuple[torch.Tensor, torch.Tensor]] = []
+        original = agent._advantages_and_returns
+
+        def spy(steps, tail_value=None):
+            walked.append(original(steps, tail_value=tail_value))
+            return walked[-1]
+
+        agent._advantages_and_returns = spy
+        _macro_step(agent, 0, reward=1.0)
+        _macro_step(agent, 0, reward=2.0, done=True)
+        _macro_step(agent, 1, reward=3.0)
+        # Lane 1's last step is closed by a truncation.
+        agent.finish_episode(_observation(_map_state(2)), truncated=True, lane=1)
+        return agent, agent.update(), walked
+
+    reference, reference_metrics, reference_walked = run(False)
+    agent, metrics, walked = run(hold)
+
+    assert metrics["held_steps"] == 0.0
+    assert metrics == reference_metrics
+    for (advantages, targets), (expected_advantages, expected_targets) in zip(
+        walked, reference_walked, strict=True
+    ):
+        assert torch.equal(advantages, expected_advantages)
+        assert torch.equal(targets, expected_targets)
+    for name, tensor in reference.game_encoder.state_dict().items():
+        assert torch.equal(agent.game_encoder.state_dict()[name], tensor), name

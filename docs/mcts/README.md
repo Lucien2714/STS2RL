@@ -27,3 +27,4 @@
 | Step 2-l：叶子评估里的击杀和死亡召唤（A/B +1.9 层） | [step2l-kill-evaluation.md](step2l-kill-evaluation.md) | 2026-10-05 |
 | Step 2-n：修复评估之后的宏观训练（600 局；宝箱不拿遗物） | [step2n-training.md](step2n-training.md) | 2026-10-06 |
 | Step 2-o：宝箱必须先拿遗物，再离开 | [step2o-treasure.md](step2o-treasure.md) | 2026-10-06 |
+| Step 2-p（修复）：PPO 更新时保留正在打战斗的决策 | [step2p-held-steps.md](step2p-held-steps.md) | 2026-10-06 |

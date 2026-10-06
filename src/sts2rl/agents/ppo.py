@@ -185,7 +185,14 @@ def _policy_step(step: _RolloutStep) -> bool:
 
 
 class CandidatePPOAgent(Agent):
-    """PPO agent trained end-to-end over structured dynamic candidates."""
+    """PPO agent trained end-to-end over structured dynamic candidates.
+
+    ``hold_open_steps``: unrecorded steps (``choose_external(record=False)``)
+    can follow any lane's last recorded step, so an update trains only the
+    transitions that are complete and keeps each lane's open last step for the
+    next one (``_holds_open_step``). The first unrecorded step turns it on;
+    passing it at construction also covers the first fight of each lane.
+    """
 
     def __init__(
         self,
@@ -194,6 +201,8 @@ class CandidatePPOAgent(Agent):
         action_provider: LegalActionProvider | None = None,
         config: PPOConfig | None = None,
         device: str | torch.device | None = None,
+        *,
+        hold_open_steps: bool = False,
     ) -> None:
         self.tokenizer = tokenizer
         self.game_encoder = game_encoder
@@ -213,9 +222,11 @@ class CandidatePPOAgent(Agent):
         # serializing the small tensor work costs almost nothing.
         self._lock = threading.RLock()
         # Called right after an update completes, which is the one moment the
-        # rollout is empty by construction.  The trainer checkpoints there
+        # rollout holds no completed transition by construction (at most one open
+        # step per lane, see ``_holds_open_step``).  The trainer checkpoints there
         # instead of manufacturing an empty rollout later by force.
         self.on_update: Callable[[], None] | None = None
+        self.hold_open_steps = hold_open_steps
         self.last_update: dict[str, float] = {}
         self.environment_steps = 0
         self.optimizer_updates = 0
@@ -232,7 +243,54 @@ class CandidatePPOAgent(Agent):
             return self._lanes.setdefault(lane, _Lane())
 
     def _rollout_length(self) -> int:
+        """Every recorded step, held ones included: all of it is work in flight."""
         return sum(len(lane.steps) for lane in self._lanes.values())
+
+    def _holds_open_step(self, entry: _Lane) -> bool:
+        """Whether this lane's last step can still receive folded reward.
+
+        With fights out of the rollout, a fight's reward and its death are folded
+        into the decision before it (``_fold``). An update that trains that
+        decision while the fight is still running trains it without the fight's
+        floors, boss reward and terminal; the clear then leaves ``_fold`` nothing
+        to fold into, so the rest of the fight is paid to the lane's next
+        decision, and a death is dropped. With seven lanes an update almost
+        always lands while other lanes are mid-fight: in runs/step2n-train two
+        thirds of the environment steps were unrecorded fight steps.
+
+        Only two things complete the step: the end of its episode, or an
+        observed successor step, which makes it no longer the last. A pending
+        decision does not: a refused action is discarded (``discard_decision``)
+        and the lane can then fold a fight into this step after all. Anything
+        else is held: the ``folding`` flag alone is not enough, because it is
+        false while the search chooses the fight's next action and before the
+        fight's first action, which is most of the time a fight takes.
+        """
+        if not self.hold_open_steps or not entry.steps:
+            return False
+        last = entry.steps[-1]
+        return not (last.done or last.episode_end)
+
+    def _trainable_length(self) -> int:
+        """Completed transitions: the rollout minus each lane's held open step."""
+        return self._rollout_length() - sum(
+            self._holds_open_step(lane) for lane in self._lanes.values()
+        )
+
+    def _update_if_ready(self) -> None:
+        """Update once ``rollout_size`` transitions are complete, then call the hook.
+
+        The threshold is checked under the same lock acquisition that selects
+        the steps. Between a check in ``observe`` and the update, another lane
+        can observe or discard: two lanes that both saw a full rollout would
+        otherwise run a second, undersized update straight after the first.
+        """
+        with self._lock:
+            if self._trainable_length() < self.config.rollout_size:
+                return
+            metrics = self.update()
+        if metrics and self.on_update is not None:
+            self.on_update()
 
     def reset(self, initial_state: GameObservation, lane: int = 0) -> None:
         del initial_state
@@ -245,6 +303,8 @@ class CandidatePPOAgent(Agent):
             entry.pending = None
             entry.folding = False
             entry.carried_reward = 0.0
+        # Closing a held step can complete the rollout.
+        self._update_if_ready()
 
     def choose_action(self, state: GameObservation, lane: int = 0) -> GameAction:
         entry = self._lane(lane)
@@ -320,7 +380,9 @@ class CandidatePPOAgent(Agent):
         if not self.training_enabled:
             return candidates[action_index]
         if not record:
-            entry.folding = True
+            with self._lock:
+                entry.folding = True
+                self.hold_open_steps = True
             return candidates[action_index]
         decision = self.tokenizer.tokenize_decision(state, candidates)
         with self._lock:
@@ -341,33 +403,35 @@ class CandidatePPOAgent(Agent):
         with self._lock:
             self.environment_steps += 1
             if entry.pending is None and entry.folding:
+                # A death folded here completes the held step, which can fill
+                # the rollout.
                 self._fold(entry, transition)
-                return
-            if entry.pending is None:
+            elif entry.pending is None:
                 raise RuntimeError(
                     "choose_action() must be called before observe()"
                 )
-            reward = float(transition.reward) + entry.carried_reward
-            entry.carried_reward = 0.0
-            entry.steps.append(
-                _RolloutStep(
-                    decision=entry.pending.decision,
-                    next_observation=transition.next_state,
-                    action_index=entry.pending.action_index,
-                    old_log_probability=entry.pending.log_probability,
-                    old_value=entry.pending.value,
-                    reward=reward,
-                    done=transition.done,
-                    episode_end=transition.done,
-                    policy_trainable=entry.pending.policy_trainable,
+            else:
+                reward = float(transition.reward) + entry.carried_reward
+                entry.carried_reward = 0.0
+                entry.steps.append(
+                    _RolloutStep(
+                        decision=entry.pending.decision,
+                        next_observation=transition.next_state,
+                        action_index=entry.pending.action_index,
+                        old_log_probability=entry.pending.log_probability,
+                        old_value=entry.pending.value,
+                        reward=reward,
+                        done=transition.done,
+                        episode_end=transition.done,
+                        policy_trainable=entry.pending.policy_trainable,
+                    )
                 )
-            )
-            entry.pending = None
-            ready = self._rollout_length() >= self.config.rollout_size
+                entry.pending = None
+            # Count only completed transitions. A held step counted here would
+            # call for an update with nothing more to train, on every step.
+            ready = self._trainable_length() >= self.config.rollout_size
         if ready:
-            self.update()
-            if self.on_update is not None:
-                self.on_update()
+            self._update_if_ready()
 
     def _fold(self, entry: _Lane, transition: Transition) -> None:
         """Merge an unrecorded step into the decision before it.
@@ -375,6 +439,9 @@ class CandidatePPOAgent(Agent):
         Never across an episode boundary: a terminal step is never extended --
         that once erased every terminal in the rollout (CLAUDE.md, "Forced steps
         are folded") -- and its reward goes forward to the next decision instead.
+
+        An update never takes the step folded into here (``_holds_open_step``),
+        so a missing step means the episode truly has no decision yet.
         """
         entry.folding = False
         last = entry.steps[-1] if entry.steps else None
@@ -426,6 +493,10 @@ class CandidatePPOAgent(Agent):
                 raise RuntimeError("cannot finish an episode with an unobserved action")
             if truncated:
                 self._close_episode(entry, final_state)
+        # A truncation closes a held step, which can complete the rollout; if
+        # training ends here, the full batch must not wait for an episode that
+        # never comes.
+        self._update_if_ready()
 
     def train(self, enabled: bool = True) -> None:
         """Switch between stochastic learning and deterministic evaluation."""
@@ -582,21 +653,38 @@ class CandidatePPOAgent(Agent):
         per lane and only the results are concatenated.  Doing it over the
         concatenation instead would let one environment's advantage flow into
         another's, which nothing would report.
+
+        A lane's open last step (``_holds_open_step``) is not trained here and
+        stays in the lane for the next update, where it arrives with the fight's
+        reward and terminal. The step before it bootstraps from the held step's
+        own sampled value, which is exactly the ``values[index + 1]`` the walk
+        would use if the held step were in the batch; only the trace is cut
+        there, because the held step's reward is not known yet.
         """
         with self._lock:
-            lanes = [self._lanes[key] for key in sorted(self._lanes)]
-            lanes = [lane for lane in lanes if lane.steps]
-            if not lanes:
-                return {}
-
+            lanes: list[_Lane] = []
+            trained_counts: list[int] = []
             steps: list[_RolloutStep] = []
             advantage_chunks: list[Tensor] = []
             return_chunks: list[Tensor] = []
-            for lane in lanes:
-                lane_advantages, lane_returns = self._advantages_and_returns(lane.steps)
+            held_steps = 0
+            for key in sorted(self._lanes):
+                lane = self._lanes[key]
+                held = self._holds_open_step(lane)
+                trained = lane.steps[:-1] if held else lane.steps
+                held_steps += held
+                if not trained:
+                    continue
+                lane_advantages, lane_returns = self._advantages_and_returns(
+                    trained, tail_value=lane.steps[-1].old_value if held else None
+                )
                 advantage_chunks.append(lane_advantages)
                 return_chunks.append(lane_returns)
-                steps.extend(lane.steps)
+                steps.extend(trained)
+                lanes.append(lane)
+                trained_counts.append(len(trained))
+            if not lanes:
+                return {}
 
             advantages = torch.cat(advantage_chunks)
             returns = torch.cat(return_chunks)
@@ -640,6 +728,9 @@ class CandidatePPOAgent(Agent):
                     optimizer_steps += 1
                 if stopped:
                     break
+            # Here, not only in ``_optimize_minibatch``: a KL stop on the first
+            # minibatch returns no minibatch metrics at all.
+            metrics["rollout_steps"] = float(len(steps))
             metrics["optimizer_steps"] = float(optimizer_steps)
             metrics["kl_early_stop"] = float(stopped)
 
@@ -648,8 +739,9 @@ class CandidatePPOAgent(Agent):
             metrics["optimizer_update"] = float(self.optimizer_updates)
             metrics["lanes"] = float(len(lanes))
             metrics["return_scale"] = self._return_scale.scale
-            for lane in lanes:
-                lane.steps.clear()
+            metrics["held_steps"] = float(held_steps)
+            for lane, count in zip(lanes, trained_counts):
+                del lane.steps[:count]
             self.last_update = metrics
             self._completed_update_metrics.append(dict(metrics))
             return metrics
@@ -725,9 +817,14 @@ class CandidatePPOAgent(Agent):
         }
 
     def _advantages_and_returns(
-        self, steps: list[_RolloutStep]
+        self, steps: list[_RolloutStep], tail_value: Tensor | None = None
     ) -> tuple[Tensor, Tensor]:
-        """Return GAE advantages and returns for one lane's trajectory."""
+        """Return GAE advantages and returns for one lane's trajectory.
+
+        ``tail_value`` is the sampled value of a held step that follows the last
+        one (see ``update``). It replaces a fresh V(next_observation) only for a
+        last step that did not end its episode.
+        """
         # Sampling values are already in reward units. Pending decisions can
         # survive another lane's update; never reinterpret them at a new scale.
         values = torch.stack([step.old_value for step in steps]).to(self.device)
@@ -741,6 +838,8 @@ class CandidatePPOAgent(Agent):
                     next_value = torch.zeros((), device=self.device)
                 elif boundary:
                     bootstrap = step.bootstrap_value
+                    if bootstrap is None and tail_value is not None and not step.episode_end:
+                        bootstrap = tail_value
                     if bootstrap is None:
                         bootstrap = self._raw_value(step.next_observation)
                     next_value = bootstrap.to(self.device)
