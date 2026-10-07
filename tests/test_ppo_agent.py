@@ -7,7 +7,8 @@ import dataclasses
 import pytest
 import torch
 
-from sts2rl.agents import CandidatePPOAgent, PPOConfig, Transition
+from sts2rl.actions import GameAction
+from sts2rl.agents import CandidatePPOAgent, NoLegalActionsError, PPOConfig, Transition
 from sts2rl.encoder import (
     EncoderConfig,
     GameEncoder,
@@ -1324,3 +1325,123 @@ def test_with_every_last_step_closed_holding_changes_nothing(hold: bool):
         assert torch.equal(targets, expected_targets)
     for name, tensor in reference.game_encoder.state_dict().items():
         assert torch.equal(agent.game_encoder.state_dict()[name], tensor), name
+
+
+def _node(index: int) -> dict[str, object]:
+    return {"type": "choose_map_node", "index": index}
+
+
+def test_an_excluded_action_is_never_sampled_and_the_decision_is_the_reduced_set():
+    """The stored log probability must be over what was really offered.
+
+    The update re-encodes the stored decision, so recording the reduced set
+    makes the ratio compare the same distribution at both ends.
+    """
+    torch.manual_seed(80)
+    agent = _agent(rollout_size=100)
+    observation = _observation(_map_state(3))
+    refused = GameAction("choose_map_node", index=1)
+
+    for _ in range(20):
+        action = agent.choose_action(observation, exclude=[refused])
+        pending = agent._lanes[0].pending
+        assert action.to_dict() != _node(1)
+        assert len(pending.decision.actions) == 2
+        offered = [_node(0), _node(2)]
+        assert offered[pending.action_index] == action.to_dict()
+        with torch.no_grad():
+            logits = agent.game_encoder.policy_value(pending.decision).logits
+        expected = torch.log_softmax(logits, dim=-1)[pending.action_index]
+        assert torch.allclose(pending.log_probability, expected, atol=1e-6)
+        agent.discard_decision()
+
+
+def test_a_decision_made_under_an_exclusion_trains_like_any_other():
+    torch.manual_seed(81)
+    agent = _agent(rollout_size=2)
+    observation = _observation(_map_state(3))
+    for exclude in ([GameAction("choose_map_node", index=0)], []):
+        action = agent.choose_action(observation, exclude=exclude)
+        agent.observe(
+            Transition(
+                state=observation,
+                action=action,
+                reward=1.0,
+                next_state=_observation(_map_state(3)),
+                done=False,
+            )
+        )
+
+    assert agent.optimizer_updates == 1
+
+
+def test_a_set_reduced_to_one_candidate_is_a_forced_step():
+    torch.manual_seed(82)
+    agent = _agent()
+    observation = _observation(_map_state(2))
+
+    action = agent.choose_action(
+        observation, exclude=[GameAction("choose_map_node", index=0)]
+    )
+
+    assert action.to_dict() == _node(1)
+    pending = agent._lanes[0].pending
+    assert len(pending.decision.actions) == 1
+    assert float(pending.log_probability) == 0.0
+
+
+def test_excluding_every_candidate_raises_and_leaves_nothing_pending():
+    """The runner reads this as "nothing new to try" and asks without it."""
+    agent = _agent()
+    observation = _observation(_map_state(2))
+    everything = [GameAction("choose_map_node", index=i) for i in range(2)]
+
+    with pytest.raises(NoLegalActionsError):
+        agent.choose_action(observation, exclude=everything)
+
+    assert agent._lanes[0].pending is None
+    agent.choose_action(observation)
+
+
+def test_evaluation_takes_the_best_candidate_that_is_left():
+    agent = _agent()
+    agent.eval()
+    observation = _observation(_map_state(3))
+    best = agent.choose_action(observation)
+
+    second = agent.choose_action(observation, exclude=[best])
+
+    assert second.to_dict() != best.to_dict()
+    assert agent.choose_action(observation, exclude=()).to_dict() == best.to_dict()
+
+
+def test_no_exclusion_is_the_same_choice_as_before():
+    observation = _observation(_map_state(3))
+    choices = []
+    for exclude in (None, ()):
+        torch.manual_seed(83)
+        agent = _agent()
+        torch.manual_seed(84)
+        if exclude is None:
+            action = agent.choose_action(observation)
+        else:
+            action = agent.choose_action(observation, exclude=exclude)
+        pending = agent._lanes[0].pending
+        choices.append((action.to_dict(), pending.action_index, pending.log_probability))
+
+    assert choices[0][:2] == choices[1][:2]
+    assert torch.equal(choices[0][2], choices[1][2])
+
+
+def test_a_lane_view_passes_the_exclusion_through():
+    torch.manual_seed(85)
+    agent = _agent()
+    view = agent.lane_view(3)
+    observation = _observation(_map_state(2))
+
+    action = view.choose_action(
+        observation, exclude=[GameAction("choose_map_node", index=1)]
+    )
+
+    assert action.to_dict() == _node(0)
+    assert len(agent._lanes[3].pending.decision.actions) == 1

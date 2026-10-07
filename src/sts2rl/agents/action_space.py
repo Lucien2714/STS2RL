@@ -35,17 +35,30 @@ REWARDS_TAKEN_OUTRIGHT = frozenset({"gold", "relic", "potion"})
 # before the run was stopped, and a seeded experiment was measuring reused
 # runs.
 #
-# So each entry is a (potion, screen) pair somebody has seen work:
+# So each entry is a (potion, screen) pair somebody has seen work **through
+# the API**:
 #
-# * Foul Potion in a shop -- three drinks in one traced human run -- and at the
-#   fake merchant, whose fight is documented as started by it.
+# * Foul Potion at the fake merchant, whose fight is documented as started by
+#   it.
 # * Blood Potion in a shop and at a rest site -- one drink each in two traced
 #   runs, accepted both times (HP 51 -> 66 and 32 -> 48, potion consumed).
 #
+# Foul Potion in a real shop is the pair that was taken back out.  There it
+# starts no fight; it pays 100 gold.  The game allows the drink only while the
+# merchant's UI exists *and* its inventory is closed
+# (``PassesCustomUsabilityCheck``).  A human closes the inventory by hand: the
+# 10 shop drinks in gameplay_records were all made with ``inventory_open:
+# false``.  The agent cannot.  The simulator has no merchant UI, and the mod
+# opens the inventory every time it reads shop state (read from the decompiled
+# mod, not tested live), so the game answers "Potion 'Foul Potion' cannot be
+# used right now" on both backends.  All 14 truncations in 5040 runs/step2*
+# episodes (0.28%) were this refusal, repeated on one shop screen.
+#
 # A pair is never widened by analogy.  Blood Potion on a rewards screen is
 # plausible and unobserved, and plausible is what the target-type gate was.
+# Valid in the GUI is not evidence either: the shop pair was valid there.
 NON_COMBAT_POTIONS: dict[str, frozenset[str]] = {
-    "FOUL_POTION": frozenset({"shop", "fake_merchant"}),
+    "FOUL_POTION": frozenset({"fake_merchant"}),
     "BLOOD_POTION": frozenset({"shop", "rest_site"}),
 }
 
@@ -474,9 +487,14 @@ class LegalActionProvider:
         """Return the potions confirmed drinkable on this screen with no fight.
 
         ``_combat_actions`` used to be the only place ``use_potion`` was
-        offered, which left a real action unreachable: a traced human drank
-        three Foul Potions in a shop -- the potion summons a fight, so it is a
-        deliberate move and not a disguised discard.
+        offered, which left real actions unreachable: Blood Potion heals in a
+        shop or at a rest site, and Foul Potion starts the fake merchant's
+        fight.  Neither is a disguised discard.
+
+        Foul Potion in a real shop pays 100 gold and starts no fight.  The
+        drink is valid in the GUI but refused through the API: the game allows
+        it only with the shop inventory closed, and reading the shop opens the
+        inventory.  So it is not offered there (see the constant).
 
         Only (potion, screen) pairs in ``NON_COMBAT_POTIONS`` are offered,
         because the failure mode is a loop, not a wasted potion: a refused drink

@@ -6,7 +6,10 @@ import gzip
 import json
 
 from sts2rl.actions import GameAction
-from sts2rl.agents.base import Transition
+import pytest
+
+from sts2rl.agents.action_space import NoLegalActionsError
+from sts2rl.agents.base import Transition, without_excluded
 from sts2rl.env.types import GameObservation
 from sts2rl.search import CombatSearch, MctsConfig, Node, SearchCombatAgent, SearchDecisionRecorder, SearchResult
 
@@ -43,10 +46,12 @@ class FakeSearch(CombatSearch):
         super().__init__(MctsConfig(simulations=1), candidates=candidates, key=key)
         self.calls = 0
         self.budgets: list[int | None] = []
+        self.excluded: list[list[dict]] = []
 
-    def search(self, env, state, simulations=None):
+    def search(self, env, state, simulations=None, exclude=()):
         self.calls += 1
         self.budgets.append(simulations)
+        self.excluded.append([action.to_dict() for action in exclude])
         offered = tuple(candidates(state))
         after_defend = Node(visits=10, children={key(HAND_SELECT, PICK_A): Node(visits=2),
                                                   key(HAND_SELECT, PICK_B): Node(visits=8)})
@@ -61,9 +66,12 @@ class FakeLane:
     def reset(self, initial_state):
         self.calls.append(("reset", None))
 
-    def choose_action(self, state):
-        self.calls.append(("ppo", state.raw_state["state_type"]))
-        return candidates(state.raw_state)[0]
+    def choose_action(self, state, exclude=()):
+        if exclude:
+            self.calls.append(("ppo-excluding", [action.to_dict() for action in exclude]))
+        else:
+            self.calls.append(("ppo", state.raw_state["state_type"]))
+        return without_excluded(candidates(state.raw_state), exclude)[0]
 
     def choose_external(self, state, action, *, record=True):
         self.calls.append(("external", action.to_dict()) if record else ("unrecorded", action.to_dict()))
@@ -194,3 +202,42 @@ def test_fights_can_be_played_without_rollout_entries():
     wrapped.choose_action(obs(fight("boss")))
     wrapped.choose_action(obs(HAND_SELECT))
     assert lane.calls[-2:] == [("unrecorded", DEFEND.to_dict()), ("unrecorded", PICK_B.to_dict())]
+
+
+def test_outside_searched_fights_an_exclusion_reaches_ppo():
+    wrapped, lane, search = agent()
+    action = wrapped.choose_action(obs(fight("monster")), exclude=[STRIKE])
+    assert action.to_dict() == DEFEND.to_dict()
+    assert lane.calls[-1] == ("ppo-excluding", [STRIKE.to_dict()])
+
+
+def test_a_searched_fight_passes_the_exclusion_into_the_search(tmp_path):
+    """The simulator can accept what the game refused, so the search would pick it again.
+
+    A decision searched under an exclusion is not recorded: its candidates are
+    not the state's candidates, which a cleaned decision promises.
+    """
+    wrapped, lane, search = agent(tmp_path)
+    wrapped.choose_action(obs(fight("elite")))
+    wrapped.discard_decision()
+    wrapped.choose_action(obs(fight("elite")), exclude=[STRIKE])
+    assert search.excluded == [[], [STRIKE.to_dict()]]
+    with gzip.open(tmp_path / "decisions.jsonl.gz", "rt", encoding="utf-8") as handle:
+        assert len(handle.readlines()) == 1
+
+
+def test_an_overlay_answered_from_the_tree_skips_an_excluded_pick():
+    wrapped, lane, search = agent()
+    wrapped.choose_action(obs(fight("boss")))
+    assert wrapped.choose_action(obs(HAND_SELECT)).to_dict() == PICK_B.to_dict()
+    wrapped.discard_decision()
+    action = wrapped.choose_action(obs(HAND_SELECT), exclude=[PICK_B])
+    assert action.to_dict() == PICK_A.to_dict()
+    assert lane.calls[-1] == ("external", PICK_A.to_dict())
+
+
+def test_a_fight_with_every_action_excluded_raises_for_the_runner():
+    wrapped, lane, search = agent()
+    with pytest.raises(NoLegalActionsError):
+        wrapped.choose_action(obs(fight("elite")), exclude=[STRIKE, DEFEND, END])
+    assert search.calls == 0

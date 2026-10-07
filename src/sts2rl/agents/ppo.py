@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 import copy
 import math
 from dataclasses import dataclass, field
@@ -15,7 +15,7 @@ from torch.nn import functional as F
 
 from sts2rl.actions import GameAction
 from sts2rl.agents.action_space import LegalActionProvider
-from sts2rl.agents.base import Agent, Transition
+from sts2rl.agents.base import Agent, Transition, without_excluded
 from sts2rl.encoder import GameEncoder, GameTokenizer, TokenizedDecision
 from sts2rl.env.types import GameObservation
 
@@ -161,8 +161,10 @@ class LaneView(Agent):
     def reset(self, initial_state: GameObservation) -> None:
         self.agent.reset(initial_state, lane=self.lane)
 
-    def choose_action(self, state: GameObservation) -> GameAction:
-        return self.agent.choose_action(state, lane=self.lane)
+    def choose_action(
+        self, state: GameObservation, exclude: Sequence[GameAction] = ()
+    ) -> GameAction:
+        return self.agent.choose_action(state, lane=self.lane, exclude=exclude)
 
     def choose_external(
         self, state: GameObservation, action: GameAction, *, record: bool = True
@@ -306,7 +308,23 @@ class CandidatePPOAgent(Agent):
         # Closing a held step can complete the rollout.
         self._update_if_ready()
 
-    def choose_action(self, state: GameObservation, lane: int = 0) -> GameAction:
+    def choose_action(
+        self,
+        state: GameObservation,
+        lane: int = 0,
+        exclude: Sequence[GameAction] = (),
+    ) -> GameAction:
+        """Sample (or, in evaluation, take the best of) this state's candidates.
+
+        ``exclude`` removes actions the game refused on this unchanged screen
+        before anything is scored, and the decision is recorded over that
+        reduced set: the stored log probability is then a probability over what
+        was really offered, and the update re-encodes the same reduced set, so
+        the ratio compares like with like.  Recording the full set instead
+        would store a sample the behaviour policy could not draw, under a
+        probability renormalised over actions it never saw.  A set reduced to
+        one candidate is a forced step like any other (``_policy_step``).
+        """
         entry = self._lane(lane)
         if entry.pending is not None:
             raise RuntimeError(
@@ -314,6 +332,8 @@ class CandidatePPOAgent(Agent):
             )
 
         candidates = self.action_provider.require_candidates(state.raw_state)
+        if exclude:
+            candidates = without_excluded(candidates, exclude)
         if len(candidates) == 1 and not self.training_enabled:
             return candidates[0]
 

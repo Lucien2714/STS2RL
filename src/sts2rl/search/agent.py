@@ -20,12 +20,12 @@ from __future__ import annotations
 import gzip
 import json
 import threading
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Protocol
 
 from sts2rl.actions import GameAction
-from sts2rl.agents.base import Agent, Transition
+from sts2rl.agents.base import Agent, Transition, without_excluded
 from sts2rl.env.game_env import GameEnv
 from sts2rl.env.types import GameObservation
 from sts2rl.search.evaluate import is_fight_over
@@ -40,7 +40,9 @@ class ExternalLane(Protocol):
 
     def reset(self, initial_state: GameObservation) -> None: ...
 
-    def choose_action(self, state: GameObservation) -> GameAction: ...
+    def choose_action(
+        self, state: GameObservation, exclude: Sequence[GameAction] = ()
+    ) -> GameAction: ...
 
     def choose_external(
         self, state: GameObservation, action: GameAction, *, record: bool = True
@@ -150,7 +152,20 @@ class SearchCombatAgent(Agent):
         self._node = self._node_before = None
         self.inner.reset(initial_state)
 
-    def choose_action(self, state: GameObservation) -> GameAction:
+    def choose_action(
+        self, state: GameObservation, exclude: Sequence[GameAction] = ()
+    ) -> GameAction:
+        """Search a fight's decision, or let PPO choose everywhere else.
+
+        ``exclude`` (actions the game refused on this unchanged screen) applies
+        in a fight too.  The search plays on a simulator, which can accept what
+        the game refuses, so a refused action is the search's own best answer
+        and it would choose it again on the same tree: the exclusion is passed
+        into the search as a restriction of the root's candidates, and the
+        subtree answer is restricted the same way.  A decision searched under
+        an exclusion is not recorded for distillation: its candidates are not
+        the state's candidates, which is what a cleaned decision promises.
+        """
         raw = state.raw_state
         state_type = raw.get("state_type")
         self._step += 1
@@ -163,14 +178,23 @@ class SearchCombatAgent(Agent):
             self._in_fight = False
         if not self._in_fight:
             self._node = self._node_before = None
+            if exclude:
+                return self.inner.choose_action(state, exclude=exclude)
             return self.inner.choose_action(state)
 
         candidates = self.search.candidates(raw)
+        if exclude:
+            candidates = without_excluded(candidates, exclude)
         self._node_before = self._node
         if state_type in BRANCHABLE and len(candidates) > 1:
-            result = self.search.search(self.sim, raw, simulations=self.room_simulations.get(self._room))
+            result = self.search.search(
+                self.sim,
+                raw,
+                simulations=self.room_simulations.get(self._room),
+                exclude=exclude,
+            )
             self.searched += 1
-            if self.recorder is not None:
+            if self.recorder is not None and not exclude:
                 self.recorder.record(
                     state, result, run_id=f"{self.run_label}-{self._episode}", step_index=self._step
                 )

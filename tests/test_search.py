@@ -171,6 +171,41 @@ def test_small_value_differences_still_concentrate_the_budget():
     assert result.distribution[0] > 0.5
 
 
+def test_an_excluded_root_action_is_neither_chosen_nor_searched():
+    """The simulator may accept what the game refused; the search must not pick it again."""
+    game = BranchingGame(world=0)
+    assert search_for(game, reseed=False).search(game, game.state).action == RISKY
+
+    game = BranchingGame(world=0)
+    result = search_for(game, reseed=False).search(game, game.state, exclude=[RISKY])
+    assert result.action != RISKY
+    assert RISKY not in result.candidates
+    assert ("risky",) not in result.root.children
+    assert ("risky",) not in result.root.available
+
+
+def test_an_excluded_copy_leaves_the_other_copy_standing_for_its_key():
+    """Two copies of one card are one decision: excluding one keeps the key."""
+    first, second = GameAction("good", copy=1), GameAction("good", copy=2)
+    game = BranchingGame(world=0)
+    search = search_for(game, reseed=False, simulations=100)
+    search.candidates = lambda state: [first, second, BAD, END]
+    result = search.search(game, game.state, exclude=[first])
+    assert result.candidates == (second, BAD, END)
+    assert result.action is second
+    assert ("good",) in result.root.children
+
+
+def test_no_exclusion_searches_exactly_as_before():
+    runs = []
+    for exclude in (None, ()):
+        game = BranchingGame(world=0)
+        search = search_for(game, simulations=100)
+        result = search.search(game, game.state) if exclude is None else search.search(game, game.state, exclude=exclude)
+        runs.append((result.action, result.visits, result.values, game.reseeds))
+    assert runs[0] == runs[1]
+
+
 def test_the_branch_point_is_released_even_when_the_search_fails():
     game = BranchingGame()
 

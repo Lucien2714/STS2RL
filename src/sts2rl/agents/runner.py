@@ -56,6 +56,45 @@ MAX_REFRESH_BACKOFF_SECONDS = 1.0
 MAX_STATE_REFRESHES = 12
 
 
+class _RefusedOnScreen:
+    """Actions the game refused on one screen that has not moved since.
+
+    A refusal that moves nothing is dropped through ``discard_decision``, so
+    the policy gets no signal and sees the same screen again -- and it chose
+    the same action again: 12 of 13 measured refusals were consecutive repeats
+    of one action, and all 14 truncations in 5040 runs/step2* episodes were one
+    refused Foul Potion drink in a shop, sent until the stall budget ran out.
+
+    The screen is the raw state the refusal left, the same comparison
+    ``_refused_without_moving`` makes.  Any other screen forgets the list, so
+    an action is excluded only where it was refused and only until something
+    moves.  The cost is a refusal that was only a timing race: the action
+    would have worked a moment later, and a different one is chosen instead.
+    That is one decision on a screen that was not ready, against a loop that
+    ends the episode.
+    """
+
+    def __init__(self) -> None:
+        self.screen: RawState | None = None
+        self.actions: list[GameAction] = []
+
+    def add(self, screen: RawState, action: GameAction) -> None:
+        if screen != self.screen:
+            self.clear()
+            self.screen = screen
+        self.actions.append(action)
+
+    def on(self, screen: RawState) -> tuple[GameAction, ...]:
+        """Return the actions refused on this screen, forgetting any other's."""
+        if self.actions and screen != self.screen:
+            self.clear()
+        return tuple(self.actions)
+
+    def clear(self) -> None:
+        self.screen = None
+        self.actions = []
+
+
 class EpisodeRunner:
     """Execute one complete run while keeping learning outside GameEnv."""
 
@@ -93,6 +132,7 @@ class EpisodeRunner:
         total_reward = 0.0
         stalled = 0
         truncated_by_stall = False
+        refused = _RefusedOnScreen()
         self.reward_model.reset(initial_state)
         self.agent.reset(observation)
 
@@ -100,7 +140,7 @@ class EpisodeRunner:
         attempted: list[dict] = []
 
         for _ in range(self.max_steps):
-            decision = self._choose_with_refresh(observation)
+            decision = self._choose_with_refresh(observation, refused)
             if decision is None:
                 truncation_reason = "no_legal_action"
                 break
@@ -111,9 +151,11 @@ class EpisodeRunner:
                 # The screen was not ready, not the action wrong.  Recording
                 # this would teach that resting at a rest site does nothing,
                 # and repeating it is how a deterministic policy spends ten
-                # thousand steps on one screen.
+                # thousand steps on one screen -- so it is also not chosen
+                # again until the screen moves (``_RefusedOnScreen``).
                 stalled += 1
                 attempted.append(action.to_dict())
+                refused.add(observation.raw_state, action)
                 self.agent.discard_decision()
                 if stalled > self.max_state_refreshes:
                     truncated_by_stall = True
@@ -123,6 +165,7 @@ class EpisodeRunner:
                 observation = self._observation(self.env.get_state())
                 continue
             stalled = 0
+            refused.clear()
 
             extra: dict = {}
             if env_step.info.get("action_error"):
@@ -216,16 +259,32 @@ class EpisodeRunner:
             )
 
     def _choose_with_refresh(
-        self, observation: GameObservation
+        self,
+        observation: GameObservation,
+        refused: _RefusedOnScreen | None = None,
     ) -> tuple[GameAction, GameObservation] | None:
         """Choose an action, re-reading state while none is legal yet.
 
         Combat states outside the player's play phase legally expose no action,
         so the server is given time to settle before each retry.  Returning
         None truncates the episode instead of failing the whole training run.
+
+        Actions refused on this unchanged screen are excluded.  When they are
+        every candidate there is nothing new to try, and the choice is made
+        without the exclusion -- the behaviour before it existed: the refusal
+        is retried after the wait, and the stall budget still truncates it.
         """
         for attempt in range(self.max_state_refreshes + 1):
             try:
+                exclude = () if refused is None else refused.on(observation.raw_state)
+                if exclude:
+                    try:
+                        return (
+                            self.agent.choose_action(observation, exclude=exclude),
+                            observation,
+                        )
+                    except NoLegalActionsError:
+                        pass
                 return self.agent.choose_action(observation), observation
             except NoLegalActionsError:
                 if attempt == self.max_state_refreshes:

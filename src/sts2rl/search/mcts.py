@@ -41,6 +41,7 @@ from typing import Any, Protocol
 
 from sts2rl.actions import GameAction
 from sts2rl.agents.action_space import LegalActionProvider, NoLegalActionsError
+from sts2rl.agents.base import without_excluded
 from sts2rl.search.evaluate import LeafEvaluator, is_fight_over
 
 RawState = Mapping[str, Any]
@@ -167,12 +168,31 @@ class CombatSearch:
         self.rng = rng or random.Random()
         self._low, self._high = math.inf, -math.inf
 
-    def search(self, env: SearchEnv, state: RawState, simulations: int | None = None) -> SearchResult:
-        """Search one decision; ``simulations`` overrides the configured budget."""
+    def search(
+        self,
+        env: SearchEnv,
+        state: RawState,
+        simulations: int | None = None,
+        exclude: Sequence[GameAction] = (),
+    ) -> SearchResult:
+        """Search one decision; ``simulations`` overrides the configured budget.
+
+        ``exclude`` names root actions the game refused on this unchanged screen
+        (``EpisodeRunner``).  They leave the root's candidates, and the
+        simulations do not spend budget on them: the simulator may accept what
+        the game refused, which is how the search chose the refused action in
+        the first place.  A key is withheld only when every candidate with it is
+        excluded -- two copies of one card are one decision, and the copy that
+        was not refused still stands for it.  Below the root nothing changes.
+        """
         budget = self.config.simulations if simulations is None else simulations
         if budget < 1:
             raise ValueError("simulations must be positive")
         candidates = tuple(self.candidates(state))
+        root_keys: frozenset[ActionKey] | None = None
+        if exclude:
+            candidates = without_excluded(candidates, exclude)
+            root_keys = frozenset(self.key(state, action) for action in candidates)
         point = env.snapshot()
         # A fresh pool per decision: siblings are compared in the same worlds, and no
         # decision is planned against another's.
@@ -187,7 +207,7 @@ class CombatSearch:
                 # Restore and reseed travel as one request against the simulator.
                 seed = seeds[index % len(seeds)] if self.config.reseed else None
                 world = env.restore(point, seed)
-                self._simulate(env, root, world)
+                self._simulate(env, root, world, root_keys)
         finally:
             # The environment is left where the decision was taken, with its own hidden
             # state: the last simulation's world is not the game's.
@@ -197,7 +217,13 @@ class CombatSearch:
                 env.release(point)
         return self._result(root, state, candidates)
 
-    def _simulate(self, env: SearchEnv, root: Node, state: RawState) -> None:
+    def _simulate(
+        self,
+        env: SearchEnv,
+        root: Node,
+        state: RawState,
+        root_keys: frozenset[ActionKey] | None = None,
+    ) -> None:
         root_state = state
         path = [root]
         node = root
@@ -214,6 +240,10 @@ class CombatSearch:
             by_key: dict[ActionKey, GameAction] = {}
             for action in offered:
                 by_key.setdefault(self.key(state, action), action)
+            if node is root and root_keys is not None:
+                # The world's hand is the root's, so this leaves at least the
+                # keys the caller kept; ``or`` only guards a world that differs.
+                by_key = {k: a for k, a in by_key.items() if k in root_keys} or by_key
             for key in by_key:
                 node.available[key] = node.available.get(key, 0) + 1
             key = self._choose(node, by_key)
