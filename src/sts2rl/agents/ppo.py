@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections.abc import Callable, Mapping, Sequence
 import copy
 import math
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 import threading
 
 import torch
@@ -72,6 +72,10 @@ class PPOConfig:
     # of minibatches can still carry the policy far; on a state absent from the
     # batch -- a card reward screen, a few per episode -- the clip limits nothing,
     # and one update took P(skip card reward) from 0.21 to 1.00. None: no limit.
+    # It bounds only the estimate from the sampled actions. The reference term
+    # (reference_kl_coefficient) moves the policy on candidates that were never
+    # sampled, which this estimator cannot see, so it is not what limits the
+    # pull; the coefficient is.
     target_kl: float | None = None
     # Targeted exploration, as sorted (state_type, epsilon) pairs. On a screen
     # of that type a real choice is drawn from the mixture
@@ -129,6 +133,17 @@ class PPOConfig:
             if screen == state_type:
                 return epsilon
         return 0.0
+
+    def without_reference(self) -> PPOConfig:
+        """This configuration for an agent that only plays a checkpoint's actor.
+
+        A script that samples or argmaxes a saved policy and never updates --
+        capturing snapshots, playing boss fights -- has no use for the artifact
+        its run pulled toward and must not be made to find it: the coefficient
+        at 0 asks for no reference. Everything else is kept, so the exploration
+        rates and the rollout such an agent collects are still the run's.
+        """
+        return replace(self, reference_kl_coefficient=0.0)
 
 
 @dataclass
@@ -334,10 +349,21 @@ class CandidatePPOAgent(Agent):
                 raise ValueError(
                     "a reference policy needs a positive reference_kl_coefficient"
                 )
-            trained = {id(parameter) for parameter in self.game_encoder.parameters()}
-            if any(id(parameter) in trained for parameter in reference_encoder.parameters()):
+            # Memory, not identity: nn.Parameter(actor_parameter.detach()) is
+            # a new object on the actor's storage, and every optimizer step
+            # would move the "frozen" reference with it.
+            trained = {
+                parameter.untyped_storage().data_ptr()
+                for parameter in self.game_encoder.parameters()
+                if parameter.numel()
+            }
+            if any(
+                parameter.numel() and parameter.untyped_storage().data_ptr() in trained
+                for parameter in reference_encoder.parameters()
+            ):
                 raise ValueError(
-                    "the reference policy must not share parameters with the trained encoder"
+                    "the reference policy must not share memory with the trained "
+                    "encoder: a parameter on the actor's storage moves with every update"
                 )
             reference_encoder.to(self.device)
             reference_encoder.eval()
@@ -963,6 +989,12 @@ class CandidatePPOAgent(Agent):
             metrics["optimizer_steps"] = float(optimizer_steps)
             metrics["kl_early_stop"] = float(stopped)
             if self.config.reference_kl_coefficient > 0:
+                # Weighted over the minibatches that stepped, by the reference
+                # steps each was measured on. 0.0 after a stop on the first
+                # minibatch means nothing was measured, not that the policy is
+                # near the reference. ``reference_kl`` and ``reference_steps``
+                # are the last stepped minibatch's own: that count is not the
+                # denominator of this mean.
                 metrics["reference_kl_mean"] = (
                     reference_kl_total / reference_steps if reference_steps else 0.0
                 )
@@ -1099,17 +1131,32 @@ class CandidatePPOAgent(Agent):
             + self.config.value_coefficient * value_loss
             - self.config.entropy_coefficient * entropy
         )
+        terms = [("policy_loss", policy_loss), ("value_loss", value_loss), ("entropy", entropy)]
         if beta > 0:
             # A minibatch of forced and external steps alone has no reference
             # step, and contributes nothing rather than failing.
             reference_kl = torch.stack(reference_kl_terms).mean() if reference_kl_terms else zero
             if not bool(torch.isfinite(reference_kl)):
                 raise RuntimeError("the reference KL is not finite")
-            loss = loss + beta * reference_kl
+            weighted_reference_kl = beta * reference_kl
+            loss = loss + weighted_reference_kl
+            terms.append(("beta * reference_kl", weighted_reference_kl))
+        if not bool(torch.isfinite(loss)):
+            # Before the backward pass, so Adam never steps on a NaN or inf
+            # gradient. Every term can be finite while the sum is not: a
+            # coefficient large enough to overflow its term in float32.
+            raise RuntimeError(
+                "the loss is not finite before the backward pass: "
+                + ", ".join(f"{name}={float(value.detach().cpu()):g}" for name, value in terms)
+            )
         self.optimizer.zero_grad()
         loss.backward()
+        # A non-finite norm is refused rather than scaled by: the step would
+        # otherwise write NaN into every weight it touches.
         gradient_norm = nn.utils.clip_grad_norm_(
-            self.game_encoder.parameters(), self.config.max_grad_norm
+            self.game_encoder.parameters(),
+            self.config.max_grad_norm,
+            error_if_nonfinite=True,
         )
         self.optimizer.step()
         metrics = {
@@ -1142,6 +1189,9 @@ class CandidatePPOAgent(Agent):
                 "a sampled decision carries no reference distribution; the "
                 "reference KL needs one on every policy step"
             )
+        # Stored on the CPU, so this is a check and not a device synchronisation.
+        if not bool(torch.isfinite(reference).all()):
+            raise RuntimeError("a stored reference distribution is not finite")
         log_pi = F.log_softmax(logits, dim=-1)
         reference = reference.to(self.device)
         if log_pi.shape != reference.shape:

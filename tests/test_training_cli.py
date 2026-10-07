@@ -808,3 +808,62 @@ def test_evaluation_builds_the_agent_without_the_reference_artifact(tmp_path: Pa
     assert eval_cli.run_evaluation(args) == 0
 
     assert chosen and chosen[0]["type"] == "choose_rest_option"
+
+
+def test_the_reference_is_loaded_from_the_bytes_that_were_digested(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """A copy replaced between the digest check and the load must not become
+    what the run pulls toward: the loader is handed the bytes that were
+    digested, so the file on disk can change underneath and nothing follows."""
+    artifact = _artifact(tmp_path)
+    swapped_in = _artifact(tmp_path, name="other.pt")
+    captured = _capture_trainer(monkeypatch)
+    run = tmp_path / "run"
+    copy = run / "reference_policy.pt"
+    original = cli.load_reference_encoder
+
+    def swap_then_load(data, **kwargs):
+        copy.write_bytes(swapped_in.read_bytes())
+        return original(data, **kwargs)
+
+    monkeypatch.setattr(cli, "load_reference_encoder", swap_then_load)
+    args = cli.create_parser().parse_args(
+        ["--run-dir", str(run), "--no-tensorboard", *SMALL_ENCODER_FLAGS,
+         "--reference-policy", str(artifact), "--reference-kl", "0.1"]
+    )
+
+    assert cli.run_training(args) == 0
+
+    assert copy.read_bytes() == swapped_in.read_bytes()  # The swap did land on disk ...
+    expected = torch.load(artifact, map_location="cpu", weights_only=True)["encoder"]
+    for name, tensor in captured[0].agent.reference_encoder.state_dict().items():
+        assert torch.equal(tensor, expected[name]), name  # ... and the run never saw it.
+    # The next resume reads the swapped file, and its digest gives it away.
+    with pytest.raises(ValueError, match="sha256"):
+        cli.run_training(cli.create_parser().parse_args(["--run-dir", str(run), "--resume"]))
+
+
+def test_a_checkpoint_from_before_the_reference_existed_resumes_without_one(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """The checkpoint format did not change, so stripping the three new fields
+    from a checkpoint and its config.json gives the pre-change payload."""
+    captured = _capture_trainer(monkeypatch)
+    run = tmp_path / "run"
+    parse = cli.create_parser().parse_args
+    cli.run_training(parse(["--run-dir", str(run), "--no-tensorboard", *SMALL_ENCODER_FLAGS]))
+    checkpoint = run / "checkpoints" / "update_000000.pt"
+    payload = torch.load(checkpoint, map_location="cpu", weights_only=True)
+    config_path = run / "config.json"
+    config = json.loads(config_path.read_text(encoding="utf-8"))
+    for plan in (payload["training_plan"], config):
+        del plan["ppo"]["reference_kl_coefficient"]
+        del plan["training"]["reference_policy"]
+        del plan["training"]["reference_policy_sha256"]
+    torch.save(payload, checkpoint)
+    config_path.write_text(json.dumps(config), encoding="utf-8")
+
+    assert cli.run_training(parse(["--run-dir", str(run), "--resume"])) == 0
+
+    resumed = captured[1]
+    assert resumed.plan.ppo.reference_kl_coefficient == 0.0
+    assert resumed.plan.training.reference_policy is None
+    assert resumed.plan.training.reference_policy_sha256 is None
+    assert resumed.agent.reference_encoder is None

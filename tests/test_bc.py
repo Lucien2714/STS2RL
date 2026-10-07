@@ -1,5 +1,6 @@
 """Behavior cloning: the actor learns the label, and nothing else travels."""
 
+import hashlib
 import json
 
 import pytest
@@ -12,6 +13,7 @@ from sts2rl.training.bc import (
     BC_FORMAT_VERSION,
     BEST_CHECKPOINT_FILENAME,
     METRICS_FILENAME,
+    ArtifactBytes,
     BCConfig,
     BCTrainer,
     EpochMetrics,
@@ -266,15 +268,19 @@ def write_artifact(tmp_path, *, encoder_config: EncoderConfig, fingerprint: str)
 def test_a_reference_encoder_is_frozen_and_leaves_the_generator_alone(tmp_path):
     """The reference a PPO run pulls toward: the artifact's weights in a module
     of its own, in eval mode with gradients off, built without consuming the
-    random numbers the run's own encoder and sampling depend on."""
+    random numbers the run's own encoder and sampling depend on -- and built
+    from bytes read once beside their digest, never from a path."""
     vocabulary = GameVocabulary.from_bundled_data()
     config = EncoderConfig(hidden_dim=16, entity_heads=4, entity_ff_dim=32)
     path = write_artifact(tmp_path, encoder_config=config, fingerprint=vocabulary.fingerprint())
     expected = torch.load(path, map_location="cpu", weights_only=True)["encoder"]
+    artifact = ArtifactBytes.read(path)
+    assert artifact.data == path.read_bytes()
+    assert artifact.sha256 == hashlib.sha256(path.read_bytes()).hexdigest()
     torch.manual_seed(5)
     state = torch.get_rng_state()
 
-    reference = load_reference_encoder(path, vocabulary=vocabulary, encoder_config=config)
+    reference = load_reference_encoder(artifact.data, vocabulary=vocabulary, encoder_config=config)
 
     assert torch.equal(torch.get_rng_state(), state)
     assert not reference.training
@@ -282,7 +288,12 @@ def test_a_reference_encoder_is_frozen_and_leaves_the_generator_alone(tmp_path):
     for name, tensor in reference.state_dict().items():
         assert torch.equal(tensor, expected[name]), name
     with pytest.raises(ValueError, match="encoder config"):
-        load_reference_encoder(path, vocabulary=vocabulary, encoder_config=EncoderConfig())
+        load_reference_encoder(artifact.data, vocabulary=vocabulary, encoder_config=EncoderConfig())
+    # A path would be a second read, which is not what was digested.
+    with pytest.raises(TypeError, match="not a path"):
+        load_reference_encoder(path, vocabulary=vocabulary, encoder_config=config)
+    with pytest.raises(ValueError, match="failed to load BC checkpoint"):
+        load_reference_encoder(b"not a torch file", vocabulary=vocabulary, encoder_config=config)
 
 
 def test_an_artifact_from_a_different_vocabulary_is_refused(tmp_path):

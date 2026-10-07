@@ -3,10 +3,9 @@
 from __future__ import annotations
 
 import argparse
-import hashlib
 import json
+import os
 import random
-import shutil
 from collections.abc import Callable, Sequence
 from contextlib import ExitStack
 from dataclasses import replace
@@ -20,7 +19,12 @@ from sts2rl.encoder import EncoderConfig, GameEncoder, GameTokenizer, GameVocabu
 from sts2rl.env import GameEnv, ResetSpec
 from sts2rl.env.game_env import BACKENDS
 from sts2rl.search import CombatSearch, LeafEvaluator, MctsConfig, SearchCombatAgent, SearchDecisionRecorder
-from sts2rl.training.bc import load_bc_encoder_state, load_reference_encoder
+from sts2rl.training.bc import (
+    ArtifactBytes,
+    bc_encoder_state_from_bytes,
+    load_bc_encoder_state,
+    load_reference_encoder,
+)
 from sts2rl.training.checkpoint import CheckpointManager, LoadedCheckpoint
 from sts2rl.training.config import (
     DEFAULT_HOLDOUT_SEEDS,
@@ -298,18 +302,23 @@ def run_training(args: argparse.Namespace) -> int:
                 plan,
                 training=replace(plan.training, init_from=str(initial_weights.source)),
             )
-        reference_source: Path | None = None
+        reference_source: ArtifactBytes | None = None
         if plan.training.reference_policy is not None:
-            # Checked before the run directory exists, for the same reason;
-            # the digest recorded is the source's, which the copy must match.
-            reference_source = Path(plan.training.reference_policy)
-            load_bc_encoder_state(
-                reference_source, vocabulary=vocabulary, encoder_config=plan.encoder
+            # One read of the source, validated and digested from the same
+            # bytes, before the run directory exists for the same reason as
+            # init_from. The digest recorded is what the run's copy must match.
+            source_path = Path(plan.training.reference_policy)
+            reference_source = _read_artifact(source_path)
+            bc_encoder_state_from_bytes(
+                reference_source.data,
+                vocabulary=vocabulary,
+                encoder_config=plan.encoder,
+                source=source_path,
             )
             plan = replace(
                 plan,
                 training=replace(
-                    plan.training, reference_policy_sha256=_sha256(reference_source)
+                    plan.training, reference_policy_sha256=reference_source.sha256
                 ),
             )
         torch.manual_seed(plan.training.torch_seed)
@@ -317,7 +326,7 @@ def run_training(args: argparse.Namespace) -> int:
             torch.cuda.manual_seed_all(plan.training.torch_seed)
         manager.initialize_run(plan, resume=False)
         if reference_source is not None:
-            _copy_reference_policy(reference_source, manager.run_dir, plan)
+            _write_reference_policy(reference_source, manager.run_dir)
         state = TrainingState()
         resume_step = None
         tensorboard_log_dir = "tensorboard"
@@ -339,12 +348,15 @@ def run_training(args: argparse.Namespace) -> int:
     encoder = GameEncoder(vocabulary, plan.encoder)
     reference_encoder: GameEncoder | None = None
     if plan.ppo.reference_kl_coefficient > 0:
-        # Always from the run's own copy, new run or resumed, so what every
+        # Always from the run's own copy, new run or resumed, read once: the
+        # bytes the digest was checked on are the bytes loaded, so what every
         # update pulls toward is the file the plan's digest names.
+        stored = _reference_policy_copy(manager.run_dir, plan)
         reference_encoder = load_reference_encoder(
-            _reference_policy_copy(manager.run_dir, plan),
+            stored.data,
             vocabulary=vocabulary,
             encoder_config=plan.encoder,
+            source=manager.run_dir / REFERENCE_POLICY_FILENAME,
         )
     agent = CandidatePPOAgent(
         tokenizer=tokenizer,
@@ -694,32 +706,41 @@ def _resumed_plan(
     return replace(saved, training=training)
 
 
-def _sha256(path: Path) -> str:
-    with path.open("rb") as handle:
-        return hashlib.file_digest(handle, "sha256").hexdigest()
+def _read_artifact(path: Path) -> ArtifactBytes:
+    try:
+        return ArtifactBytes.read(path)
+    except OSError as exc:
+        raise ValueError(f"failed to read the reference policy {path}: {exc}") from exc
 
 
-def _copy_reference_policy(source: Path, run_dir: Path, plan: TrainingPlan) -> Path:
-    """Give the run its own copy of the reference, checked against the recorded digest.
+def _write_reference_policy(artifact: ArtifactBytes, run_dir: Path) -> Path:
+    """Give the run its own copy of the reference: the bytes that were validated.
 
     The source is what the user named and may move or be retrained; the copy
-    is what the run reads for the rest of its life.  Hashed again after the
-    copy, so a source that changed between being digested and being copied
-    cannot leave a plan whose digest names a file the run never had.
+    is what the run reads for the rest of its life.  Written from the bytes
+    in hand rather than copied from the path, so a source that changed after
+    being digested cannot become a copy the plan's digest does not name.  The
+    copy is then read back once, digest and weights from that one read
+    (``_reference_policy_copy``).
     """
     copy = run_dir / REFERENCE_POLICY_FILENAME
-    shutil.copyfile(source, copy)
-    digest = _sha256(copy)
-    if digest != plan.training.reference_policy_sha256:
-        raise ValueError(
-            f"{source} changed while it was being copied into the run: its sha256 "
-            f"is now {digest}, the plan recorded {plan.training.reference_policy_sha256}"
-        )
+    temporary = copy.with_suffix(copy.suffix + ".tmp")
+    try:
+        temporary.write_bytes(artifact.data)
+        os.replace(temporary, copy)
+    except Exception:
+        temporary.unlink(missing_ok=True)
+        raise
     return copy
 
 
-def _reference_policy_copy(run_dir: Path, plan: TrainingPlan) -> Path:
-    """Return the run's copy of its reference policy, verified against the plan."""
+def _reference_policy_copy(run_dir: Path, plan: TrainingPlan) -> ArtifactBytes:
+    """Return the run's copy of its reference policy, read once and verified.
+
+    The bytes returned are the bytes the digest was computed on, and they are
+    what the caller loads: a file replaced between the check and the load
+    would otherwise be accepted on the strength of a check it never passed.
+    """
     copy = run_dir / REFERENCE_POLICY_FILENAME
     recorded = plan.training.reference_policy_sha256
     if recorded is None:
@@ -728,13 +749,13 @@ def _reference_policy_copy(run_dir: Path, plan: TrainingPlan) -> Path:
         )
     if not copy.is_file():
         raise ValueError(f"the run's copy of its reference policy is missing: {copy}")
-    digest = _sha256(copy)
-    if digest != recorded:
+    stored = _read_artifact(copy)
+    if stored.sha256 != recorded:
         raise ValueError(
             f"{copy} is not the reference policy this run recorded: its sha256 is "
-            f"{digest}, the plan recorded {recorded}"
+            f"{stored.sha256}, the plan recorded {recorded}"
         )
-    return copy
+    return stored
 
 
 def _require_equal_overrides(

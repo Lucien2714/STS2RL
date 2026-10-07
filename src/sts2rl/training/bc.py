@@ -21,6 +21,8 @@ from __future__ import annotations
 from collections.abc import Sequence
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
+import hashlib
+import io
 import json
 import os
 from pathlib import Path
@@ -416,7 +418,29 @@ def load_bc_encoder_state(
     """
     source = Path(path)
     try:
-        payload = torch.load(source, map_location="cpu", weights_only=True)
+        data = source.read_bytes()
+    except OSError as exc:
+        raise ValueError(f"failed to load BC checkpoint {source}: {exc}") from exc
+    return bc_encoder_state_from_bytes(
+        data, vocabulary=vocabulary, encoder_config=encoder_config, source=source
+    )
+
+
+def bc_encoder_state_from_bytes(
+    data: bytes,
+    *,
+    vocabulary: GameVocabulary,
+    encoder_config: EncoderConfig,
+    source: object = "<bytes>",
+) -> dict[str, Tensor]:
+    """The checks of ``load_bc_encoder_state``, on bytes already read.
+
+    Taking bytes rather than a path is what lets a caller digest and load one
+    read of a file: a path hashed and then opened again can be two files.
+    ``source`` only names the artifact in errors.
+    """
+    try:
+        payload = torch.load(io.BytesIO(data), map_location="cpu", weights_only=True)
     except Exception as exc:
         raise ValueError(f"failed to load BC checkpoint {source}: {exc}") from exc
     if not isinstance(payload, dict):
@@ -444,24 +468,49 @@ def load_bc_encoder_state(
     return dict(state)
 
 
+@dataclass(frozen=True)
+class ArtifactBytes:
+    """One read of an artifact file: its bytes and their sha256.
+
+    Both come from the same read, so what the digest vouches for is exactly
+    what gets loaded.  Hashing a path and then opening it again would let a
+    file swapped in between pass as the one that was checked.
+    """
+
+    data: bytes
+    sha256: str
+
+    @classmethod
+    def read(cls, path: str | Path) -> ArtifactBytes:
+        data = Path(path).read_bytes()
+        return cls(data, hashlib.sha256(data).hexdigest())
+
+
 def load_reference_encoder(
-    path: str | Path,
+    data: bytes,
     *,
     vocabulary: GameVocabulary,
     encoder_config: EncoderConfig,
+    source: object = "<bytes>",
 ) -> GameEncoder:
-    """Build a frozen encoder holding one BC artifact's weights.
+    """Build a frozen encoder holding one BC artifact's weights, from its bytes.
 
     The reference a PPO run pulls toward (``PPOConfig.reference_kl_coefficient``):
     the same two checks as ``load_bc_encoder_state``, then a module of its own,
     so its parameters are separately allocated and no optimizer can reach them,
-    in eval mode with gradients off for good.  Built under a forked RNG, so a
-    run with a reference draws exactly the random numbers one without draws --
-    the initial weights it would otherwise consume the generator on are
-    overwritten by the artifact anyway.
+    in eval mode with gradients off for good.  It takes bytes, not a path, so
+    the caller loads the very bytes it digested (``ArtifactBytes``).  Built
+    under a forked RNG, so a run with a reference draws exactly the random
+    numbers one without draws -- the initial weights it would otherwise
+    consume the generator on are overwritten by the artifact anyway.
     """
-    state = load_bc_encoder_state(
-        path, vocabulary=vocabulary, encoder_config=encoder_config
+    if not isinstance(data, (bytes, bytearray, memoryview)):
+        raise TypeError(
+            "load_reference_encoder takes the artifact's bytes, read once beside "
+            "their digest, not a path"
+        )
+    state = bc_encoder_state_from_bytes(
+        data, vocabulary=vocabulary, encoder_config=encoder_config, source=source
     )
     with torch.random.fork_rng(devices=[]):
         encoder = GameEncoder(vocabulary, encoder_config)
