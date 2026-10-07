@@ -197,6 +197,9 @@ def run_evaluation(args: argparse.Namespace) -> int:
             agent,
             plan.reset,
             max_episode_failures=plan.training.max_episode_failures,
+            on_score=lambda score: print(
+                "episode " + json.dumps(score.to_dict(), sort_keys=True), flush=True
+            ),
         )
         scores = evaluator.run(schedule)
 

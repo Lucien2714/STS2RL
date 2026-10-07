@@ -128,6 +128,19 @@ def test_every_scheduled_episode_is_played_once():
     assert len(scores) == 3
 
 
+def test_each_score_is_reported_as_it_lands():
+    """A long evaluation is followed while it runs, not only at the end."""
+    agent = FakeAgent()
+    runner = FakeRunner(agent, {"A": 4, "X": 2})
+    seen = []
+
+    scores = _evaluator([runner], agent, on_score=seen.append).run(
+        [("A", "training"), ("X", "holdout")]
+    )
+
+    assert seen == scores
+
+
 def test_clients_share_the_schedule():
     agent = FakeAgent()
     first = FakeRunner(agent, {"A": 3, "B": 3}, delay=0.02)

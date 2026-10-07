@@ -10,7 +10,7 @@ thing that finally reads them.
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 import statistics
 import threading
@@ -142,6 +142,7 @@ class Evaluator:
         agent: CandidatePPOAgent,
         reset: ResetSpec,
         max_episode_failures: int = 3,
+        on_score: Callable[[EpisodeScore], None] | None = None,
     ) -> None:
         runners = tuple(runners)
         if not runners:
@@ -152,6 +153,9 @@ class Evaluator:
         self.agent = agent
         self.reset = reset
         self.max_episode_failures = max_episode_failures
+        # Called with each score as it lands, so a long evaluation can be
+        # followed while it runs and survives a crash in what it logged.
+        self.on_score = on_score
 
     def _spec_for(self, seed: str) -> ResetSpec:
         """Return the configured reset, seeded, and forced to start its own run.
@@ -237,17 +241,18 @@ class Evaluator:
                     continue
 
                 consecutive = 0
+                score = EpisodeScore(
+                    seed=seed,
+                    pool=pool,
+                    reward=result.total_reward,
+                    floor=final_floor(result.final_state),
+                    steps=result.steps,
+                    terminated=result.terminated,
+                )
                 with lock:
-                    scores.append(
-                        EpisodeScore(
-                            seed=seed,
-                            pool=pool,
-                            reward=result.total_reward,
-                            floor=final_floor(result.final_state),
-                            steps=result.steps,
-                            terminated=result.terminated,
-                        )
-                    )
+                    scores.append(score)
+                    if self.on_score is not None:
+                        self.on_score(score)
 
         threads = [
             threading.Thread(
