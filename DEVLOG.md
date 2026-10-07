@@ -351,3 +351,10 @@
 - 遇到的问题：探索没有恢复塌缩的选项，策略反而变差，商店漂移到买药水、丢药水。周期 1 的 holdout 评估在 79 局时因模拟器故障（水晶球事件后 run faulted）退出。顺序执行的周期评估脚本会把"最新"checkpoint 当成周期末，已改为手动指定。
 - 下一步：Step 2-t：从 p060 开始，--reference-policy runs/bc-v7/bc_best.pt --reference-kl 0.1，不探索，3 个周期；参考模型正在训练（runs/bc-v7）；周期 2、3 的 holdout 评估进行中，完成后补进文档。
 - 需要 Lucien 决定的事：无（mod 的 Foul Potion 改动仍待真实游戏测试）。
+
+### 2026-10-07 12:39 (PT) · feat/mcts-combat
+- 做了什么：补齐 Step 2-s 周期 2、3 末 checkpoint 的 holdout 评估（各 90 局），更新 docs/mcts/step2s-exploration.md。训练 BC 参考模型 runs/bc-v7（data/bc/v7 全部 10771 个决策，04:29 ~ 05:05）。启动 Step 2-t（runs/step2t-bckl）：从 step2p update_000060 开始，--reference-policy runs/bc-v7/bc_best.pt --reference-kl 0.1，不探索，10 个模拟器，450 局；周期评估脚本改为"到周期末立即记录并探测，评估按队列顺序"。
+- 结果/数据：holdout 对 p060（同 30 seed）：周期 1 末 −3.03（p = 0.15），周期 2 末 −1.77（p = 0.52），周期 3 末 −0.08（10 高 / 16 低，p = 0.33）；周期 3 末对 p164 +3.46（p = 0.036）。bc-v7：选第 4 个 epoch，留出交叉熵 1.117，准确率 56.4%（营火 76.5%，选牌 65%，地图 75.5%）；参考策略在人类界面上升级 0.68、跳过选牌 0.62。Step 2-t 未完成。
+- 遇到的问题：无。
+- 下一步：Step 2-t 每个周期末探测升级、跳过的概率，在 holdout 上评估；结束后写文档。
+- 需要 Lucien 决定的事：无。
