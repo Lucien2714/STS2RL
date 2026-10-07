@@ -237,8 +237,11 @@ per screen: `--reference-kl-screens rest_site=0.1,map=0.03` replaces
 `--reference-kl` on those screens and leaves the others on the global value,
 and a screen set to `0` is pulled nowhere even when the global coefficient is
 positive. The mapping is recorded in the plan and, like `--explore`, cannot
-change on resume. The metrics carry `reference_kl/<state_type>` for every
-screen the term is in force on.
+change on resume. For every screen an update held a reference step of, the
+metrics carry `reference_kl/<state_type>` -- that screen's mean KL over the
+update's stepped minibatches -- and `reference_steps/<state_type>`, the count
+it is over; a screen with no such step has no key, because a 0 there would
+read as the policy matching the reference.
 
 The saved artifact is the epoch with the **lowest holdout cross entropy** —
 not the last, and not the most accurate. Training accuracy keeps climbing after

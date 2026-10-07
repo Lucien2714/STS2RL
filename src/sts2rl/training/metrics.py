@@ -84,8 +84,10 @@ class TrainingMetricsWriter:
         # Present only on a run with a reference policy; absent keys are skipped.
         "reference_kl": "ppo/reference_kl",
         "reference_kl_mean": "ppo/reference_kl_mean",
-        # One per screen, present only where the reference term is in force.
+        # Per screen, present only for the screens the update held a reference
+        # step of: that screen's mean KL, and the count it is over.
         **{f"reference_kl/{screen}": f"ppo/reference_kl/{screen}" for screen in STATE_TYPES},
+        **{f"reference_steps/{screen}": f"ppo/reference_steps/{screen}" for screen in STATE_TYPES},
     }
 
     def __init__(

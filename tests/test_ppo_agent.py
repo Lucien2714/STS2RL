@@ -2679,6 +2679,8 @@ def test_a_kl_stop_on_the_first_minibatch_still_reports_the_reference_mean():
     assert metrics["kl_early_stop"] == 1.0 and metrics["optimizer_steps"] == 0.0
     assert metrics["reference_kl_mean"] == 0.0
     assert "reference_kl" not in metrics
+    # Nothing stepped, so no screen was measured and none gets a key.
+    assert not any(key.startswith(("reference_kl/", "reference_steps/")) for key in metrics)
 
 
 @pytest.mark.parametrize("coefficient", [-0.1, float("nan"), float("inf"), True])
@@ -2949,14 +2951,12 @@ def test_without_per_screen_coefficients_the_run_is_bit_identical_to_the_one_bef
     _assert_matches_baseline(agent, actions, baseline)
     added = set(agent.last_update) - set(baseline["metrics"])
     if beta:
-        # A global coefficient is in force on every screen, and the eight
-        # decisions were all on the map.
-        assert added == {f"reference_kl/{screen}" for screen in STATE_TYPES}
-        assert agent.last_update["reference_kl/map"] == baseline["metrics"]["reference_kl"]
-        assert all(
-            agent.last_update[f"reference_kl/{screen}"] == 0.0
-            for screen in STATE_TYPES
-            if screen != "map"
+        # The eight decisions were all on the map, so that is the one screen
+        # measured: its figures are the update's own, over all eight steps.
+        assert added == {"reference_kl/map", "reference_steps/map"}
+        assert agent.last_update["reference_steps/map"] == 8.0
+        assert agent.last_update["reference_kl/map"] == pytest.approx(
+            baseline["metrics"]["reference_kl_mean"], rel=1e-6
         )
     else:
         assert added == set()
@@ -2993,8 +2993,12 @@ def test_a_screen_with_a_coefficient_stores_the_reference_and_a_screen_at_zero_d
     assert metrics["reference_kl_mean"] == pytest.approx(kl, rel=1e-5)
     assert metrics["policy_loss"] == 0.0
     assert metrics["loss"] == pytest.approx(0.1 * kl / 2, abs=1e-6)
-    assert {key for key in metrics if key.startswith("reference_kl/")} == {"reference_kl/rest_site"}
+    assert {key for key in metrics if key.startswith(("reference_kl/", "reference_steps/"))} == {
+        "reference_kl/rest_site",
+        "reference_steps/rest_site",
+    }
     assert metrics["reference_kl/rest_site"] == pytest.approx(kl, rel=1e-5)
+    assert metrics["reference_steps/rest_site"] == 1.0
 
 
 def test_a_zero_override_switches_the_reference_off_on_its_screen_only():
@@ -3101,7 +3105,8 @@ def test_the_weighted_term_averages_each_screen_coefficient_times_its_kl_over_th
     assert metrics["reference_kl"] == pytest.approx((kl["map"] + kl["rest_site"]) / 2, rel=1e-5)
     assert metrics["reference_kl/map"] == pytest.approx(kl["map"], rel=1e-5)
     assert metrics["reference_kl/rest_site"] == pytest.approx(kl["rest_site"], rel=1e-5)
-    assert "reference_kl/card_reward" not in metrics
+    assert metrics["reference_steps/map"] == metrics["reference_steps/rest_site"] == 1.0
+    assert "reference_kl/card_reward" not in metrics and "reference_steps/card_reward" not in metrics
     assert len(captured) == 3
     for logits in captured:
         step = by_length[logits.numel()]
@@ -3127,6 +3132,153 @@ def test_the_weighted_term_averages_each_screen_coefficient_times_its_kl_over_th
 def test_a_per_screen_coefficient_names_a_known_screen_once_with_a_finite_non_negative_number(screens):
     with pytest.raises(ValueError, match="reference_kl_screens"):
         PPOConfig(reference_kl_screens=screens)
+
+
+def _spy_minibatches(agent) -> list[dict[str, float]]:
+    """Record every minibatch's own metrics as ``update`` first sees them.
+
+    Snapshots, because the update's own metrics are the last minibatch's
+    dict with the update's figures written over it.
+    """
+    results: list[dict[str, float]] = []
+    original = agent._optimize_minibatch
+
+    def spy(*args, **kwargs):
+        result = original(*args, **kwargs)
+        results.append(dict(result))
+        return result
+
+    agent._optimize_minibatch = spy
+    return results
+
+
+def _per_screen_keys(metrics: Mapping[str, float]) -> set[str]:
+    return {key for key in metrics if key.startswith(("reference_kl/", "reference_steps/"))}
+
+
+def test_a_screen_measured_in_an_earlier_minibatch_keeps_its_figures():
+    """One rest-site and one map decision in minibatches of one: whichever
+    minibatch steps last reports only its own screen, and the update still
+    carries the other screen's KL and count. A screen with no reference step
+    in the update has no key at all."""
+    torch.manual_seed(154)
+    agent = _agent(
+        rollout_size=1000, update_epochs=1, minibatch_size=1,
+        reference_kl=0.1, reference=_reference_encoder(),
+    )
+    results = _spy_minibatches(agent)
+    _decide(agent, _observation(_rest_site_state()))
+    _decide(agent, _observation(_map_state(3)), done=True)
+
+    metrics = agent.update()
+
+    assert len(results) == 2
+    by_screen = {
+        screen: result
+        for result in results
+        for screen in ("rest_site", "map")
+        if f"reference_kl/{screen}" in result
+    }
+    assert set(by_screen) == {"rest_site", "map"}
+    assert all(result["reference_steps"] == 1.0 for result in results)
+    for screen, result in by_screen.items():
+        assert metrics[f"reference_kl/{screen}"] == result[f"reference_kl/{screen}"]
+        assert metrics[f"reference_steps/{screen}"] == 1.0
+    assert _per_screen_keys(metrics) == {
+        "reference_kl/rest_site", "reference_steps/rest_site", "reference_kl/map", "reference_steps/map",
+    }
+    # The update-level keys keep their meaning: the last minibatch's own
+    # figures, and the weighted mean over both.
+    assert metrics["reference_steps"] == 1.0
+    assert metrics["reference_kl_mean"] == pytest.approx(
+        sum(result["reference_kl"] for result in results) / 2, rel=1e-6
+    )
+
+
+def test_a_screen_kl_is_weighted_by_its_steps_in_each_minibatch():
+    """Three rest-site decisions in minibatches of two: the one that holds two
+    weighs twice the one that holds one, and the policy moves between them."""
+    torch.manual_seed(155)
+    agent = _agent(
+        rollout_size=1000, update_epochs=1, minibatch_size=2, learning_rate=0.02,
+        reference_kl=0.1, reference=_reference_encoder(),
+    )
+    results = _spy_minibatches(agent)
+    for index in range(3):
+        _decide(agent, _observation(_rest_site_state()), reward=float(index), done=index == 2)
+
+    metrics = agent.update()
+
+    assert len(results) == 2
+    assert sorted(result["reference_steps/rest_site"] for result in results) == [1.0, 2.0]
+    weighted = sum(r["reference_kl/rest_site"] * r["reference_steps/rest_site"] for r in results) / 3
+    unweighted = sum(r["reference_kl/rest_site"] for r in results) / 2
+    assert metrics["reference_steps/rest_site"] == 3.0
+    assert metrics["reference_kl/rest_site"] == pytest.approx(weighted, rel=1e-6)
+    assert abs(weighted - unweighted) > 1e-5
+    # Every step was on the rest site, so the screen's mean is the update's.
+    assert metrics["reference_kl/rest_site"] == pytest.approx(metrics["reference_kl_mean"], rel=1e-6)
+    assert _per_screen_keys(metrics) == {"reference_kl/rest_site", "reference_steps/rest_site"}
+
+
+def test_the_reference_is_read_only_on_a_screen_with_a_positive_coefficient():
+    """The reference's forward pass is skipped, not merely discarded, on a
+    screen whose coefficient is 0."""
+    torch.manual_seed(156)
+    reference = _reference_encoder()
+    calls: list[int] = []
+    original = reference.policy_value
+
+    def counting(decision):
+        calls.append(len(decision.actions))
+        return original(decision)
+
+    reference.policy_value = counting
+    agent = _agent(reference_kl_screens={"rest_site": 0.1, "card_reward": 0.0}, reference=reference)
+    for observation in (_observation(_map_state(3)), _observation(_card_reward_state())):
+        agent.choose_action(observation)
+        assert agent._lane(0).pending.reference_log_probabilities is None
+        agent.discard_decision()
+    assert calls == []
+    agent.choose_action(_observation(_rest_site_state()))
+    assert calls == [2]
+    assert agent._lane(0).pending.reference_log_probabilities is not None
+    agent.discard_decision()
+    # Under a global coefficient, the screen at 0 is the one that reads nothing.
+    calls.clear()
+    under_global = _agent(reference_kl=0.1, reference_kl_screens={"map": 0.0}, reference=reference)
+    under_global.choose_action(_observation(_map_state(3)))
+    assert calls == [] and under_global._lane(0).pending.reference_log_probabilities is None
+    under_global.discard_decision()
+    under_global.choose_action(_observation(_card_reward_state()))
+    assert calls == [3]
+    under_global.discard_decision()
+    under_global.choose_action(_observation(_rest_site_state()))
+    assert calls == [3, 2]
+
+
+def test_evaluation_needs_no_reference_when_only_an_override_enables_it():
+    """``sts2rl-eval`` builds the agent from the saved plan without the
+    artifact; an override alone must not change that."""
+    torch.manual_seed(157)
+    agent = _agent(reference_kl_screens={"rest_site": 0.2})
+    assert agent.config.uses_reference and agent.reference_encoder is None
+    agent.eval()
+    observation = _observation(_rest_site_state())
+
+    torch.manual_seed(158)
+    choices = {agent.choose_action(observation).to_dict()["index"] for _ in range(5)}
+    drawn = torch.rand(())
+    torch.manual_seed(158)
+
+    assert len(choices) == 1
+    assert torch.equal(drawn, torch.rand(()))
+    assert agent._lane(0).pending is None
+    # Training on that screen is what needs the artifact.
+    agent.train(True)
+    with pytest.raises(RuntimeError, match="reference policy"):
+        agent.choose_action(observation)
+    assert agent._lane(0).pending is None
 
 
 @pytest.mark.parametrize("beta", ["0.1", True, None])

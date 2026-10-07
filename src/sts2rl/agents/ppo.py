@@ -355,6 +355,14 @@ def _policy_step(step: _RolloutStep) -> bool:
     return step.policy_trainable and len(step.decision.actions) > 1
 
 
+def _screen_reference_steps(result: Mapping[str, float]) -> dict[str, float]:
+    """The reference steps a minibatch's metrics count per screen, by screen."""
+    prefix = "reference_steps/"
+    return {
+        key[len(prefix):]: count for key, count in result.items() if key.startswith(prefix)
+    }
+
+
 def _mixture_log_probability(log_probability: Tensor, epsilon: float, count: int) -> Tensor:
     """Return log((1 - epsilon) * pi(a) + epsilon / count) from log pi(a).
 
@@ -1030,6 +1038,13 @@ class CandidatePPOAgent(Agent):
             # steps it was measured on; ``reference_kl`` alone is the last one's.
             reference_kl_total = 0.0
             reference_steps = 0.0
+            # The same per screen. A screen's few steps can all sit in an early
+            # minibatch, so the last minibatch's own figures cannot stand for
+            # the update's: a rest site measured there and absent here would
+            # otherwise read as 0, which is also what a policy that matches the
+            # reference reads as.
+            screen_kl_totals: dict[str, float] = {}
+            screen_steps: dict[str, float] = {}
             for _ in range(self.config.update_epochs):
                 order = torch.randperm(len(steps)).tolist()
                 for start in range(0, len(order), self.config.minibatch_size):
@@ -1049,6 +1064,12 @@ class CandidatePPOAgent(Agent):
                     if "reference_steps" in result:
                         reference_kl_total += result["reference_kl"] * result["reference_steps"]
                         reference_steps += result["reference_steps"]
+                        for screen, count in _screen_reference_steps(result).items():
+                            screen_steps[screen] = screen_steps.get(screen, 0.0) + count
+                            screen_kl_totals[screen] = (
+                                screen_kl_totals.get(screen, 0.0)
+                                + result[f"reference_kl/{screen}"] * count
+                            )
                 if stopped:
                     break
             # Here, not only in ``_optimize_minibatch``: a KL stop on the first
@@ -1066,6 +1087,14 @@ class CandidatePPOAgent(Agent):
                 metrics["reference_kl_mean"] = (
                     reference_kl_total / reference_steps if reference_steps else 0.0
                 )
+                # Per screen, over the same minibatches: the count-weighted
+                # mean KL of its reference steps, and that count, for every
+                # screen that had one. A screen that had none gets no key, not
+                # a 0.0. ``metrics`` starts as the last stepped minibatch's own,
+                # whose per-screen figures these replace.
+                for screen, count in screen_steps.items():
+                    metrics[f"reference_kl/{screen}"] = screen_kl_totals[screen] / count
+                    metrics[f"reference_steps/{screen}"] = count
 
             self.optimizer_updates += 1
             metrics["environment_steps"] = float(self.environment_steps)
@@ -1121,6 +1150,11 @@ class CandidatePPOAgent(Agent):
         policy steps -- a step whose screen has no coefficient is one of
         those steps and contributes nothing; the surrogate, the advantage
         normalisation and the KL stop never see any of it.
+
+        The metrics carry the reference steps' mean KL and count, and the
+        same per screen for the screens this minibatch held a reference step
+        of; ``update`` folds the per-screen figures over the minibatches that
+        stepped.
         """
         uses_reference = self.config.uses_reference
         policy_losses: list[Tensor] = []
@@ -1265,13 +1299,11 @@ class CandidatePPOAgent(Agent):
         if uses_reference:
             metrics["reference_kl"] = float(reference_kl.detach().cpu())
             metrics["reference_steps"] = float(len(reference_kl_terms))
-            # One key per screen the term is in force on, 0.0 when this
-            # minibatch held none of its steps -- like ``reference_kl`` itself.
-            for screen in self.config.reference_screens():
-                screen_terms = reference_kl_by_screen.get(screen)
-                metrics[f"reference_kl/{screen}"] = (
-                    float(torch.stack(screen_terms).mean().cpu()) if screen_terms else 0.0
-                )
+            # Only the screens this minibatch held a reference step of: a
+            # screen absent from it was not measured, which no number says.
+            for screen, screen_terms in reference_kl_by_screen.items():
+                metrics[f"reference_kl/{screen}"] = float(torch.stack(screen_terms).mean().cpu())
+                metrics[f"reference_steps/{screen}"] = float(len(screen_terms))
         return metrics
 
     def _reference_kl(self, step: _RolloutStep, logits: Tensor) -> Tensor:

@@ -973,3 +973,41 @@ def test_a_run_with_only_per_screen_coefficients_loads_its_reference(tmp_path: P
     assert captured[1].agent.reference_encoder is not None
     with pytest.raises(ValueError, match="--reference-kl-screens cannot change"):
         cli.run_training(parse(["--run-dir", str(run), "--resume", "--reference-kl-screens", "rest_site=0.3"]))
+
+
+def test_a_checkpoint_from_before_per_screen_coefficients_resumes_on_its_global_one(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """A run with --reference-kl 0.1 saved before the mapping existed:
+    stripping the field from its checkpoint and config.json gives that
+    payload. It resumes with the mapping empty -- which selects the
+    no-override loss path the baseline fixture pins -- the global coefficient
+    still in force on every screen, and its reference loaded."""
+    artifact = _artifact(tmp_path)
+    captured = _capture_trainer(monkeypatch)
+    run = tmp_path / "run"
+    parse = cli.create_parser().parse_args
+    cli.run_training(parse(
+        ["--run-dir", str(run), "--no-tensorboard", *SMALL_ENCODER_FLAGS,
+         "--reference-policy", str(artifact), "--reference-kl", "0.1"]
+    ))
+    checkpoint = run / "checkpoints" / "update_000000.pt"
+    payload = torch.load(checkpoint, map_location="cpu", weights_only=True)
+    config_path = run / "config.json"
+    config = json.loads(config_path.read_text(encoding="utf-8"))
+    for plan in (payload["training_plan"], config):
+        del plan["ppo"]["reference_kl_screens"]
+    torch.save(payload, checkpoint)
+    config_path.write_text(json.dumps(config), encoding="utf-8")
+
+    assert cli.run_training(parse(["--run-dir", str(run), "--resume"])) == 0
+
+    resumed = captured[1]
+    assert resumed.plan == captured[0].plan
+    assert resumed.plan.ppo.reference_kl_screens == ()
+    assert resumed.plan.ppo.reference_kl_coefficient == 0.1
+    assert resumed.agent.config.reference_kl_screens == ()
+    assert resumed.agent.config.reference_kl_for("rest_site") == 0.1
+    assert resumed.agent.reference_encoder is not None
+    # The global coefficient is in force on every screen: a sampled rest-site
+    # decision reads the reference.
+    resumed.agent.choose_action(GameObservation(_rest_site()))
+    assert resumed.agent._lane(0).pending.reference_log_probabilities is not None
