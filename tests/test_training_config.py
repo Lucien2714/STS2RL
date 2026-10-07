@@ -219,3 +219,46 @@ def test_a_plan_saved_before_exploration_existed_loads_without_it():
     del values["ppo"]["exploration"]
 
     assert TrainingPlan.from_dict(values).ppo.exploration == ()
+
+
+def test_a_reference_needs_both_a_path_and_a_coefficient():
+    with pytest.raises(ValueError, match="go together"):
+        TrainingPlan(ppo=PPOConfig(reference_kl_coefficient=0.1))
+    with pytest.raises(ValueError, match="go together"):
+        TrainingPlan(training=TrainingConfig(reference_policy="bc_best.pt"))
+
+    plan = TrainingPlan(
+        training=TrainingConfig(reference_policy="bc_best.pt", reference_policy_sha256="0" * 64),
+        ppo=PPOConfig(reference_kl_coefficient=0.1),
+    )
+    restored = TrainingPlan.from_dict(json.loads(json.dumps(plan.to_dict())))
+
+    assert restored == plan
+    assert restored.training.reference_policy_sha256 == "0" * 64
+
+
+@pytest.mark.parametrize(
+    "changes",
+    [
+        {"reference_policy": ""},
+        {"reference_policy": "bc_best.pt", "reference_policy_sha256": "abc"},
+        {"reference_policy": "bc_best.pt", "reference_policy_sha256": "G" * 64},
+        {"reference_policy_sha256": "0" * 64},
+    ],
+)
+def test_an_invalid_reference_record_is_rejected(changes: dict[str, object]):
+    with pytest.raises(ValueError, match="reference_policy"):
+        TrainingConfig(**changes)  # type: ignore[arg-type]
+
+
+def test_a_plan_saved_before_the_reference_existed_loads_without_it():
+    values = TrainingPlan().to_dict()
+    del values["ppo"]["reference_kl_coefficient"]
+    del values["training"]["reference_policy"]
+    del values["training"]["reference_policy_sha256"]
+
+    plan = TrainingPlan.from_dict(values)
+
+    assert plan.ppo.reference_kl_coefficient == 0.0
+    assert plan.training.reference_policy is None
+    assert plan.training.reference_policy_sha256 is None

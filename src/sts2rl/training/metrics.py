@@ -79,6 +79,9 @@ class TrainingMetricsWriter:
         "entropy": "ppo/entropy",
         "gradient_norm": "ppo/gradient_norm",
         "rollout_steps": "ppo/rollout_steps",
+        # Present only on a run with a reference policy; absent keys are skipped.
+        "reference_kl": "ppo/reference_kl",
+        "reference_kl_mean": "ppo/reference_kl_mean",
     }
 
     def __init__(

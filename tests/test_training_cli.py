@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
+import json
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -10,8 +12,10 @@ import pytest
 import torch
 
 from sts2rl.agents import PPOConfig
-from sts2rl.env import ResetSpec
+from sts2rl.encoder import EncoderConfig, GameEncoder, GameVocabulary
+from sts2rl.env import GameObservation, ResetSpec
 from sts2rl.training import TrainingConfig, TrainingPlan
+from sts2rl.training.bc import BCConfig, EpochMetrics, save_bc_checkpoint
 from sts2rl.training.config import DEFAULT_HOLDOUT_SEEDS, DEFAULT_SEED_POOL
 from sts2rl.training import cli
 from sts2rl.training import eval_cli
@@ -561,3 +565,246 @@ def test_resume_accepts_the_exploration_rates_it_was_saved_with_in_any_order(tmp
     resumed = cli._resumed_plan(args, SimpleNamespace(plan=saved))  # type: ignore[arg-type]
 
     assert resumed.ppo == saved.ppo
+
+
+# --------------------------------------------------------------- reference KL
+
+SMALL_ENCODER = EncoderConfig(hidden_dim=16, entity_heads=4, entity_ff_dim=32)
+SMALL_ENCODER_FLAGS = ["--hidden-dim", "16", "--entity-heads", "4", "--entity-ff-dim", "32"]
+
+
+def _artifact(tmp_path: Path, config: EncoderConfig = SMALL_ENCODER, name: str = "bc_best.pt") -> Path:
+    """A BC artifact with its own random weights, of the given encoder shape."""
+    vocabulary = GameVocabulary.from_bundled_data()
+    return save_bc_checkpoint(
+        tmp_path / name,
+        encoder=GameEncoder(vocabulary, config),
+        vocabulary_fingerprint=vocabulary.fingerprint(),
+        encoder_config=config,
+        bc_config=BCConfig(),
+        metrics=EpochMetrics(
+            epoch=1, train_loss=0.5, train_accuracy=0.9, holdout_loss=0.6,
+            holdout_accuracy=0.4, holdout_chance=0.2, holdout_first_candidate=0.3,
+        ),
+    )
+
+
+def _capture_trainer(monkeypatch: pytest.MonkeyPatch) -> list:
+    """Replace ``Trainer`` with one that records what run_training built and
+    saves a single checkpoint, so a resume has something to read."""
+    captured: list = []
+
+    class CapturingTrainer:
+        def __init__(self, runners, agent, manager, metrics_writer, plan, state, **kwargs):
+            self.agent, self.manager, self.plan, self.state = agent, manager, plan, state
+            captured.append(self)
+
+        def train(self):
+            self.manager.save_progress(self.agent, self.plan, self.state, "tensorboard")
+            return self.state
+
+    monkeypatch.setattr(cli, "Trainer", CapturingTrainer)
+    return captured
+
+
+def _sha256(path: Path) -> str:
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def _rest_site() -> dict:
+    return {
+        "state_type": "rest_site",
+        "run": {"floor": 6},
+        "player": {
+            "character": "The Ironclad", "hp": 40, "max_hp": 80, "gold": 50,
+            "relics": [], "potions": [], "status": [],
+        },
+        "rest_site": {
+            "options": [{"index": 0, "id": "REST"}, {"index": 1, "id": "SMITH"}],
+            "can_proceed": False,
+        },
+    }
+
+
+def test_a_reference_needs_both_the_path_and_the_coefficient(tmp_path: Path):
+    parse = cli.create_parser().parse_args
+    with pytest.raises(ValueError, match="go together"):
+        cli._new_plan(parse(["--run-dir", str(tmp_path / "a"), "--reference-kl", "0.1"]))
+    with pytest.raises(ValueError, match="go together"):
+        cli._new_plan(parse(["--run-dir", str(tmp_path / "b"), "--reference-policy", "bc_best.pt"]))
+
+    plan = cli._new_plan(
+        parse(["--run-dir", str(tmp_path / "c"), "--reference-policy", "bc_best.pt", "--reference-kl", "0.1"])
+    )
+
+    assert plan.ppo.reference_kl_coefficient == 0.1
+    assert plan.training.reference_policy == "bc_best.pt"
+    assert plan.training.reference_policy_sha256 is None  # Recorded once the copy exists.
+    plain = cli._new_plan(parse(["--run-dir", str(tmp_path / "d")]))
+    assert plain.ppo.reference_kl_coefficient == 0.0 and plain.training.reference_policy is None
+
+
+def test_a_new_run_copies_its_reference_and_records_the_digest(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """The source may move or be retrained; the run reads its own copy."""
+    artifact = _artifact(tmp_path)
+    captured = _capture_trainer(monkeypatch)
+    run = tmp_path / "run"
+    args = cli.create_parser().parse_args(
+        ["--run-dir", str(run), "--no-tensorboard", *SMALL_ENCODER_FLAGS,
+         "--reference-policy", str(artifact), "--reference-kl", "0.1"]
+    )
+
+    assert cli.run_training(args) == 0
+
+    copy = run / "reference_policy.pt"
+    assert copy.read_bytes() == artifact.read_bytes()
+    config = json.loads((run / "config.json").read_text(encoding="utf-8"))
+    assert config["training"]["reference_policy"] == str(artifact)
+    assert config["training"]["reference_policy_sha256"] == _sha256(artifact)
+    assert config["ppo"]["reference_kl_coefficient"] == 0.1
+    agent = captured[0].agent
+    assert agent.config.reference_kl_coefficient == 0.1
+    expected = torch.load(artifact, map_location="cpu", weights_only=True)["encoder"]
+    for name, tensor in agent.reference_encoder.state_dict().items():
+        assert torch.equal(tensor, expected[name]), name
+    assert not any(p.requires_grad for p in agent.reference_encoder.parameters())
+    assert not agent.reference_encoder.training
+    # The actor started from random weights: the reference is not --init-encoder.
+    assert not torch.equal(
+        next(iter(agent.game_encoder.state_dict().values())), next(iter(expected.values()))
+    )
+
+
+def test_init_encoder_and_the_reference_may_be_the_same_file(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    artifact = _artifact(tmp_path)
+    captured = _capture_trainer(monkeypatch)
+    args = cli.create_parser().parse_args(
+        ["--run-dir", str(tmp_path / "run"), "--no-tensorboard", *SMALL_ENCODER_FLAGS,
+         "--init-encoder", str(artifact), "--reference-policy", str(artifact), "--reference-kl", "0.1"]
+    )
+
+    assert cli.run_training(args) == 0
+
+    agent = captured[0].agent
+    assert agent.game_encoder is not agent.reference_encoder
+    for name, tensor in agent.game_encoder.state_dict().items():
+        assert torch.equal(tensor, agent.reference_encoder.state_dict()[name]), name
+    assert all(p.requires_grad for p in agent.game_encoder.parameters())
+
+
+def test_without_a_coefficient_no_reference_is_loaded(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    captured = _capture_trainer(monkeypatch)
+    monkeypatch.setattr(
+        cli, "load_reference_encoder", lambda *args, **kwargs: pytest.fail("a reference was loaded")
+    )
+    args = cli.create_parser().parse_args(
+        ["--run-dir", str(tmp_path / "run"), "--no-tensorboard", *SMALL_ENCODER_FLAGS]
+    )
+
+    assert cli.run_training(args) == 0
+
+    assert captured[0].agent.reference_encoder is None
+    assert not (tmp_path / "run" / "reference_policy.pt").exists()
+
+
+def test_an_incompatible_reference_leaves_no_run_directory_behind(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    _capture_trainer(monkeypatch)
+    artifact = _artifact(tmp_path, EncoderConfig(hidden_dim=64), name="wide.pt")
+    args = cli.create_parser().parse_args(
+        ["--run-dir", str(tmp_path / "run"), "--no-tensorboard", *SMALL_ENCODER_FLAGS,
+         "--reference-policy", str(artifact), "--reference-kl", "0.1"]
+    )
+
+    with pytest.raises(ValueError, match="encoder config"):
+        cli.run_training(args)
+
+    assert not (tmp_path / "run").exists()
+
+
+def test_resume_reads_the_copy_and_checks_its_digest(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    artifact = _artifact(tmp_path)
+    captured = _capture_trainer(monkeypatch)
+    run = tmp_path / "run"
+    parse = cli.create_parser().parse_args
+    cli.run_training(parse(
+        ["--run-dir", str(run), "--no-tensorboard", *SMALL_ENCODER_FLAGS,
+         "--reference-policy", str(artifact), "--reference-kl", "0.1"]
+    ))
+    # The source is gone; the run does not need it any more.
+    artifact.unlink()
+
+    assert cli.run_training(parse(["--run-dir", str(run), "--resume"])) == 0
+    resumed = captured[1]
+    assert resumed.plan.training.reference_policy == str(artifact)
+    assert resumed.agent.reference_encoder is not None
+    for name, tensor in resumed.agent.reference_encoder.state_dict().items():
+        assert torch.equal(tensor, captured[0].agent.reference_encoder.state_dict()[name]), name
+    # The same values are accepted; different ones are a different experiment.
+    assert cli.run_training(parse(
+        ["--run-dir", str(run), "--resume", "--reference-policy", str(artifact), "--reference-kl", "0.1"]
+    )) == 0
+    with pytest.raises(ValueError, match="--reference-kl cannot change"):
+        cli.run_training(parse(["--run-dir", str(run), "--resume", "--reference-kl", "0.2"]))
+    with pytest.raises(ValueError, match="--reference-policy cannot change"):
+        cli.run_training(parse(["--run-dir", str(run), "--resume", "--reference-policy", str(tmp_path / "other.pt")]))
+
+    copy = run / "reference_policy.pt"
+    copy.write_bytes(copy.read_bytes() + b"\0")
+    with pytest.raises(ValueError, match="sha256"):
+        cli.run_training(parse(["--run-dir", str(run), "--resume"]))
+    copy.unlink()
+    with pytest.raises(ValueError, match="missing"):
+        cli.run_training(parse(["--run-dir", str(run), "--resume"]))
+
+
+def test_resume_refuses_a_changed_reference_before_touching_anything(tmp_path: Path):
+    saved = TrainingPlan(
+        training=TrainingConfig(
+            run_dir=tmp_path / "run", reference_policy="bc_best.pt", reference_policy_sha256="0" * 64
+        ),
+        ppo=PPOConfig(reference_kl_coefficient=0.1),
+    )
+    parse = cli.create_parser().parse_args
+    base = ["--run-dir", str(tmp_path / "run"), "--resume", "latest"]
+
+    with pytest.raises(ValueError, match="--reference-kl cannot change"):
+        cli._resumed_plan(parse([*base, "--reference-kl", "0.05"]), SimpleNamespace(plan=saved))  # type: ignore[arg-type]
+    with pytest.raises(ValueError, match="--reference-policy cannot change"):
+        cli._resumed_plan(parse([*base, "--reference-policy", "other.pt"]), SimpleNamespace(plan=saved))  # type: ignore[arg-type]
+    resumed = cli._resumed_plan(
+        parse([*base, "--reference-policy", "bc_best.pt", "--reference-kl", "0.1"]), SimpleNamespace(plan=saved)  # type: ignore[arg-type]
+    )
+    assert resumed.ppo == saved.ppo
+    assert resumed.training.reference_policy_sha256 == "0" * 64
+
+
+def test_evaluation_builds_the_agent_without_the_reference_artifact(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """sts2rl-eval reads the plan of a run trained with a reference, whose copy
+    may be gone; evaluation never samples, so it never needs it."""
+    artifact = _artifact(tmp_path)
+    _capture_trainer(monkeypatch)
+    run = tmp_path / "run"
+    cli.run_training(cli.create_parser().parse_args(
+        ["--run-dir", str(run), "--no-tensorboard", *SMALL_ENCODER_FLAGS,
+         "--reference-policy", str(artifact), "--reference-kl", "0.1"]
+    ))
+    (run / "reference_policy.pt").unlink()
+    chosen: list[dict] = []
+
+    class FakeEvaluator:
+        def __init__(self, runners, agent, reset, **kwargs):
+            self.agent = agent
+
+        def run(self, schedule):
+            self.agent.eval()
+            chosen.append(self.agent.choose_action(GameObservation(_rest_site())).to_dict())
+            assert self.agent.config.reference_kl_coefficient == 0.1
+            assert self.agent.reference_encoder is None
+            return []
+
+    monkeypatch.setattr(eval_cli, "Evaluator", FakeEvaluator)
+    args = eval_cli.create_parser().parse_args(["--run-dir", str(run), "--holdout-seeds", "X"])
+
+    assert eval_cli.run_evaluation(args) == 0
+
+    assert chosen and chosen[0]["type"] == "choose_rest_option"

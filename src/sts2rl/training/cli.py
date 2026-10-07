@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import random
+import shutil
 from collections.abc import Callable, Sequence
 from contextlib import ExitStack
 from dataclasses import replace
@@ -18,11 +20,12 @@ from sts2rl.encoder import EncoderConfig, GameEncoder, GameTokenizer, GameVocabu
 from sts2rl.env import GameEnv, ResetSpec
 from sts2rl.env.game_env import BACKENDS
 from sts2rl.search import CombatSearch, LeafEvaluator, MctsConfig, SearchCombatAgent, SearchDecisionRecorder
-from sts2rl.training.bc import load_bc_encoder_state
+from sts2rl.training.bc import load_bc_encoder_state, load_reference_encoder
 from sts2rl.training.checkpoint import CheckpointManager, LoadedCheckpoint
 from sts2rl.training.config import (
     DEFAULT_HOLDOUT_SEEDS,
     DEFAULT_SEED_POOL,
+    REFERENCE_POLICY_FILENAME,
     TrainingConfig,
     TrainingPlan,
     TrainingState,
@@ -228,6 +231,26 @@ def create_parser() -> argparse.ArgumentParser:
             "trains the mixture (default: none)"
         ),
     )
+    parser.add_argument(
+        "--reference-policy",
+        type=Path,
+        help=(
+            "a behavior-cloning artifact (bc_best.pt) whose policy --reference-kl "
+            "pulls the actor toward. Copied into the run directory as "
+            "reference_policy.pt, which is what the run reads from then on; the "
+            "copy's sha256 is recorded in the plan and checked on resume. "
+            "Independent of --init-encoder, which may name the same file."
+        ),
+    )
+    parser.add_argument(
+        "--reference-kl",
+        type=float,
+        help=(
+            "coefficient of the forward KL(reference || policy) added to the loss "
+            "over sampled decisions, e.g. 0.1; needs --reference-policy "
+            "(default 0: no reference)"
+        ),
+    )
     parser.add_argument("--no-tensorboard", action="store_true", default=None)
     parser.add_argument("--tensorboard-flush-secs", type=int)
     return parser
@@ -275,10 +298,26 @@ def run_training(args: argparse.Namespace) -> int:
                 plan,
                 training=replace(plan.training, init_from=str(initial_weights.source)),
             )
+        reference_source: Path | None = None
+        if plan.training.reference_policy is not None:
+            # Checked before the run directory exists, for the same reason;
+            # the digest recorded is the source's, which the copy must match.
+            reference_source = Path(plan.training.reference_policy)
+            load_bc_encoder_state(
+                reference_source, vocabulary=vocabulary, encoder_config=plan.encoder
+            )
+            plan = replace(
+                plan,
+                training=replace(
+                    plan.training, reference_policy_sha256=_sha256(reference_source)
+                ),
+            )
         torch.manual_seed(plan.training.torch_seed)
         if torch.cuda.is_available():
             torch.cuda.manual_seed_all(plan.training.torch_seed)
         manager.initialize_run(plan, resume=False)
+        if reference_source is not None:
+            _copy_reference_policy(reference_source, manager.run_dir, plan)
         state = TrainingState()
         resume_step = None
         tensorboard_log_dir = "tensorboard"
@@ -298,6 +337,15 @@ def run_training(args: argparse.Namespace) -> int:
 
     tokenizer = GameTokenizer(vocabulary)
     encoder = GameEncoder(vocabulary, plan.encoder)
+    reference_encoder: GameEncoder | None = None
+    if plan.ppo.reference_kl_coefficient > 0:
+        # Always from the run's own copy, new run or resumed, so what every
+        # update pulls toward is the file the plan's digest names.
+        reference_encoder = load_reference_encoder(
+            _reference_policy_copy(manager.run_dir, plan),
+            vocabulary=vocabulary,
+            encoder_config=plan.encoder,
+        )
     agent = CandidatePPOAgent(
         tokenizer=tokenizer,
         game_encoder=encoder,
@@ -309,6 +357,7 @@ def run_training(args: argparse.Namespace) -> int:
         hold_open_steps=(
             plan.training.search_combat and not plan.training.search_fights_in_rollout
         ),
+        reference_encoder=reference_encoder,
     )
     if loaded is not None:
         manager.restore_agent(loaded, agent, plan)
@@ -475,6 +524,11 @@ def _new_plan(args: argparse.Namespace) -> TrainingPlan:
             search_boss_simulations=args.search_boss_simulations,
             search_weights=args.search_weights,
             search_fights_in_rollout=not args.search_fights_out_of_rollout,
+            reference_policy=(
+                None
+                if getattr(args, "reference_policy", None) is None
+                else str(args.reference_policy)
+            ),
             tensorboard_enabled=(
                 training_defaults.tensorboard_enabled
                 if args.no_tensorboard is None
@@ -511,6 +565,9 @@ def _new_plan(args: argparse.Namespace) -> TrainingPlan:
             update_epochs=_or_default(args.update_epochs, ppo_defaults.update_epochs),
             target_kl=_or_default(args.target_kl, ppo_defaults.target_kl),
             exploration=_exploration_list(args.explore),
+            reference_kl_coefficient=_or_default(
+                args.reference_kl, ppo_defaults.reference_kl_coefficient
+            ),
         ),
         reset=ResetSpec(
             character=_or_default(args.character, reset_defaults.character),
@@ -565,6 +622,7 @@ def _resumed_plan(
             "rollout_size": saved.ppo.rollout_size,
             "update_epochs": saved.ppo.update_epochs,
             "target_kl": saved.ppo.target_kl,
+            "reference_kl": saved.ppo.reference_kl_coefficient,
             "backend": saved.training.backend,
             "search_combat": saved.training.search_combat,
             "search_simulations": saved.training.search_simulations,
@@ -605,6 +663,11 @@ def _resumed_plan(
         {"explore": saved.ppo.exploration},
         normalize=lambda value: PPOConfig(exploration=_exploration_list(value)).exploration,
     )
+    # A different reference is a different experiment too; the run reads its
+    # own copy, so the path is only the record being kept honest.
+    _require_equal_overrides(
+        args, {"reference_policy": saved.training.reference_policy}, normalize=str
+    )
     if (
         args.no_tensorboard is not None
         and (not args.no_tensorboard) != saved.training.tensorboard_enabled
@@ -629,6 +692,49 @@ def _resumed_plan(
         ),
     )
     return replace(saved, training=training)
+
+
+def _sha256(path: Path) -> str:
+    with path.open("rb") as handle:
+        return hashlib.file_digest(handle, "sha256").hexdigest()
+
+
+def _copy_reference_policy(source: Path, run_dir: Path, plan: TrainingPlan) -> Path:
+    """Give the run its own copy of the reference, checked against the recorded digest.
+
+    The source is what the user named and may move or be retrained; the copy
+    is what the run reads for the rest of its life.  Hashed again after the
+    copy, so a source that changed between being digested and being copied
+    cannot leave a plan whose digest names a file the run never had.
+    """
+    copy = run_dir / REFERENCE_POLICY_FILENAME
+    shutil.copyfile(source, copy)
+    digest = _sha256(copy)
+    if digest != plan.training.reference_policy_sha256:
+        raise ValueError(
+            f"{source} changed while it was being copied into the run: its sha256 "
+            f"is now {digest}, the plan recorded {plan.training.reference_policy_sha256}"
+        )
+    return copy
+
+
+def _reference_policy_copy(run_dir: Path, plan: TrainingPlan) -> Path:
+    """Return the run's copy of its reference policy, verified against the plan."""
+    copy = run_dir / REFERENCE_POLICY_FILENAME
+    recorded = plan.training.reference_policy_sha256
+    if recorded is None:
+        raise ValueError(
+            "the plan names a reference policy but records no sha256 for it"
+        )
+    if not copy.is_file():
+        raise ValueError(f"the run's copy of its reference policy is missing: {copy}")
+    digest = _sha256(copy)
+    if digest != recorded:
+        raise ValueError(
+            f"{copy} is not the reference policy this run recorded: its sha256 is "
+            f"{digest}, the plan recorded {recorded}"
+        )
+    return copy
 
 
 def _require_equal_overrides(

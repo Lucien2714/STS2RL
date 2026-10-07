@@ -8,6 +8,7 @@ import math
 
 import pytest
 import torch
+from torch import nn
 
 from sts2rl.actions import GameAction
 from sts2rl.agents import CandidatePPOAgent, NoLegalActionsError, PPOConfig, Transition
@@ -19,6 +20,7 @@ from sts2rl.encoder import (
     GameVocabulary,
     TokenizedDecision,
 )
+from sts2rl.encoder.game_encoder import PolicyValueOutput
 from sts2rl.env import GameObservation
 
 
@@ -69,6 +71,9 @@ def _observation(state: dict[str, object]) -> GameObservation:
     return GameObservation(state)
 
 
+TEST_ENCODER = EncoderConfig(hidden_dim=16, entity_heads=4, entity_ff_dim=32)
+
+
 def _agent(
     *,
     rollout_size: int = 256,
@@ -78,13 +83,14 @@ def _agent(
     hold_open_steps: bool = False,
     exploration: Mapping[str, float] | tuple[tuple[str, float], ...] = (),
     learning_rate: float = 3e-4,
+    reference_kl: float = 0.0,
+    reference: nn.Module | None = None,
+    encoder: nn.Module | None = None,
 ) -> CandidatePPOAgent:
     vocabulary = GameVocabulary.from_bundled_data()
     tokenizer = GameTokenizer(vocabulary)
-    encoder = GameEncoder(
-        vocabulary,
-        EncoderConfig(hidden_dim=16, entity_heads=4, entity_ff_dim=32),
-    )
+    if encoder is None:
+        encoder = GameEncoder(vocabulary, TEST_ENCODER)
     return CandidatePPOAgent(
         tokenizer=tokenizer,
         game_encoder=encoder,
@@ -95,8 +101,10 @@ def _agent(
             target_kl=target_kl,
             minibatch_size=minibatch_size,
             exploration=exploration,
+            reference_kl_coefficient=reference_kl,
         ),
         hold_open_steps=hold_open_steps,
+        reference_encoder=reference,
     )
 
 
@@ -2112,3 +2120,502 @@ def test_folding_and_closing_an_episode_leave_the_exploration_record_alone():
         assert torch.equal(step.old_log_probability, recorded[0])
         assert torch.equal(step.old_policy_log_probability, recorded[1])
         assert (step.epsilon, step.explored) == (recorded[2], recorded[3]) == (0.5, True)
+
+
+# --------------------------------------------------------------- reference KL
+
+
+class _ToyEncoder(nn.Module):
+    """An actor whose logits are a parameter, so a probability can be set by hand.
+
+    ``policy_value`` serves the first ``len(decision.actions)`` logits and one
+    learnable scalar as the value; the tokenizer still tokenizes real states.
+    """
+
+    def __init__(self, logits) -> None:
+        super().__init__()
+        self.logits = nn.Parameter(torch.tensor(logits, dtype=torch.float32))
+        self.value_bias = nn.Parameter(torch.zeros(()))
+
+    def policy_value(self, decision: TokenizedDecision) -> PolicyValueOutput:
+        return PolicyValueOutput(self.logits[: len(decision.actions)], self.value_bias, None)
+
+    def value(self, state) -> torch.Tensor:
+        return self.value_bias
+
+
+def _reference_encoder(seed: int = 7) -> GameEncoder:
+    """A second encoder of the test shape with its own weights, like the CLI's.
+
+    Built under a forked generator, so the caller's random numbers are the
+    same with or without a reference.
+    """
+    with torch.random.fork_rng(devices=[]):
+        torch.manual_seed(seed)
+        return GameEncoder(GameVocabulary.from_bundled_data(), TEST_ENCODER)
+
+
+def _zero_advantages(agent) -> None:
+    """Make every GAE walk return zero advantages, so with the value and entropy
+    coefficients at zero only the reference term can move the policy."""
+    original = agent._advantages_and_returns
+
+    def spy(steps, tail_value=None):
+        advantages, returns = original(steps, tail_value=tail_value)
+        return torch.zeros_like(advantages), returns
+
+    agent._advantages_and_returns = spy
+
+
+def _reference_kl_on(agent, steps) -> float:
+    """Mean KL(pi_ref || pi_theta) over stored decisions, under the current weights."""
+    total = 0.0
+    for step in steps:
+        with torch.no_grad():
+            log_pi = torch.log_softmax(agent.game_encoder.policy_value(step.decision).logits, dim=-1)
+        reference = step.reference_log_probabilities
+        total += float((reference.exp() * (reference - log_pi)).sum())
+    return total / len(steps)
+
+
+def _sampled_decisions(agent, count: int, observation=None, reward: float = 1.0) -> list:
+    """``count`` sampled decisions on one lane, the last one ending its episode."""
+    observation = observation or _observation(_map_state(3))
+    for index in range(count):
+        action = agent.choose_action(observation)
+        agent.observe(
+            Transition(
+                state=observation,
+                action=action,
+                reward=reward,
+                next_state=observation,
+                done=index == count - 1,
+            )
+        )
+    return list(agent._lane(0).steps)
+
+
+def test_without_a_reference_the_path_is_the_one_from_before_it_existed():
+    """Pinned from the code before the reference KL existed, on the seeded run
+    of ``_reference_run``: the actions, the weights, Adam's moments and the
+    random numbers left, with no reference built and no reference metric."""
+    agent, actions = _reference_run(())
+
+    assert actions == [0, 0, 2, 1, 1, 0, 1, 2]
+    assert agent.reference_encoder is None
+    assert agent.config.reference_kl_coefficient == 0.0
+    assert not any(key.startswith("reference") for key in agent.last_update)
+    weights = sum(float(p.detach().sum()) for p in agent.game_encoder.parameters())
+    assert weights == pytest.approx(-65.32838867467945, rel=1e-5)
+    moments = agent.optimizer.state_dict()["state"].values()
+    assert sum(float(m["exp_avg"].sum()) for m in moments) == pytest.approx(
+        0.031145759358767476, rel=1e-5
+    )
+    assert sum(float(m["exp_avg_sq"].sum()) for m in moments) == pytest.approx(
+        0.0002499998850957752, rel=1e-5
+    )
+    assert torch.rand(2).tolist() == pytest.approx([0.817125678062439, 0.0004968047142028809])
+
+
+def test_the_reference_term_pulls_the_policy_toward_the_reference():
+    """With zero advantages and no value or entropy term, the loss is the
+    reference KL alone, and updates on the same stored decisions reduce it."""
+    torch.manual_seed(120)
+    agent = _agent(
+        rollout_size=1000, update_epochs=1, minibatch_size=64, learning_rate=0.01,
+        reference_kl=1.0, reference=_reference_encoder(),
+    )
+    agent.config = dataclasses.replace(
+        agent.config, value_coefficient=0.0, entropy_coefficient=0.0
+    )
+    _zero_advantages(agent)
+    steps = _sampled_decisions(agent, 6)
+    before = _reference_kl_on(agent, steps)
+    assert before > 0.0
+
+    seen = []
+    for _ in range(5):
+        if not agent._lane(0).steps:
+            agent._lane(0).steps.extend(steps)
+        metrics = agent.update()
+        seen.append((metrics, _reference_kl_on(agent, steps)))
+
+    # The first update measured the KL before stepping: what ``before`` is.
+    assert seen[0][0]["reference_kl"] == pytest.approx(before, rel=1e-4)
+    assert seen[0][0]["reference_steps"] == 6.0
+    assert seen[-1][1] < before
+    assert seen[-1][0]["policy_loss"] == 0.0
+
+
+def test_an_abandoned_action_the_reference_favours_gets_its_probability_back():
+    """pi_theta(a) ~ 4e-7 against pi_ref(a) = 0.5: the surrogate would have to
+    sample the action to move it, while the reference term's gradient on its
+    logit is pi_theta - pi_ref from the first update."""
+    torch.manual_seed(121)
+    actor = _ToyEncoder([-14.0, 0.0, 0.0])
+    reference = _ToyEncoder([math.log(2.0), 0.0, 0.0])  # softmax: 0.5, 0.25, 0.25
+    agent = _agent(
+        rollout_size=1000, update_epochs=1, minibatch_size=64, learning_rate=0.05,
+        reference_kl=1.0, reference=reference, encoder=actor,
+    )
+    agent.config = dataclasses.replace(
+        agent.config, value_coefficient=0.0, entropy_coefficient=0.0
+    )
+    _zero_advantages(agent)
+    steps = _sampled_decisions(agent, 4, reward=0.0)
+    assert torch.allclose(
+        steps[0].reference_log_probabilities, torch.log(torch.tensor([0.5, 0.25, 0.25]))
+    )
+    probabilities = [float(torch.softmax(actor.logits.detach(), dim=-1)[0])]
+    assert probabilities[0] < 1e-5
+
+    for _ in range(10):
+        agent._lane(0).steps.extend(steps)
+        agent.update()
+        probabilities.append(float(torch.softmax(actor.logits.detach(), dim=-1)[0]))
+
+    assert all(later > earlier for earlier, later in zip(probabilities, probabilities[1:]))
+
+
+def test_forced_and_external_steps_carry_no_reference_distribution():
+    torch.manual_seed(122)
+    agent = _agent(rollout_size=1000, reference_kl=0.5, reference=_reference_encoder())
+    forced = _observation(_map_state(1))
+    agent.choose_action(forced)
+    assert agent._lane(0).pending.reference_log_probabilities is None
+    agent.discard_decision()
+
+    observation = _observation(_map_state(3))
+    agent.choose_external(
+        observation, agent.action_provider.require_candidates(observation.raw_state)[1]
+    )
+    assert agent._lane(0).pending.reference_log_probabilities is None
+    agent.discard_decision()
+
+    agent.choose_action(observation)
+    assert agent._lane(0).pending.reference_log_probabilities is not None
+
+
+def test_a_minibatch_of_external_steps_alone_has_no_reference_term():
+    torch.manual_seed(123)
+    agent = _agent(rollout_size=4, update_epochs=1, reference_kl=0.5, reference=_reference_encoder())
+    for index in range(4):
+        _external_step(agent, index % 3, reward=1.0, done=index == 3)
+
+    metrics = agent.last_update
+    assert agent.optimizer_updates == 1
+    assert metrics["reference_kl"] == 0.0
+    assert metrics["reference_steps"] == 0.0
+    assert metrics["reference_kl_mean"] == 0.0
+    assert metrics["value_loss"] > 0.0
+
+
+def test_the_reference_distribution_is_over_the_reduced_candidate_set():
+    """The update re-encodes the stored decision, so the reference must be
+    over the same candidates: what was really offered, after ``exclude``."""
+    torch.manual_seed(124)
+    reference = _reference_encoder()
+    agent = _agent(reference_kl=0.5, reference=reference)
+    observation = _observation(_map_state(3))
+
+    agent.choose_action(observation, exclude=[GameAction("choose_map_node", index=1)])
+
+    pending = agent._lane(0).pending
+    assert len(pending.decision.actions) == 2
+    stored = pending.reference_log_probabilities
+    assert stored.shape == (2,)
+    assert stored.dtype == torch.float32
+    assert stored.device.type == "cpu" and not stored.requires_grad
+    with torch.no_grad():
+        expected = torch.log_softmax(reference.policy_value(pending.decision).logits, dim=-1)
+    assert torch.allclose(stored, expected, atol=1e-6)
+    assert float(stored.exp().sum()) == pytest.approx(1.0, abs=1e-5)
+
+
+def test_a_reference_distribution_of_the_wrong_length_is_refused():
+    torch.manual_seed(125)
+    agent = _agent(rollout_size=1000, reference_kl=0.5, reference=_reference_encoder())
+    _step(agent, 0, reward=1.0, done=True)
+    step = agent._lane(0).steps[0]
+    assert len(step.decision.actions) == 2
+    step.reference_log_probabilities = torch.log(torch.full((3,), 1 / 3))
+
+    with pytest.raises(RuntimeError, match="3 candidates for a decision with 2"):
+        agent.update()
+
+
+def test_a_policy_step_without_a_reference_distribution_is_refused_while_the_term_is_on():
+    torch.manual_seed(125)
+    agent = _agent(rollout_size=1000, reference_kl=0.5, reference=_reference_encoder())
+    _step(agent, 0, reward=1.0, done=True)
+    agent._lane(0).steps[0].reference_log_probabilities = None
+
+    with pytest.raises(RuntimeError, match="no reference distribution"):
+        agent.update()
+
+
+def test_decisions_crossing_an_update_keep_their_reference_distributions():
+    """A pending decision and a held open step both outlive an update, and are
+    trained by the next one against the distribution they were sampled beside."""
+    torch.manual_seed(126)
+    agent = _agent(rollout_size=4, hold_open_steps=True, reference_kl=0.5, reference=_reference_encoder())
+    observation = _observation(_map_state(3))
+    pending_action = agent.choose_action(observation, lane=1)
+    pending = agent._lane(1).pending
+    pending_reference = pending.reference_log_probabilities.clone()
+    held_action = agent.choose_action(observation, lane=2)
+    agent.observe(
+        Transition(state=observation, action=held_action, reward=1.0, next_state=observation, done=False),
+        lane=2,
+    )
+    _unrecorded_fight_step(agent, 2, reward=0.5)
+    held = agent._lane(2).steps[0]
+    held_reference = held.reference_log_probabilities.clone()
+
+    for index in range(4):
+        _step(agent, 0, reward=float(index), done=index == 3)
+
+    assert agent.optimizer_updates == 1
+    assert agent.last_update["reference_steps"] == 4.0
+    assert agent._lane(1).pending is pending
+    assert agent._lane(2).steps == [held]
+    assert torch.equal(pending.reference_log_probabilities, pending_reference)
+    assert torch.equal(held.reference_log_probabilities, held_reference)
+
+    agent.observe(
+        Transition(state=observation, action=pending_action, reward=1.0, next_state=observation, done=True),
+        lane=1,
+    )
+    _unrecorded_fight_step(agent, 2, reward=-0.01, done=True)
+    crossed = agent._lane(1).steps[0]
+    assert torch.equal(crossed.reference_log_probabilities, pending_reference)
+    for index in range(2):
+        _step(agent, 0, reward=1.0, done=index == 1)
+
+    assert agent.optimizer_updates == 2
+    assert agent.last_update["rollout_steps"] == 4.0
+    assert agent.last_update["reference_steps"] == 4.0
+
+
+def test_folding_and_closing_an_episode_leave_the_reference_distribution_alone():
+    torch.manual_seed(127)
+    agent = _agent(rollout_size=1000, hold_open_steps=True, reference_kl=0.5, reference=_reference_encoder())
+    observation = _observation(_map_state(3))
+
+    for lane, truncated in ((0, False), (1, True)):
+        action = agent.choose_action(observation, lane=lane)
+        agent.observe(
+            Transition(state=observation, action=action, reward=1.0, next_state=observation, done=False),
+            lane=lane,
+        )
+        step = agent._lane(lane).steps[0]
+        recorded = step.reference_log_probabilities.clone()
+        if truncated:
+            agent.finish_episode(observation, truncated=True, lane=lane)  # _close_episode
+            assert step.episode_end and step.bootstrap_value is not None
+        else:
+            _unrecorded_fight_step(agent, lane, reward=-0.01, done=True)  # _fold, a terminal
+            assert step.done and step.episode_end
+        assert torch.equal(step.reference_log_probabilities, recorded)
+
+
+def test_discarding_aborting_and_resetting_drop_the_reference_distribution_with_the_step():
+    torch.manual_seed(128)
+    agent = _agent(rollout_size=1000, reference_kl=0.5, reference=_reference_encoder())
+    observation = _observation(_map_state(3))
+
+    agent.choose_action(observation)
+    agent.discard_decision()
+    assert agent._lane(0).pending is None
+
+    _step(agent, 0, reward=1.0, done=False)
+    agent.choose_action(observation)
+    agent.reset(observation)
+    assert agent._lane(0).pending is None
+    assert agent._lane(0).steps[0].reference_log_probabilities is not None
+
+    agent.choose_action(observation)
+    agent.abort_lane(0)
+    assert agent._lane(0).pending is None and agent._lane(0).steps == []
+
+    _step(agent, 1, reward=1.0, done=False)
+    agent.choose_action(observation, lane=1)
+    agent.abort_episode()
+    assert agent._lanes == {}
+
+
+def test_an_update_leaves_the_reference_bit_identical_and_outside_the_optimizer():
+    torch.manual_seed(129)
+    reference = _reference_encoder()
+    before = {name: tensor.clone() for name, tensor in reference.state_dict().items()}
+    agent = _agent(rollout_size=8, update_epochs=2, minibatch_size=4, reference_kl=0.5, reference=reference)
+    assert not reference.training and agent.game_encoder.training
+
+    _fill_policy_rollout(agent, 8)
+
+    assert agent.optimizer_updates == 1
+    assert agent.last_update["reference_kl"] > 0.0
+    for name, tensor in reference.state_dict().items():
+        assert torch.equal(tensor, before[name]), name
+    optimized = {id(p) for group in agent.optimizer.param_groups for p in group["params"]}
+    assert not any(id(p) in optimized for p in reference.parameters())
+    assert not any(p.requires_grad for p in reference.parameters())
+    assert all(p.grad is None for p in reference.parameters())
+    # ``train`` switches the actor; the reference stays in eval mode.
+    agent.train(True)
+    assert not reference.training
+
+
+def test_a_reference_must_be_its_own_module_with_a_coefficient_to_use_it():
+    vocabulary = GameVocabulary.from_bundled_data()
+    actor = GameEncoder(vocabulary, TEST_ENCODER)
+    with pytest.raises(ValueError, match="share parameters"):
+        CandidatePPOAgent(
+            GameTokenizer(vocabulary), actor,
+            config=PPOConfig(reference_kl_coefficient=0.5), reference_encoder=actor,
+        )
+    with pytest.raises(ValueError, match="positive reference_kl_coefficient"):
+        CandidatePPOAgent(
+            GameTokenizer(vocabulary), actor, reference_encoder=_reference_encoder()
+        )
+
+
+def test_a_logit_gap_of_sixty_gives_a_finite_reference_kl_and_finite_gradients():
+    torch.manual_seed(130)
+    actor = _ToyEncoder([60.0, 0.0, 0.0])
+    reference = _ToyEncoder([0.0, 60.0, 0.0])
+    agent = _agent(
+        rollout_size=1000, update_epochs=1, minibatch_size=8,
+        reference_kl=1.0, reference=reference, encoder=actor,
+    )
+    _sampled_decisions(agent, 1)
+
+    metrics = agent.update()
+
+    assert math.isfinite(metrics["reference_kl"])
+    assert metrics["reference_kl"] == pytest.approx(60.0, abs=1e-3)
+    assert math.isfinite(metrics["loss"]) and math.isfinite(metrics["gradient_norm"])
+    assert all(bool(torch.isfinite(p.grad).all()) for p in actor.parameters())
+    assert all(bool(torch.isfinite(p).all()) for p in actor.parameters())
+
+
+def test_on_an_explored_screen_the_reference_kl_reads_the_policy_while_the_ratio_reads_the_mixture():
+    torch.manual_seed(131)
+    epsilon, ratio = 0.5, 1.5
+    actor = _ToyEncoder([1.0, 0.0, -1.0])
+    reference = _ToyEncoder([math.log(2.0), 0.0, 0.0])
+    agent = _agent(
+        rollout_size=1000, update_epochs=1, minibatch_size=8, exploration={"map": epsilon},
+        reference_kl=0.3, reference=reference, encoder=actor,
+    )
+    observation = _observation(_map_state(3))
+    action = _explored_decision(agent, observation, explored=True)
+    agent.observe(
+        Transition(state=observation, action=action, reward=1.0, next_state=observation, done=True)
+    )
+    step = agent._lane(0).steps[0]
+    # The policy has not moved, so shifting the stored mixture probability
+    # makes the update see exactly ``ratio`` on the mixture.
+    step.old_log_probability = step.old_log_probability - math.log(ratio)
+    pi = torch.softmax(actor.logits.detach(), dim=-1)
+    pi_ref = torch.tensor([0.5, 0.25, 0.25])
+    mixture = (1.0 - epsilon) * pi + epsilon / 3
+    expected = float((pi_ref * (pi_ref.log() - pi.log())).sum())
+    against_the_mixture = float((pi_ref * (pi_ref.log() - mixture.log())).sum())
+    assert abs(expected - against_the_mixture) > 1e-3
+
+    metrics = agent.update()
+
+    assert metrics["reference_steps"] == 1.0
+    assert metrics["reference_kl"] == pytest.approx(expected, rel=1e-5)
+    assert metrics["approx_kl"] == pytest.approx((ratio - 1.0) - math.log(ratio), rel=1e-4)
+
+
+def test_evaluation_needs_no_reference_but_training_does():
+    """Evaluation builds the agent from a saved plan whose coefficient is
+    positive and never samples; only a sampled decision needs the artifact."""
+    torch.manual_seed(132)
+    agent = _agent(reference_kl=0.5)
+    agent.eval()
+    observation = _observation(_map_state(3))
+
+    assert agent.choose_action(observation).to_dict() in [_node(i) for i in range(3)]
+    assert agent._lane(0).pending is None
+
+    agent.train(True)
+    with pytest.raises(RuntimeError, match="reference policy"):
+        agent.choose_action(observation)
+    assert agent._lane(0).pending is None
+    # A forced step samples nothing and needs none either.
+    agent.choose_action(_observation(_map_state(1)))
+    assert agent._lane(0).pending.reference_log_probabilities is None
+
+
+def test_building_an_agent_with_a_reference_leaves_the_generator_alone():
+    reference = _reference_encoder()
+    vocabulary = GameVocabulary.from_bundled_data()
+    torch.manual_seed(133)
+    encoder = GameEncoder(vocabulary, TEST_ENCODER)
+    state = torch.get_rng_state()
+
+    CandidatePPOAgent(
+        GameTokenizer(vocabulary), encoder,
+        config=PPOConfig(reference_kl_coefficient=0.5), reference_encoder=reference,
+    )
+
+    assert torch.equal(torch.get_rng_state(), state)
+
+
+def test_reference_metrics_count_the_policy_steps_of_each_minibatch():
+    torch.manual_seed(134)
+    agent = _agent(rollout_size=1000, update_epochs=1, minibatch_size=3, reference_kl=0.5, reference=_reference_encoder())
+    results = []
+    original = agent._optimize_minibatch
+
+    def spy(*args, **kwargs):
+        results.append(original(*args, **kwargs))
+        return results[-1]
+
+    agent._optimize_minibatch = spy
+    for _ in range(4):
+        _step(agent, 0, reward=1.0, done=False)
+    forced = _observation(_map_state(1))
+    agent.observe(
+        Transition(state=forced, action=agent.choose_action(forced), reward=1.0, next_state=forced, done=False)
+    )
+    _external_step(agent, 1, reward=1.0, done=True)
+
+    metrics = agent.update()
+
+    assert metrics["rollout_steps"] == 6.0
+    assert len(results) == 2
+    assert sum(result["reference_steps"] for result in results) == 4.0
+    assert all(result["reference_kl"] >= 0.0 for result in results)
+    assert metrics["reference_kl"] == results[-1]["reference_kl"]
+    assert metrics["reference_steps"] == results[-1]["reference_steps"]
+    weighted = sum(r["reference_kl"] * r["reference_steps"] for r in results) / 4.0
+    assert metrics["reference_kl_mean"] == pytest.approx(weighted)
+
+
+def test_a_kl_stop_on_the_first_minibatch_still_reports_the_reference_mean():
+    torch.manual_seed(135)
+    agent = _agent(
+        rollout_size=1000, update_epochs=2, minibatch_size=4, target_kl=1e-3,
+        reference_kl=0.5, reference=_reference_encoder(),
+    )
+    for _ in range(4):
+        _step(agent, 0, reward=1.0, done=True)
+    for step in agent._lane(0).steps:
+        step.old_log_probability = step.old_log_probability - 1.0
+
+    metrics = agent.update()
+
+    assert metrics["kl_early_stop"] == 1.0 and metrics["optimizer_steps"] == 0.0
+    assert metrics["reference_kl_mean"] == 0.0
+    assert "reference_kl" not in metrics
+
+
+@pytest.mark.parametrize("coefficient", [-0.1, float("nan"), float("inf"), True])
+def test_the_reference_coefficient_is_a_finite_non_negative_number(coefficient):
+    with pytest.raises(ValueError, match="reference_kl_coefficient"):
+        PPOConfig(reference_kl_coefficient=coefficient)

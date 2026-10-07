@@ -140,6 +140,37 @@ def test_disabling_tensorboard_only_writes_jsonl(tmp_path: Path):
     assert not (tmp_path / "tensorboard").exists()
 
 
+def test_reference_kl_metrics_reach_tensorboard_only_when_present(tmp_path: Path):
+    """A run without a reference logs no flat zero curve for one."""
+    fake = FakeSummaryWriter()
+    writer = TrainingMetricsWriter(
+        tmp_path, writer_factory=lambda **options: _capture_options(fake, options)
+    )
+
+    writer.log_ppo_update({"environment_steps": 12.0, "loss": 1.0})
+    writer.log_ppo_update(
+        {
+            "environment_steps": 24.0,
+            "loss": 1.0,
+            "reference_kl": 0.2,
+            "reference_kl_mean": 0.3,
+            "reference_steps": 4.0,
+        }
+    )
+    writer.close()
+
+    tags = [tag for tag, _, _ in fake.scalars]
+    assert tags.count("ppo/reference_kl") == 1
+    assert ("ppo/reference_kl", 0.2, 24) in fake.scalars
+    assert ("ppo/reference_kl_mean", 0.3, 24) in fake.scalars
+    records = [
+        json.loads(line)
+        for line in (tmp_path / "metrics.jsonl").read_text(encoding="utf-8").splitlines()
+    ]
+    assert "reference_kl" not in records[0]
+    assert records[1]["reference_steps"] == 4.0
+
+
 def _capture_options(
     writer: FakeSummaryWriter,
     options: dict[str, object],

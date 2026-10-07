@@ -86,6 +86,18 @@ class PPOConfig:
     # and a plan round-trips through JSON exactly. Empty: the plain policy,
     # drawing nothing extra.
     exploration: tuple[tuple[str, float], ...] = ()
+    # Forward KL toward a frozen reference policy -- a human-cloned actor --
+    # added to the loss as beta * KL(pi_ref || pi_theta), averaged over the
+    # sampled decisions of each minibatch. Its gradient on the logits is
+    # pi_theta - pi_ref: nonzero wherever the reference puts mass, which is
+    # exactly what the surrogate never gives an option the policy has driven
+    # to ~0 -- upgrading at a rest site sat at 0.01-0.04 against a human 0.65,
+    # skipping a card reward at 0.00 against 0.52, and 54 updates of
+    # --explore sampled them without moving them. The term is weighted by
+    # neither the advantage nor the ratio, and enters neither the clip nor the
+    # KL stop: it is a pull toward the reference, not a reward. 0: no reference
+    # is built, and the path is exactly the one without it.
+    reference_kl_coefficient: float = 0.0
 
     def __post_init__(self) -> None:
         if self.rollout_size < 1 or self.update_epochs < 1:
@@ -101,6 +113,15 @@ class PPOConfig:
         if self.target_kl is not None and not self.target_kl > 0:
             raise ValueError("target_kl must be positive or None")
         object.__setattr__(self, "exploration", _exploration_pairs(self.exploration))
+        beta = self.reference_kl_coefficient
+        if (
+            isinstance(beta, bool)
+            or not isinstance(beta, (int, float))
+            or not math.isfinite(beta)
+            or beta < 0
+        ):
+            raise ValueError("reference_kl_coefficient must be a finite number, 0 or more")
+        object.__setattr__(self, "reference_kl_coefficient", float(beta))
 
     def exploration_rate(self, state_type: str) -> float:
         """Return the epsilon in force on a screen, 0 where none is configured."""
@@ -127,6 +148,10 @@ class _PendingDecision:
     # it was the uniform branch that drew this action.
     epsilon: float = 0.0
     explored: bool = False
+    # log pi_ref(.|s) over these same candidates, for the reference KL. None
+    # where the term does not apply: a forced or external step, or no
+    # reference at all.
+    reference_log_probabilities: Tensor | None = None
 
 
 @dataclass
@@ -145,6 +170,7 @@ class _RolloutStep:
     policy_trainable: bool = True
     epsilon: float = 0.0
     explored: bool = False
+    reference_log_probabilities: Tensor | None = None
 
 
 @dataclass
@@ -274,6 +300,13 @@ class CandidatePPOAgent(Agent):
     transitions that are complete and keeps each lane's open last step for the
     next one (``_holds_open_step``). The first unrecorded step turns it on;
     passing it at construction also covers the first fight of each lane.
+
+    ``reference_encoder``: the frozen policy ``PPOConfig.reference_kl_coefficient``
+    pulls toward. Its parameters are its own -- never the trained encoder's,
+    never the optimizer's -- it is read only under ``no_grad``, and it stays in
+    eval mode whatever ``train`` does to the actor, so an update cannot move it.
+    Needed only to *train* with a positive coefficient: evaluation builds the
+    agent from a saved plan, never samples, and has no use for the artifact.
     """
 
     def __init__(
@@ -285,6 +318,7 @@ class CandidatePPOAgent(Agent):
         device: str | torch.device | None = None,
         *,
         hold_open_steps: bool = False,
+        reference_encoder: GameEncoder | None = None,
     ) -> None:
         self.tokenizer = tokenizer
         self.game_encoder = game_encoder
@@ -295,6 +329,20 @@ class CandidatePPOAgent(Agent):
         self.optimizer = torch.optim.Adam(
             self.game_encoder.parameters(), lr=self.config.learning_rate
         )
+        if reference_encoder is not None:
+            if not self.config.reference_kl_coefficient > 0:
+                raise ValueError(
+                    "a reference policy needs a positive reference_kl_coefficient"
+                )
+            trained = {id(parameter) for parameter in self.game_encoder.parameters()}
+            if any(id(parameter) in trained for parameter in reference_encoder.parameters()):
+                raise ValueError(
+                    "the reference policy must not share parameters with the trained encoder"
+                )
+            reference_encoder.to(self.device)
+            reference_encoder.eval()
+            reference_encoder.requires_grad_(False)
+        self.reference_encoder = reference_encoder
         self.training_enabled = True
         self._lanes: dict[int, _Lane] = {}
         self._return_scale = _ReturnScale()
@@ -410,6 +458,12 @@ class CandidatePPOAgent(Agent):
         set, and the stored log probability is the mixture's: the update
         trains the mixture too, so the ratio compares like with like there as
         well.
+
+        With a reference policy, log pi_ref over that same set is stored
+        beside the sample: the update re-encodes the stored decision and the
+        reference KL compares the two over identical candidates. The reference
+        is read here rather than in the update because the reference encoder
+        never changes, so its one forward pass per decision is final.
         """
         entry = self._lane(lane)
         if entry.pending is not None:
@@ -428,9 +482,19 @@ class CandidatePPOAgent(Agent):
         # The rate in force: only a real choice, made while learning, is mixed.
         # Evaluation and a forced step read no random number for it.
         epsilon = self.config.exploration_rate(state_type) if sampling else 0.0
+        reference = self._reference() if sampling else None
         decision = self.tokenizer.tokenize_decision(state, candidates)
         with self._lock, torch.no_grad():
-            output = self.game_encoder.policy_value(decision.to(self.device))
+            on_device = decision.to(self.device)
+            output = self.game_encoder.policy_value(on_device)
+            reference_log_probabilities = None
+            if reference is not None:
+                # float32 whatever the reference computes in: the KL multiplies
+                # these by their own exponential, and a half-precision log of a
+                # vanishing probability would not survive that.
+                reference_log_probabilities = F.log_softmax(
+                    reference.policy_value(on_device).logits.float(), dim=-1
+                ).detach().cpu().clone()
             distribution = Categorical(logits=output.logits)
             explored = False
             if epsilon > 0.0 and float(torch.rand(())) < epsilon:
@@ -465,8 +529,28 @@ class CandidatePPOAgent(Agent):
                     state_type=state_type,
                     epsilon=epsilon,
                     explored=explored,
+                    reference_log_probabilities=reference_log_probabilities,
                 )
         return candidates[action_index]
+
+    def _reference(self) -> GameEncoder | None:
+        """Return the reference encoder if the coefficient calls for one.
+
+        Checked here, on the first sampled decision, rather than at
+        construction: evaluation builds the agent from a saved plan whose
+        coefficient is positive and never samples, so the artifact need not
+        be there. Training without it would store no reference distribution
+        and the update would have nothing to pull toward, which is worth
+        failing before a rollout is collected.
+        """
+        if not self.config.reference_kl_coefficient > 0:
+            return None
+        if self.reference_encoder is None:
+            raise RuntimeError(
+                "training with a reference KL needs a reference policy: pass "
+                "reference_encoder, or set reference_kl_coefficient to 0"
+            )
+        return self.reference_encoder
 
     def choose_external(
         self,
@@ -560,6 +644,7 @@ class CandidatePPOAgent(Agent):
                         policy_trainable=entry.pending.policy_trainable,
                         epsilon=entry.pending.epsilon,
                         explored=entry.pending.explored,
+                        reference_log_probabilities=entry.pending.reference_log_probabilities,
                     )
                 )
                 entry.pending = None
@@ -847,6 +932,10 @@ class CandidatePPOAgent(Agent):
             metrics: dict[str, float] = {}
             optimizer_steps = 0
             stopped = False
+            # The reference KL of every minibatch that stepped, weighted by the
+            # steps it was measured on; ``reference_kl`` alone is the last one's.
+            reference_kl_total = 0.0
+            reference_steps = 0.0
             for _ in range(self.config.update_epochs):
                 order = torch.randperm(len(steps)).tolist()
                 for start in range(0, len(order), self.config.minibatch_size):
@@ -863,6 +952,9 @@ class CandidatePPOAgent(Agent):
                         break
                     metrics = result
                     optimizer_steps += 1
+                    if "reference_steps" in result:
+                        reference_kl_total += result["reference_kl"] * result["reference_steps"]
+                        reference_steps += result["reference_steps"]
                 if stopped:
                     break
             # Here, not only in ``_optimize_minibatch``: a KL stop on the first
@@ -870,6 +962,10 @@ class CandidatePPOAgent(Agent):
             metrics["rollout_steps"] = float(len(steps))
             metrics["optimizer_steps"] = float(optimizer_steps)
             metrics["kl_early_stop"] = float(stopped)
+            if self.config.reference_kl_coefficient > 0:
+                metrics["reference_kl_mean"] = (
+                    reference_kl_total / reference_steps if reference_steps else 0.0
+                )
 
             self.optimizer_updates += 1
             metrics["environment_steps"] = float(self.environment_steps)
@@ -914,12 +1010,23 @@ class CandidatePPOAgent(Agent):
         advantages: Tensor,
         returns: Tensor,
     ) -> dict[str, float]:
-        """Run one clipped-surrogate optimizer step over a subset of the rollout."""
+        """Run one clipped-surrogate optimizer step over a subset of the rollout.
+
+        The reference KL is formed on every policy step from the same
+        re-encoded logits the surrogate uses, on the policy itself -- an
+        explored screen trains the mixture's ratio, but the pull is toward
+        what the policy should put on each candidate, not what the mixture
+        does. It is averaged over the minibatch's policy steps and added to
+        the loss on its own coefficient; the surrogate, the advantage
+        normalisation and the KL stop never see it.
+        """
+        beta = self.config.reference_kl_coefficient
         policy_losses: list[Tensor] = []
         value_losses: list[Tensor] = []
         entropies: list[Tensor] = []
         kl_terms: list[Tensor] = []
         policy_kl_terms: list[Tensor] = []
+        reference_kl_terms: list[Tensor] = []
         for index in indices:
             step = steps[index]
             if not _policy_step(step):
@@ -928,6 +1035,8 @@ class CandidatePPOAgent(Agent):
                 continue
             output = self.game_encoder.policy_value(step.decision.to(self.device))
             distribution = Categorical(logits=output.logits)
+            if beta > 0:
+                reference_kl_terms.append(self._reference_kl(step, output.logits))
             action_index = torch.tensor(step.action_index, device=self.device)
             new_policy_log_probability = distribution.log_prob(action_index)
             old_log_probability = step.old_log_probability.to(self.device)
@@ -990,13 +1099,20 @@ class CandidatePPOAgent(Agent):
             + self.config.value_coefficient * value_loss
             - self.config.entropy_coefficient * entropy
         )
+        if beta > 0:
+            # A minibatch of forced and external steps alone has no reference
+            # step, and contributes nothing rather than failing.
+            reference_kl = torch.stack(reference_kl_terms).mean() if reference_kl_terms else zero
+            if not bool(torch.isfinite(reference_kl)):
+                raise RuntimeError("the reference KL is not finite")
+            loss = loss + beta * reference_kl
         self.optimizer.zero_grad()
         loss.backward()
         gradient_norm = nn.utils.clip_grad_norm_(
             self.game_encoder.parameters(), self.config.max_grad_norm
         )
         self.optimizer.step()
-        return {
+        metrics = {
             "loss": float(loss.detach().cpu()),
             "policy_loss": float(policy_loss.detach().cpu()),
             "value_loss": float(value_loss.detach().cpu()),
@@ -1006,6 +1122,34 @@ class CandidatePPOAgent(Agent):
             "approx_kl": approx_kl,
             "policy_kl": policy_kl,
         }
+        if beta > 0:
+            metrics["reference_kl"] = float(reference_kl.detach().cpu())
+            metrics["reference_steps"] = float(len(reference_kl_terms))
+        return metrics
+
+    def _reference_kl(self, step: _RolloutStep, logits: Tensor) -> Tensor:
+        """KL(pi_ref || pi_theta) on one stored decision, from its re-encoded logits.
+
+        sum_a pi_ref(a) (log pi_ref(a) - log pi_theta(a)), with pi_ref stored
+        at sampling time over the same candidates. Its gradient on the logits
+        is pi_theta - pi_ref, nonzero wherever the reference puts mass; the
+        log-softmax keeps a logit gap of 60 finite where a log of the
+        probability would not be.
+        """
+        reference = step.reference_log_probabilities
+        if reference is None:
+            raise RuntimeError(
+                "a sampled decision carries no reference distribution; the "
+                "reference KL needs one on every policy step"
+            )
+        log_pi = F.log_softmax(logits, dim=-1)
+        reference = reference.to(self.device)
+        if log_pi.shape != reference.shape:
+            raise RuntimeError(
+                f"reference distribution over {reference.numel()} candidates for "
+                f"a decision with {log_pi.numel()}"
+            )
+        return (reference.exp() * (reference - log_pi)).sum()
 
     def _advantages_and_returns(
         self, steps: list[_RolloutStep], tail_value: Tensor | None = None

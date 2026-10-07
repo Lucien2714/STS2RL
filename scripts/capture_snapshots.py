@@ -57,7 +57,8 @@ def main() -> int:
         tokenizer=GameTokenizer(vocabulary),
         game_encoder=GameEncoder(vocabulary, plan.encoder),
         # Never fills, so sampling never updates: see the module docstring.
-        config=replace(plan.ppo, rollout_size=10**9),
+        # Nothing is pulled toward a reference either, so none is loaded.
+        config=replace(plan.ppo, rollout_size=10**9, reference_kl_coefficient=0.0),
         device="cpu",
     )
     manager.restore_agent(loaded, agent, plan)

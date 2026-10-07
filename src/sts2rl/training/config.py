@@ -20,6 +20,10 @@ from sts2rl.env.game_env import BACKENDS
 # a client that never comes back must stop consuming the episode budget.
 MAX_EPISODE_FAILURES = 3
 
+# The run's own copy of the reference policy a reference KL pulls toward,
+# inside its run directory.  See ``TrainingConfig.reference_policy``.
+REFERENCE_POLICY_FILENAME = "reference_policy.pt"
+
 # Fixed run seeds, cycled one per episode.
 #
 # A fresh random run every episode puts map layout, card rewards, shops, and
@@ -152,6 +156,16 @@ class TrainingConfig:
     # False: searched fights are folded into the transition between the macro
     # decisions around them instead of entering the rollout as steps.
     search_fights_in_rollout: bool = True
+    # The behavior-cloning artifact a reference KL pulls toward
+    # (``PPOConfig.reference_kl_coefficient``), as named on the command line
+    # and for the record only.  The run reads its own copy,
+    # ``<run_dir>/reference_policy.pt``, and records that copy's sha256 beside
+    # it: a reference that changed under a run would change what every later
+    # update pulls toward, with nothing in the metrics to say so, so resume
+    # checks the copy against the digest and refuses a different path or
+    # coefficient the way it refuses a different seed pool.
+    reference_policy: str | None = None
+    reference_policy_sha256: str | None = None
 
     def __post_init__(self) -> None:
         for name in (
@@ -249,6 +263,24 @@ class TrainingConfig:
             value = getattr(self, name)
             if value is not None and (isinstance(value, bool) or not isinstance(value, int) or value < 1):
                 raise ValueError(f"{name} must be a positive integer or None")
+        if self.reference_policy is not None and (
+            not isinstance(self.reference_policy, str) or not self.reference_policy
+        ):
+            raise ValueError("reference_policy must be a non-empty path or None")
+        digest = self.reference_policy_sha256
+        if digest is not None:
+            if (
+                not isinstance(digest, str)
+                or len(digest) != 64
+                or any(character not in "0123456789abcdef" for character in digest)
+            ):
+                raise ValueError(
+                    "reference_policy_sha256 must be a 64-digit lowercase hex digest or None"
+                )
+            if self.reference_policy is None:
+                raise ValueError(
+                    "reference_policy_sha256 digests reference_policy, which is not set"
+                )
 
     def search_room_simulations(self) -> dict[str, int]:
         """The rooms whose fights search with their own budget."""
@@ -352,6 +384,17 @@ class TrainingPlan:
             # the choice to, and no "whatever the game rolls" mode.
             raise ValueError(
                 "the simulator backend needs seeds; pass --seed-pool or --run-seed"
+            )
+        if (self.ppo.reference_kl_coefficient > 0) != (
+            self.training.reference_policy is not None
+        ):
+            # Either alone is a run that is silently not the experiment it
+            # names: a coefficient with nothing to pull toward, or a reference
+            # no update ever reads.
+            raise ValueError(
+                "--reference-policy and --reference-kl go together: a positive "
+                "coefficient needs the reference it pulls toward, and a "
+                "reference without a coefficient is never read"
             )
 
     def to_dict(self) -> dict[str, object]:

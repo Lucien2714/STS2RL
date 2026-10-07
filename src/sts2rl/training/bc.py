@@ -444,6 +444,33 @@ def load_bc_encoder_state(
     return dict(state)
 
 
+def load_reference_encoder(
+    path: str | Path,
+    *,
+    vocabulary: GameVocabulary,
+    encoder_config: EncoderConfig,
+) -> GameEncoder:
+    """Build a frozen encoder holding one BC artifact's weights.
+
+    The reference a PPO run pulls toward (``PPOConfig.reference_kl_coefficient``):
+    the same two checks as ``load_bc_encoder_state``, then a module of its own,
+    so its parameters are separately allocated and no optimizer can reach them,
+    in eval mode with gradients off for good.  Built under a forked RNG, so a
+    run with a reference draws exactly the random numbers one without draws --
+    the initial weights it would otherwise consume the generator on are
+    overwritten by the artifact anyway.
+    """
+    state = load_bc_encoder_state(
+        path, vocabulary=vocabulary, encoder_config=encoder_config
+    )
+    with torch.random.fork_rng(devices=[]):
+        encoder = GameEncoder(vocabulary, encoder_config)
+    encoder.load_state_dict(state)
+    encoder.eval()
+    encoder.requires_grad_(False)
+    return encoder
+
+
 def summarize(result: BCResult, history: Sequence[EpochMetrics] | None = None) -> str:
     """Render a short human-readable verdict for the CLI.
 

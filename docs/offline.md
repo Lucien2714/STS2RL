@@ -220,6 +220,18 @@ the encoder config disagrees, the same two checks a PPO checkpoint makes and
 for the same reason: both produce weights that load and then behave as
 something they are not. `--init-encoder` cannot be combined with `--resume`.
 
+`--reference-policy bc_best.pt --reference-kl 0.1` keeps the artifact in play
+after the start: a frozen copy of it becomes the reference of a forward KL
+term, `beta * KL(pi_ref || pi_theta)`, added to the PPO loss over the sampled
+decisions of each minibatch. Where `--init-encoder` only sets the starting
+point, this gives an option the policy has since abandoned — upgrading at a
+rest site, skipping a card reward — a gradient on every update, because the
+term's gradient on the logits is `pi_theta - pi_ref`. The run copies the
+artifact to `<run-dir>/reference_policy.pt`, records its sha256 in the plan,
+reads the copy from then on, and refuses a changed path or coefficient on
+resume. Both flags may name the same file as `--init-encoder`; `sts2rl-eval`
+needs neither the flags nor the artifact.
+
 The saved artifact is the epoch with the **lowest holdout cross entropy** —
 not the last, and not the most accurate. Training accuracy keeps climbing after
 the holdout has turned, so the final weights would be the most overfitted of

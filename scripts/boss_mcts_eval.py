@@ -80,6 +80,8 @@ def make_mcts_player(args):
 
 
 def make_actor_player(args):
+    from dataclasses import replace
+
     from sts2rl.agents.action_space import LegalActionProvider, NoLegalActionsError
     from sts2rl.agents.ppo import CandidatePPOAgent
     from sts2rl.encoder.game_encoder import GameEncoder
@@ -105,7 +107,8 @@ def make_actor_player(args):
         agent = CandidatePPOAgent(
             tokenizer=GameTokenizer(vocabulary),
             game_encoder=GameEncoder(vocabulary, loaded.plan.encoder),
-            config=loaded.plan.ppo,
+            # Played, never updated: a run's reference policy is not needed here.
+            config=replace(loaded.plan.ppo, reference_kl_coefficient=0.0),
             device="cpu",
         )
         manager.restore_agent(loaded, agent, loaded.plan)

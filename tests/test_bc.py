@@ -17,6 +17,7 @@ from sts2rl.training.bc import (
     EpochMetrics,
     baseline_scores,
     load_bc_encoder_state,
+    load_reference_encoder,
     save_bc_checkpoint,
     split_dataset,
 )
@@ -260,6 +261,28 @@ def write_artifact(tmp_path, *, encoder_config: EncoderConfig, fingerprint: str)
         bc_config=BCConfig(),
         metrics=epoch_metrics(),
     )
+
+
+def test_a_reference_encoder_is_frozen_and_leaves_the_generator_alone(tmp_path):
+    """The reference a PPO run pulls toward: the artifact's weights in a module
+    of its own, in eval mode with gradients off, built without consuming the
+    random numbers the run's own encoder and sampling depend on."""
+    vocabulary = GameVocabulary.from_bundled_data()
+    config = EncoderConfig(hidden_dim=16, entity_heads=4, entity_ff_dim=32)
+    path = write_artifact(tmp_path, encoder_config=config, fingerprint=vocabulary.fingerprint())
+    expected = torch.load(path, map_location="cpu", weights_only=True)["encoder"]
+    torch.manual_seed(5)
+    state = torch.get_rng_state()
+
+    reference = load_reference_encoder(path, vocabulary=vocabulary, encoder_config=config)
+
+    assert torch.equal(torch.get_rng_state(), state)
+    assert not reference.training
+    assert not any(parameter.requires_grad for parameter in reference.parameters())
+    for name, tensor in reference.state_dict().items():
+        assert torch.equal(tensor, expected[name]), name
+    with pytest.raises(ValueError, match="encoder config"):
+        load_reference_encoder(path, vocabulary=vocabulary, encoder_config=EncoderConfig())
 
 
 def test_an_artifact_from_a_different_vocabulary_is_refused(tmp_path):
