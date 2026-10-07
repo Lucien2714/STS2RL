@@ -65,34 +65,45 @@ class _RefusedOnScreen:
     of one action, and all 14 truncations in 5040 runs/step2* episodes were one
     refused Foul Potion drink in a shop, sent until the stall budget ran out.
 
+    An action is excluded only once it has been refused **twice in a row** on
+    the same unchanged screen.  One refusal is often a timing race -- the
+    screen was not ready, its content unchanged -- and the same action works a
+    moment later.  Excluding it at once would turn that race into a different
+    and often irreversible choice: a ``play_card`` refused once leaves only
+    ``end_turn``, a ``shop_purchase`` refused once leaves ``proceed``.  The
+    first refusal is therefore retried as before, and a second consecutive one
+    is what marks the action as refused by the game rather than by the clock.
+
     The screen is the raw state the refusal left, the same comparison
-    ``_refused_without_moving`` makes.  Any other screen forgets the list, so
-    an action is excluded only where it was refused and only until something
-    moves.  The cost is a refusal that was only a timing race: the action
-    would have worked a moment later, and a different one is chosen instead.
-    That is one decision on a screen that was not ready, against a loop that
-    ends the episode.
+    ``_refused_without_moving`` makes.  Any other screen forgets everything,
+    so an action is excluded only where it was refused and only until
+    something moves.
     """
 
     def __init__(self) -> None:
         self.screen: RawState | None = None
         self.actions: list[GameAction] = []
+        self._last: dict | None = None
 
     def add(self, screen: RawState, action: GameAction) -> None:
         if screen != self.screen:
             self.clear()
             self.screen = screen
-        self.actions.append(action)
+        refused = action.to_dict()
+        if refused == self._last and all(a.to_dict() != refused for a in self.actions):
+            self.actions.append(action)
+        self._last = refused
 
     def on(self, screen: RawState) -> tuple[GameAction, ...]:
-        """Return the actions refused on this screen, forgetting any other's."""
-        if self.actions and screen != self.screen:
+        """Return the actions excluded on this screen, forgetting any other's."""
+        if self.screen is not None and screen != self.screen:
             self.clear()
         return tuple(self.actions)
 
     def clear(self) -> None:
         self.screen = None
         self.actions = []
+        self._last = None
 
 
 class EpisodeRunner:
@@ -151,8 +162,8 @@ class EpisodeRunner:
                 # The screen was not ready, not the action wrong.  Recording
                 # this would teach that resting at a rest site does nothing,
                 # and repeating it is how a deterministic policy spends ten
-                # thousand steps on one screen -- so it is also not chosen
-                # again until the screen moves (``_RefusedOnScreen``).
+                # thousand steps on one screen -- so a second refusal in a row
+                # excludes it until the screen moves (``_RefusedOnScreen``).
                 stalled += 1
                 attempted.append(action.to_dict())
                 refused.add(observation.raw_state, action)
@@ -269,7 +280,8 @@ class EpisodeRunner:
         so the server is given time to settle before each retry.  Returning
         None truncates the episode instead of failing the whole training run.
 
-        Actions refused on this unchanged screen are excluded.  When they are
+        Actions refused twice in a row on this unchanged screen are excluded.
+        When they are
         every candidate there is nothing new to try, and the choice is made
         without the exclusion -- the behaviour before it existed: the refusal
         is retried after the wait, and the stall budget still truncates it.

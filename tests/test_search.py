@@ -190,10 +190,30 @@ def test_an_excluded_copy_leaves_the_other_copy_standing_for_its_key():
     game = BranchingGame(world=0)
     search = search_for(game, reseed=False, simulations=100)
     search.candidates = lambda state: [first, second, BAD, END]
+    # The first step after each restore is the action the root simulates.
+    at_root: list[GameAction] = []
+    restore, step = game.restore, game.step
+    fresh = [False]
+
+    def restore_spy(point, seed=None):
+        fresh[0] = True
+        return restore(point, seed)
+
+    def step_spy(action):
+        if fresh[0]:
+            at_root.append(action)
+            fresh[0] = False
+        return step(action)
+
+    game.restore, game.step = restore_spy, step_spy
     result = search.search(game, game.state, exclude=[first])
     assert result.candidates == (second, BAD, END)
     assert result.action is second
     assert ("good",) in result.root.children
+    # The key's statistics come from the copy that was not refused: grouping
+    # before filtering made ``first`` its representative in every rollout.
+    assert second in at_root
+    assert first not in at_root
 
 
 def test_no_exclusion_searches_exactly_as_before():

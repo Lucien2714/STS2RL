@@ -59,7 +59,8 @@ class Agent(ABC):
         """Choose one legal action for the current full observation.
 
         ``exclude`` names actions, by their full parameters, that the game
-        refused on this same unchanged screen (``EpisodeRunner``).  They are not
+        refused twice in a row on this same unchanged screen
+        (``EpisodeRunner``).  They are not
         chosen again; ``without_excluded`` raises ``NoLegalActionsError`` when
         they cover every candidate.  The runner passes it only when it is not
         empty, so an agent that predates it still works without it.

@@ -544,34 +544,70 @@ def test_an_action_refused_on_an_unchanged_screen_is_not_chosen_again():
 
     result = _runner(env, agent).run()
 
-    assert env.actions == [POTION.to_dict(), LEAVE.to_dict()]
-    assert agent.excluded == [[], [POTION.to_dict()]]
-    assert agent.discarded == 1
+    assert env.actions == [POTION.to_dict(), POTION.to_dict(), LEAVE.to_dict()]
+    assert agent.excluded == [[], [], [POTION.to_dict()]]
+    assert agent.discarded == 2
     assert result.terminated is True
+
+
+def test_one_transient_refusal_retries_the_same_action():
+    """A screen that was not ready: excluding at once would force another choice.
+
+    In a fight that choice is ``end_turn``; in a shop it is ``proceed``.  Both
+    are irreversible, and the refused action works a moment later.
+    """
+    env = ShopEnv(refuse={"shop_purchase": 1})
+    agent = PreferenceAgent([BUY, LEAVE])
+
+    result = _runner(env, agent).run()
+
+    assert env.actions == [BUY.to_dict(), BUY.to_dict()]
+    assert agent.excluded == [[], []]
+    assert result.terminated is True
+
+
+def test_refusals_of_different_actions_are_not_consecutive_repeats():
+    class ScriptedAgent(PreferenceAgent):
+        def __init__(self, script):
+            super().__init__([POTION, LEAVE])
+            self.script = list(script)
+
+        def choose_action(self, observation, exclude=()):
+            self.excluded.append([action.to_dict() for action in exclude])
+            return self.script.pop(0)
+
+    env = ShopEnv(refuse={"use_potion": 2, "proceed": 1}, inert={"shop_purchase"})
+    agent = ScriptedAgent([POTION, LEAVE, POTION, BUY])
+
+    _runner(env, agent, max_steps=4).run()
+
+    assert agent.excluded == [[], [], [], []]
 
 
 def test_an_accepted_action_clears_the_exclusions():
     """Inert here: the screen comes back identical, but the game took the action."""
-    env = ShopEnv(refuse={"use_potion": 1}, inert={"shop_purchase"})
+    env = ShopEnv(refuse={"use_potion": 2}, inert={"shop_purchase"})
     agent = PreferenceAgent([POTION, BUY, LEAVE])
 
     result = _runner(env, agent).run()
 
-    assert env.actions == [POTION.to_dict(), BUY.to_dict(), POTION.to_dict()]
-    assert agent.excluded == [[], [POTION.to_dict()], []]
+    assert env.actions == [
+        POTION.to_dict(), POTION.to_dict(), BUY.to_dict(), POTION.to_dict()
+    ]
+    assert agent.excluded == [[], [], [POTION.to_dict()], []]
     assert result.terminated is True
 
 
 def test_a_screen_that_moved_clears_the_exclusions():
-    """An action is excluded only on the screen it was refused on."""
+    """Two refusals on two different screens are not two in a row on one."""
     moved = {"state_type": "shop", "shop": {"items": [], "can_proceed": True}, "run": {"floor": 9}}
-    env = ShopEnv(refuse={"use_potion": 1}, moved_screen=moved)
+    env = ShopEnv(refuse={"use_potion": 2}, moved_screen=moved)
     agent = PreferenceAgent([POTION, LEAVE])
 
     result = _runner(env, agent).run()
 
-    assert env.actions == [POTION.to_dict(), POTION.to_dict()]
-    assert agent.excluded == [[], []]
+    assert env.actions == [POTION.to_dict()] * 3
+    assert agent.excluded == [[], [], []]
     assert result.terminated is True
 
 
@@ -580,21 +616,15 @@ def test_when_every_candidate_was_refused_the_choice_falls_back_to_all_of_them()
     env = ShopEnv(refuse={"use_potion": 10_000, "proceed": 10_000})
     agent = PreferenceAgent([POTION, LEAVE])
 
-    result = _runner(env, agent, max_state_refreshes=3).run()
+    result = _runner(env, agent, max_state_refreshes=5).run()
 
     assert result.truncated is True
     assert result.truncation_reason == "refused_without_moving"
-    assert env.actions == [POTION.to_dict(), LEAVE.to_dict(), POTION.to_dict(), POTION.to_dict()]
-    # Once both are refused, each choice asks with the exclusion, is told
+    assert env.actions == [POTION.to_dict()] * 2 + [LEAVE.to_dict()] * 2 + [POTION.to_dict()] * 2
+    # Once both are excluded, each choice asks with the exclusion, is told
     # nothing is left, and asks again without it.
-    assert agent.excluded == [
-        [],
-        [POTION.to_dict()],
-        [POTION.to_dict(), LEAVE.to_dict()],
-        [],
-        [POTION.to_dict(), LEAVE.to_dict(), POTION.to_dict()],
-        [],
-    ]
+    both = [POTION.to_dict(), LEAVE.to_dict()]
+    assert agent.excluded == [[], [], [POTION.to_dict()], [POTION.to_dict()], both, [], both, []]
 
 
 def test_a_single_refused_candidate_is_still_retried_until_the_screen_opens():
