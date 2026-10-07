@@ -880,36 +880,18 @@ def _drinks(state: dict) -> list[dict]:
     return [a for a in payloads(state) if a["type"] == "use_potion"]
 
 
-def test_a_foul_potion_can_be_thrown_where_it_starts_a_fight():
-    """The fake merchant's fight is started by it.
+@pytest.mark.parametrize("state_type", ["shop", "fake_merchant"])
+def test_a_foul_potion_can_be_thrown_at_a_merchant(state_type):
+    """In a shop it pays 100 gold; at the fake merchant it starts the fight.
 
-    It summons a fight, so it is a deliberate move rather than a disguised
-    discard, and combat used to be the only screen offering ``use_potion``.
+    Either way it is a deliberate move rather than a disguised discard, and
+    combat used to be the only screen offering ``use_potion``.
     """
     state = _screen_with_potions(
-        "fake_merchant", _potion(1, "FOUL_POTION", "TargetedNoCreature")
+        state_type, _potion(1, "FOUL_POTION", "TargetedNoCreature")
     )
 
     assert _drinks(state) == [{"type": "use_potion", "slot": 1}]
-
-
-@pytest.mark.parametrize("inventory_open", [True, False, None])
-def test_a_foul_potion_is_not_offered_in_a_real_shop(inventory_open):
-    """The regression: "Potion 'Foul Potion' cannot be used right now".
-
-    The game allows it in a shop only with the inventory closed, and reading
-    the shop through the API opens it, so the drink is refused on both
-    backends.  All 14 truncations in 5040 runs/step2* episodes were this
-    refusal.  The pair is withheld whatever ``inventory_open`` reports: the
-    report comes from the read that opened the inventory.
-    """
-    state = _screen_with_potions(
-        "shop", _potion(1, "FOUL_POTION", "TargetedNoCreature")
-    )
-    if inventory_open is not None:
-        state["shop"]["inventory_open"] = inventory_open
-
-    assert _drinks(state) == []
 
 
 def test_a_potion_that_only_works_in_combat_is_not_offered_outside_it():
@@ -946,7 +928,6 @@ def test_a_blood_potion_can_be_drunk_where_it_was_seen_to_work(state_type):
     ("state_type", "potion_id"),
     [
         ("rewards", "FOUL_POTION"),
-        ("shop", "FOUL_POTION"),
         ("rewards", "BLOOD_POTION"),
         ("rest_site", "FOUL_POTION"),
         ("fake_merchant", "BLOOD_POTION"),

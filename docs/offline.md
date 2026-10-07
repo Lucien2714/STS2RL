@@ -239,23 +239,11 @@ demonstrated actions unreachable. The gate that replaced it is a list of
 
 | potion | screens | evidence |
 |---|---|---|
-| `FOUL_POTION` | `fake_merchant` | the fake merchant's fight is documented as started by it |
+| `FOUL_POTION` | `shop`, `fake_merchant` | ten shop drinks in the human records (+100 gold, no fight; needs the merchant inventory closed, which STS2MCP 09c4938 and STS2Simulator d985824 do); the fake merchant's fight is documented as started by it |
 | `BLOOD_POTION` | `shop`, `rest_site` | one drink each in two traced runs, both accepted (HP 51→66, 32→48) |
 
 A pair is never widened by analogy. Blood Potion on a rewards screen is
 plausible and unobserved, and plausible is exactly what the first gate was.
-
-`(FOUL_POTION, shop)` was in the table and was removed. In a real shop the
-potion pays 100 gold and starts no fight. The game allows the drink only while
-the merchant UI exists and its inventory is closed. The 10 human shop drinks in
-`gameplay_records` were all made with `inventory_open: false`, closed by hand in
-the GUI. The agent cannot do that: the simulator has no merchant UI, and the mod
-opens the inventory each time it reads shop state. Both backends answer
-"Potion 'Foul Potion' cannot be used right now", and all 14 truncations in 5040
-`runs/step2*` episodes were that refusal. The removal changes the candidate set
-of every shop state with a Foul Potion on the belt, so a dataset cleaned before
-it is refused as stale: re-run `sts2rl-bc-clean`. The human shop drinks then
-leave the dataset as decisions whose action is not a candidate.
 
 ### The first gate, and what it cost
 
