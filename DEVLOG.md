@@ -344,3 +344,10 @@
 - 遇到的问题：22:43 模拟器被误停（等待脚本匹配了日志里上一次启动留下的 "all done" 行），n102 和 p060 各损失 2 和 6 局，已按 seed 重放补齐。BC 参考策略训练和 Codex 的 BC-KL 设计审查被 Claude Code 因内存不足停止，之后不再需要。
 - 下一步：从 update_000060 开始，加定向探索（营火 0.3、选牌奖励 0.3、地图 0.15），训练 3 个周期；每个周期末在 holdout 上评估并探测升级、跳过的概率。设计已交 Codex 审查（runs/codex/exploration_design.md）。
 - 需要 Lucien 决定的事：无（定向探索方案已由 Lucien 选定；mod 的 Foul Potion 改动仍待真实游戏测试）。
+
+### 2026-10-07 11:31 (PT) · feat/mcts-combat
+- 做了什么：Step 2-s：实现定向 ε 探索（85c6703，Codex 审查设计和 diff；混合分布作为被训练的策略），从 step2p update_000060 训练 3 个周期（runs/step2s-explore，23:36 ~ 04:28，450 局，153 次更新，--explore rest_site=0.3,card_reward=0.3,map=0.15）。每个周期末探测动作概率，在 holdout 上评估。写 docs/mcts/step2s-exploration.md。另外实现了 BC-KL 参考项（feat/bc-kl，b1f6a29 + 0c68d21，Codex 审查两轮），已合并进 feat/mcts-combat。
+- 结果/数据：周期平均楼层 23.13 / 22.04 / 22.11；同 seed 对 Step 2-p 三周期平均 −0.64 / −1.83 / −1.85（p = 0.55 / 0.060 / 0.005）。到第 3 幕 boss 6 局，通关 0。探测：升级概率 0.02 / 0.00 / 0.01（起点 0.01，人类 0.65），跳过选牌 0.00 全程（人类 0.52）。holdout：周期 1 末 update_000054 对 p060 −3.03（8 高 / 16 低，p = 0.15，79 局）；周期 2、3 末未完成。测试：探索 862 个通过，BC-KL 918 个通过。
+- 遇到的问题：探索没有恢复塌缩的选项，策略反而变差，商店漂移到买药水、丢药水。周期 1 的 holdout 评估在 79 局时因模拟器故障（水晶球事件后 run faulted）退出。顺序执行的周期评估脚本会把"最新"checkpoint 当成周期末，已改为手动指定。
+- 下一步：Step 2-t：从 p060 开始，--reference-policy runs/bc-v7/bc_best.pt --reference-kl 0.1，不探索，3 个周期；参考模型正在训练（runs/bc-v7）；周期 2、3 的 holdout 评估进行中，完成后补进文档。
+- 需要 Lucien 决定的事：无（mod 的 Foul Potion 改动仍待真实游戏测试）。

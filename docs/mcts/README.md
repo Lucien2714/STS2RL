@@ -32,3 +32,4 @@
 | Step 2-p（训练）：修复奖励归属之后，从最好的周期继续训练 450 局 | [step2p-training.md](step2p-training.md) | 2026-10-06 |
 | Step 2-q：商店里的 Foul Potion，以及被拒绝后不重复同一动作 | [step2q-foul-potion.md](step2q-foul-potion.md) | 2026-10-06 |
 | Step 2-r：在 holdout seed 上评估四个 checkpoint，以及宏观策略的探测 | [step2r-holdout-eval.md](step2r-holdout-eval.md) | 2026-10-06 |
+| Step 2-s：定向探索（ε 混合采样；没有恢复塌缩的选项） | [step2s-exploration.md](step2s-exploration.md) | 2026-10-07 |
