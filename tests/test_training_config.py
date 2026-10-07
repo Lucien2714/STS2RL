@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 import torch
 
+from sts2rl.agents import PPOConfig
 from sts2rl.encoder import EncoderConfig
 from sts2rl.env import ResetSpec
 from sts2rl.training import TrainingConfig, TrainingPlan, TrainingState
@@ -202,3 +203,19 @@ def test_a_plan_saved_before_fights_could_leave_the_rollout_keeps_them_in(tmp_pa
     values = TrainingConfig(run_dir=tmp_path).to_dict()
     values.pop("search_fights_in_rollout")
     assert TrainingConfig.from_dict(values).search_fights_in_rollout is True
+
+
+def test_exploration_rates_survive_a_serialization_round_trip():
+    plan = TrainingPlan(ppo=PPOConfig(exploration={"rest_site": 0.3, "map": 0.15}))
+
+    restored = TrainingPlan.from_dict(json.loads(json.dumps(plan.to_dict())))
+
+    assert restored == plan
+    assert restored.ppo.exploration == (("map", 0.15), ("rest_site", 0.3))
+
+
+def test_a_plan_saved_before_exploration_existed_loads_without_it():
+    values = TrainingPlan().to_dict()
+    del values["ppo"]["exploration"]
+
+    assert TrainingPlan.from_dict(values).ppo.exploration == ()

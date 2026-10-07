@@ -16,8 +16,40 @@ from torch.nn import functional as F
 from sts2rl.actions import GameAction
 from sts2rl.agents.action_space import LegalActionProvider
 from sts2rl.agents.base import Agent, Transition, without_excluded
-from sts2rl.encoder import GameEncoder, GameTokenizer, TokenizedDecision
+from sts2rl.encoder import GameEncoder, GameTokenizer, GameVocabulary, TokenizedDecision
 from sts2rl.env.types import GameObservation
+
+
+# Every screen the game reports, which is all an exploration rate can name.
+STATE_TYPES = GameVocabulary.FIXED_TOKENS["state_types"]
+
+
+def _exploration_pairs(value: object) -> tuple[tuple[str, float], ...]:
+    """Normalise an exploration mapping into sorted ``(state_type, epsilon)`` pairs.
+
+    A mapping, a sequence of pairs, and the JSON reading of either arrive here,
+    so a plan round-trips through ``asdict`` and ``from_dict`` unchanged and
+    two spellings of one mapping compare equal.
+    """
+    items = value.items() if isinstance(value, Mapping) else value
+    rates: dict[str, float] = {}
+    for item in items:
+        try:
+            state_type, epsilon = item
+        except (TypeError, ValueError):
+            raise ValueError("exploration must map state types to rates") from None
+        if state_type not in STATE_TYPES:
+            raise ValueError(f"exploration names an unknown state type: {state_type!r}")
+        if state_type in rates:
+            raise ValueError(f"exploration names {state_type!r} twice")
+        if isinstance(epsilon, bool) or not isinstance(epsilon, (int, float)):
+            raise TypeError(f"exploration rate for {state_type!r} must be a number")
+        if not math.isfinite(epsilon) or not 0 <= epsilon < 1:
+            raise ValueError(
+                f"exploration rate for {state_type!r} must be at least 0 and below 1"
+            )
+        rates[state_type] = float(epsilon)
+    return tuple(sorted(rates.items()))
 
 
 @dataclass(frozen=True)
@@ -41,6 +73,19 @@ class PPOConfig:
     # batch -- a card reward screen, a few per episode -- the clip limits nothing,
     # and one update took P(skip card reward) from 0.21 to 1.00. None: no limit.
     target_kl: float | None = None
+    # Targeted exploration, as sorted (state_type, epsilon) pairs. On a screen
+    # of that type a real choice is drawn from the mixture
+    #     mu(a) = (1 - epsilon) * pi(a) + epsilon / N
+    # over its N candidates, and the mixture is the policy PPO trains there:
+    # the stored log probability and the ratio are both the mixture's, so an
+    # update still starts at ratio 1 and the clip and target_kl keep their
+    # meaning. The entropy bonus cannot do this job: it is one coefficient
+    # for every screen, and the screens that collapse -- a rest site or a card
+    # reward, a few decisions per episode -- are not the ones it is tuned on.
+    # A mapping is accepted and normalised, so order does not affect equality
+    # and a plan round-trips through JSON exactly. Empty: the plain policy,
+    # drawing nothing extra.
+    exploration: tuple[tuple[str, float], ...] = ()
 
     def __post_init__(self) -> None:
         if self.rollout_size < 1 or self.update_epochs < 1:
@@ -55,16 +100,33 @@ class PPOConfig:
             raise ValueError("clip_ratio must not be negative")
         if self.target_kl is not None and not self.target_kl > 0:
             raise ValueError("target_kl must be positive or None")
+        object.__setattr__(self, "exploration", _exploration_pairs(self.exploration))
+
+    def exploration_rate(self, state_type: str) -> float:
+        """Return the epsilon in force on a screen, 0 where none is configured."""
+        for screen, epsilon in self.exploration:
+            if screen == state_type:
+                return epsilon
+        return 0.0
 
 
 @dataclass
 class _PendingDecision:
     decision: TokenizedDecision
     action_index: int
+    # log mu_old(a): the mixture's where the screen explores, else log pi_old(a).
     log_probability: Tensor
+    # log pi_old(a), the policy's own, kept apart for the policy_kl metric.
+    policy_log_probability: Tensor
     value: Tensor  # Raw reward units, fixed at sampling time.
+    state_type: str
     # False for an action another policy chose (see ``choose_external``).
     policy_trainable: bool = True
+    # The rate the mixture was sampled at -- 0 where nothing was mixed in: a
+    # screen without a rate, a forced step, an external action -- and whether
+    # it was the uniform branch that drew this action.
+    epsilon: float = 0.0
+    explored: bool = False
 
 
 @dataclass
@@ -72,13 +134,17 @@ class _RolloutStep:
     decision: TokenizedDecision
     next_observation: GameObservation
     action_index: int
-    old_log_probability: Tensor
+    old_log_probability: Tensor  # The mixture's where the screen explored.
+    old_policy_log_probability: Tensor
     old_value: Tensor  # Raw reward units, independent of later return scales.
     reward: float
     done: bool
+    state_type: str
     episode_end: bool = False
     bootstrap_value: Tensor | None = None  # Raw value of a truncated final state.
     policy_trainable: bool = True
+    epsilon: float = 0.0
+    explored: bool = False
 
 
 @dataclass
@@ -184,6 +250,20 @@ class LaneView(Agent):
 def _policy_step(step: _RolloutStep) -> bool:
     """Whether a step trains the policy: a real choice, made by this policy."""
     return step.policy_trainable and len(step.decision.actions) > 1
+
+
+def _mixture_log_probability(log_probability: Tensor, epsilon: float, count: int) -> Tensor:
+    """Return log((1 - epsilon) * pi(a) + epsilon / count) from log pi(a).
+
+    Formed in log space: pi(a) can underflow for an action the policy has
+    all but abandoned -- the very action exploration exists to revisit -- and
+    the log of that underflow is -inf where the mixture's is finite.
+    """
+    return torch.logaddexp(
+        log_probability + math.log1p(-epsilon),
+        # As a difference: the quotient itself underflows for the smallest rates.
+        torch.full_like(log_probability, math.log(epsilon) - math.log(count)),
+    )
 
 
 class CandidatePPOAgent(Agent):
@@ -324,6 +404,12 @@ class CandidatePPOAgent(Agent):
         would store a sample the behaviour policy could not draw, under a
         probability renormalised over actions it never saw.  A set reduced to
         one candidate is a forced step like any other (``_policy_step``).
+
+        A screen with an exploration rate (``PPOConfig.exploration``) is drawn
+        from the mixture of the policy and the uniform choice over that same
+        set, and the stored log probability is the mixture's: the update
+        trains the mixture too, so the ratio compares like with like there as
+        well.
         """
         entry = self._lane(lane)
         if entry.pending is not None:
@@ -337,15 +423,35 @@ class CandidatePPOAgent(Agent):
         if len(candidates) == 1 and not self.training_enabled:
             return candidates[0]
 
+        state_type = str(state.raw_state.get("state_type"))
+        sampling = self.training_enabled and len(candidates) > 1
+        # The rate in force: only a real choice, made while learning, is mixed.
+        # Evaluation and a forced step read no random number for it.
+        epsilon = self.config.exploration_rate(state_type) if sampling else 0.0
         decision = self.tokenizer.tokenize_decision(state, candidates)
         with self._lock, torch.no_grad():
             output = self.game_encoder.policy_value(decision.to(self.device))
             distribution = Categorical(logits=output.logits)
-            if self.training_enabled and len(candidates) > 1:
+            explored = False
+            if epsilon > 0.0 and float(torch.rand(())) < epsilon:
+                # The mixture's uniform branch, drawn explicitly so the step
+                # can say which branch chose it.
+                action_index_tensor = torch.randint(
+                    len(candidates), (), device=self.device
+                )
+                explored = True
+            elif sampling:
                 action_index_tensor = distribution.sample()
             else:
                 action_index_tensor = torch.argmax(output.logits)
-            log_probability = distribution.log_prob(action_index_tensor)
+            policy_log_probability = distribution.log_prob(action_index_tensor)
+            # What was sampled is the mixture's marginal, whichever branch drew
+            # the action, so that is what the ratio starts from.
+            log_probability = (
+                _mixture_log_probability(policy_log_probability, epsilon, len(candidates))
+                if epsilon > 0.0
+                else policy_log_probability
+            )
             action_index = int(action_index_tensor.item())
             if self.training_enabled:
                 # Another lane may update while this action is in flight.
@@ -354,7 +460,11 @@ class CandidatePPOAgent(Agent):
                     decision=decision,
                     action_index=action_index,
                     log_probability=log_probability.detach().cpu(),
+                    policy_log_probability=policy_log_probability.detach().cpu(),
                     value=(output.value * self._return_scale.scale).detach().cpu(),
+                    state_type=state_type,
+                    epsilon=epsilon,
+                    explored=explored,
                 )
         return candidates[action_index]
 
@@ -410,7 +520,9 @@ class CandidatePPOAgent(Agent):
                 decision=decision,
                 action_index=action_index,
                 log_probability=torch.zeros(()),
+                policy_log_probability=torch.zeros(()),
                 value=self._raw_value(state),
+                state_type=str(state.raw_state.get("state_type")),
                 policy_trainable=False,
             )
         return candidates[action_index]
@@ -439,11 +551,15 @@ class CandidatePPOAgent(Agent):
                         next_observation=transition.next_state,
                         action_index=entry.pending.action_index,
                         old_log_probability=entry.pending.log_probability,
+                        old_policy_log_probability=entry.pending.policy_log_probability,
                         old_value=entry.pending.value,
                         reward=reward,
                         done=transition.done,
+                        state_type=entry.pending.state_type,
                         episode_end=transition.done,
                         policy_trainable=entry.pending.policy_trainable,
+                        epsilon=entry.pending.epsilon,
+                        explored=entry.pending.explored,
                     )
                 )
                 entry.pending = None
@@ -743,6 +859,7 @@ class CandidatePPOAgent(Agent):
                     if result.get("kl_stopped"):
                         stopped = True
                         metrics["approx_kl"] = result["approx_kl"]
+                        metrics["policy_kl"] = result["policy_kl"]
                         break
                     metrics = result
                     optimizer_steps += 1
@@ -760,11 +877,35 @@ class CandidatePPOAgent(Agent):
             metrics["lanes"] = float(len(lanes))
             metrics["return_scale"] = self._return_scale.scale
             metrics["held_steps"] = float(held_steps)
+            metrics.update(self._exploration_metrics(steps, advantages))
             for lane, count in zip(lanes, trained_counts):
                 del lane.steps[:count]
             self.last_update = metrics
             self._completed_update_metrics.append(dict(metrics))
             return metrics
+
+    def _exploration_metrics(
+        self, steps: list[_RolloutStep], advantages: Tensor
+    ) -> dict[str, float]:
+        """Count the trained steps the uniform branch drew, and how they scored.
+
+        ``explored_positive_advantage`` is the share of those steps whose
+        normalised advantage is positive -- the sign the policy loss sees for
+        them, after the batch's normalisation -- and 0 when none was drawn.
+        """
+        explored = [step.explored for step in steps]
+        count = sum(explored)
+        metrics = {"explored_steps": float(count)}
+        for screen, _ in self.config.exploration:
+            metrics[f"explore/{screen}"] = float(
+                sum(1 for step in steps if step.explored and step.state_type == screen)
+            )
+        positive = 0.0
+        if count:
+            mask = torch.tensor(explored, dtype=torch.bool, device=advantages.device)
+            positive = float((advantages[mask] > 0).sum()) / count
+        metrics["explored_positive_advantage"] = positive
+        return metrics
 
     def _optimize_minibatch(
         self,
@@ -778,6 +919,7 @@ class CandidatePPOAgent(Agent):
         value_losses: list[Tensor] = []
         entropies: list[Tensor] = []
         kl_terms: list[Tensor] = []
+        policy_kl_terms: list[Tensor] = []
         for index in indices:
             step = steps[index]
             if not _policy_step(step):
@@ -787,11 +929,36 @@ class CandidatePPOAgent(Agent):
             output = self.game_encoder.policy_value(step.decision.to(self.device))
             distribution = Categorical(logits=output.logits)
             action_index = torch.tensor(step.action_index, device=self.device)
-            new_log_probability = distribution.log_prob(action_index)
-            log_ratio = new_log_probability - step.old_log_probability.to(self.device)
+            new_policy_log_probability = distribution.log_prob(action_index)
+            old_log_probability = step.old_log_probability.to(self.device)
+            old_policy_log_probability = step.old_policy_log_probability.to(self.device)
+            if step.epsilon > 0.0:
+                # The mixture was sampled, so the mixture is trained: its
+                # gradient reaches the policy through (1 - epsilon) * pi, and
+                # the uniform share keeps the ratio bounded on an action the
+                # policy had all but abandoned.
+                new_log_probability = _mixture_log_probability(
+                    new_policy_log_probability, step.epsilon, len(step.decision.actions)
+                )
+            else:
+                new_log_probability = new_policy_log_probability
+            log_ratio = new_log_probability - old_log_probability
             ratio = torch.exp(log_ratio)
             # The low-variance estimator of KL(old || new): (r - 1) - log r >= 0.
             kl_terms.append(((ratio - 1.0) - log_ratio).detach())
+            # The same estimator for the policy alone, KL(pi_old || pi_new).
+            # The action came from the mixture, so each term is weighted by
+            # w = pi_old(a) / mu_old(a), exactly 1 where nothing was mixed in:
+            # w * ((q - 1) - log q) with q = pi_new(a) / pi_old(a). The product
+            # w * q is taken as one exponent, because on an action the policy
+            # had abandoned and has since recovered w underflows and q
+            # overflows in float32, and 0 * inf is NaN where the term is finite.
+            policy_log_ratio = new_policy_log_probability - old_policy_log_probability
+            weight = torch.exp(old_policy_log_probability - old_log_probability)
+            weighted_ratio = torch.exp(new_policy_log_probability - old_log_probability)
+            policy_kl_terms.append(
+                ((weighted_ratio - weight) - weight * policy_log_ratio).detach()
+            )
             advantage = advantages[index]
             unclipped = ratio * advantage
             clipped = (
@@ -808,10 +975,13 @@ class CandidatePPOAgent(Agent):
 
         zero = torch.zeros((), device=self.device)
         approx_kl = float(torch.stack(kl_terms).mean().cpu()) if kl_terms else 0.0
+        policy_kl = (
+            float(torch.stack(policy_kl_terms).mean().cpu()) if policy_kl_terms else 0.0
+        )
         if self.config.target_kl is not None and approx_kl > 1.5 * self.config.target_kl:
             # Measured before stepping, so the step that would cross the limit is
             # never taken (Stable-Baselines3 uses the same 1.5 margin).
-            return {"kl_stopped": 1.0, "approx_kl": approx_kl}
+            return {"kl_stopped": 1.0, "approx_kl": approx_kl, "policy_kl": policy_kl}
         policy_loss = torch.stack(policy_losses).mean() if policy_losses else zero
         value_loss = torch.stack(value_losses).mean()
         entropy = torch.stack(entropies).mean() if entropies else zero
@@ -834,6 +1004,7 @@ class CandidatePPOAgent(Agent):
             "gradient_norm": float(gradient_norm.detach().cpu()),
             "rollout_steps": float(len(steps)),
             "approx_kl": approx_kl,
+            "policy_kl": policy_kl,
         }
 
     def _advantages_and_returns(

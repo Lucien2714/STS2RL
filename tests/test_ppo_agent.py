@@ -2,13 +2,16 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 import dataclasses
+import math
 
 import pytest
 import torch
 
 from sts2rl.actions import GameAction
 from sts2rl.agents import CandidatePPOAgent, NoLegalActionsError, PPOConfig, Transition
+from sts2rl.agents.ppo import _mixture_log_probability
 from sts2rl.encoder import (
     EncoderConfig,
     GameEncoder,
@@ -73,6 +76,8 @@ def _agent(
     target_kl: float | None = None,
     minibatch_size: int = 32,
     hold_open_steps: bool = False,
+    exploration: Mapping[str, float] | tuple[tuple[str, float], ...] = (),
+    learning_rate: float = 3e-4,
 ) -> CandidatePPOAgent:
     vocabulary = GameVocabulary.from_bundled_data()
     tokenizer = GameTokenizer(vocabulary)
@@ -84,10 +89,12 @@ def _agent(
         tokenizer=tokenizer,
         game_encoder=encoder,
         config=PPOConfig(
+            learning_rate=learning_rate,
             rollout_size=rollout_size,
             update_epochs=update_epochs,
             target_kl=target_kl,
             minibatch_size=minibatch_size,
+            exploration=exploration,
         ),
         hold_open_steps=hold_open_steps,
     )
@@ -1445,3 +1452,663 @@ def test_a_lane_view_passes_the_exclusion_through():
 
     assert action.to_dict() == _node(0)
     assert len(agent._lanes[3].pending.decision.actions) == 1
+
+
+def _explored_decision(agent, observation, *, explored: bool, lane: int = 0, exclude=()):
+    """Choose until the pending decision came from the wanted branch of the mixture."""
+    for _ in range(200):
+        action = agent.choose_action(observation, lane=lane, exclude=exclude)
+        if agent._lane(lane).pending.explored is explored:
+            return action
+        agent.discard_decision(lane=lane)
+    raise AssertionError(f"no decision with explored={explored} in 200 draws")
+
+
+def _log_policy(agent, decision: TokenizedDecision, action_index: int) -> torch.Tensor:
+    """log pi(a) under the agent's current weights."""
+    with torch.no_grad():
+        logits = agent.game_encoder.policy_value(decision).logits
+    return torch.log_softmax(logits, dim=-1)[action_index]
+
+
+def _reference_run(exploration):
+    """A seeded rollout of eight map decisions, and the one update it fills."""
+    torch.manual_seed(90)
+    agent = _agent(rollout_size=8, update_epochs=1, minibatch_size=8, exploration=exploration)
+    actions = []
+    for index in range(8):
+        observation = _observation(_map_state(3))
+        action = agent.choose_action(observation)
+        actions.append(action.params["index"])
+        agent.observe(
+            Transition(
+                state=observation,
+                action=action,
+                reward=10.0 if action.params["index"] == index % 3 else -10.0,
+                next_state=_observation(_map_state(3)),
+                done=index % 4 == 3,
+            )
+        )
+    return agent, actions
+
+
+def test_without_exploration_the_path_is_the_one_from_before_it_existed():
+    """Pinned from the code before exploration existed, on the same seed: the
+    actions, one update's losses, the weights, and the random numbers left."""
+    agent, actions = _reference_run(())
+
+    assert actions == [0, 0, 2, 1, 1, 0, 1, 2]
+    metrics = agent.last_update
+    assert metrics["loss"] == pytest.approx(0.5453976988792419, rel=1e-5)
+    assert metrics["value_loss"] == pytest.approx(1.1118905544281006, rel=1e-5)
+    assert metrics["entropy"] == pytest.approx(1.0547552108764648, rel=1e-5)
+    assert metrics["gradient_norm"] == pytest.approx(4.400908946990967, rel=1e-5)
+    assert metrics["approx_kl"] == 0.0
+    assert metrics["explored_steps"] == 0.0
+    assert metrics["explored_positive_advantage"] == 0.0
+    weights = sum(float(p.detach().sum()) for p in agent.game_encoder.parameters())
+    assert weights == pytest.approx(-65.32838867467945, rel=1e-5)
+    # The generator moved exactly as far as the eight samples took it.
+    assert torch.rand(2).tolist() == pytest.approx([0.817125678062439, 0.0004968047142028809])
+
+
+def test_a_rate_on_a_screen_never_visited_changes_nothing():
+    """Nothing is drawn for a screen whose rate is zero, so the run is the same."""
+    reference, reference_actions = _reference_run(())
+    reference_rng = torch.get_rng_state()
+    agent, actions = _reference_run({"rest_site": 0.3})
+
+    assert actions == reference_actions
+    assert torch.equal(torch.get_rng_state(), reference_rng)
+    for key, value in reference.last_update.items():
+        assert agent.last_update[key] == value, key
+    assert agent.last_update["explore/rest_site"] == 0.0
+    for name, tensor in reference.game_encoder.state_dict().items():
+        assert torch.equal(agent.game_encoder.state_dict()[name], tensor), name
+
+
+def test_an_explored_screen_stores_the_mixture_and_the_policy_apart():
+    """log mu_old(a) is what the ratio starts from; log pi_old(a) feeds policy_kl."""
+    torch.manual_seed(91)
+    agent = _agent(exploration={"map": 0.3})
+    observation = _observation(_map_state(3))
+
+    for explored in (False, True):
+        _explored_decision(agent, observation, explored=explored)
+        pending = agent._lane(0).pending
+        log_pi = _log_policy(agent, pending.decision, pending.action_index)
+        assert pending.explored is explored
+        assert pending.epsilon == 0.3
+        assert pending.state_type == "map"
+        assert torch.allclose(pending.policy_log_probability, log_pi, atol=1e-6)
+        expected = torch.log(0.7 * log_pi.exp() + 0.3 / 3)
+        assert torch.allclose(pending.log_probability, expected, atol=1e-6)
+        agent.discard_decision()
+
+
+def test_a_screen_without_a_rate_stores_the_policy_alone():
+    torch.manual_seed(92)
+    agent = _agent(exploration={"rest_site": 0.3})
+    observation = _observation(_map_state(3))
+
+    agent.choose_action(observation)
+
+    pending = agent._lane(0).pending
+    assert pending.explored is False
+    assert pending.epsilon == 0.0
+    assert torch.equal(pending.log_probability, pending.policy_log_probability)
+    assert torch.allclose(
+        pending.log_probability,
+        _log_policy(agent, pending.decision, pending.action_index),
+        atol=1e-6,
+    )
+
+
+def test_an_update_starts_at_ratio_one_on_explored_steps():
+    torch.manual_seed(93)
+    agent = _agent(rollout_size=1000, update_epochs=1, minibatch_size=64, exploration={"map": 0.5})
+    for index in range(8):
+        observation = _observation(_map_state(3))
+        action = _explored_decision(agent, observation, explored=index % 2 == 0)
+        agent.observe(
+            Transition(
+                state=observation,
+                action=action,
+                reward=float(index),
+                next_state=_observation(_map_state(3)),
+                done=index == 7,
+            )
+        )
+
+    for step in agent._lane(0).steps:
+        new = _mixture_log_probability(
+            _log_policy(agent, step.decision, step.action_index),
+            step.epsilon,
+            len(step.decision.actions),
+        )
+        assert float(torch.exp(new - step.old_log_probability)) == pytest.approx(1.0, abs=1e-6)
+    metrics = agent.update()
+
+    assert metrics["optimizer_steps"] == 1.0
+    assert metrics["approx_kl"] == pytest.approx(0.0, abs=1e-7)
+    assert metrics["policy_kl"] == pytest.approx(0.0, abs=1e-7)
+
+
+@pytest.mark.parametrize("reward", [50.0, -50.0])
+def test_an_explored_step_moves_the_policy_the_way_its_advantage_points(reward: float):
+    """The mixture's gradient reaches the policy through (1 - epsilon) * pi."""
+    torch.manual_seed(94)
+    agent = _agent(rollout_size=1000, update_epochs=1, minibatch_size=8, exploration={"map": 0.5})
+    # The policy term alone, so the direction is the surrogate's and nothing else's.
+    agent.config = dataclasses.replace(
+        agent.config, value_coefficient=0.0, entropy_coefficient=0.0
+    )
+    observation = _observation(_map_state(3))
+    action = _explored_decision(agent, observation, explored=True)
+    agent.observe(
+        Transition(
+            state=observation,
+            action=action,
+            reward=reward,
+            next_state=_observation({"state_type": "game_over"}),
+            done=True,
+        )
+    )
+    step = agent._lane(0).steps[0]
+    before = float(_log_policy(agent, step.decision, step.action_index))
+
+    agent.update()
+
+    after = float(_log_policy(agent, step.decision, step.action_index))
+    assert (after > before) == (reward > 0)
+
+
+def _collected_by(step, pi_old: float, epsilon: float) -> tuple[float, float]:
+    """Rewrite a stored step as if a policy giving its action ``pi_old`` had
+    collected it, through the mixture the sampler really draws from.
+
+    Returns ``(pi_old, mu_old)``, the pair the update's ratios start from.
+    """
+    mu_old = (1.0 - epsilon) * pi_old + epsilon / len(step.decision.actions)
+    step.old_policy_log_probability = torch.tensor(math.log(pi_old))
+    step.old_log_probability = torch.tensor(math.log(mu_old))
+    return pi_old, mu_old
+
+
+def _policy_probability(agent, step) -> float:
+    """pi(a) under the agent's current weights, for a stored step."""
+    return math.exp(float(_log_policy(agent, step.decision, step.action_index)))
+
+
+def _policy_kl_term(pi_old: float, mu_old: float, pi_new: float) -> float:
+    """w * ((q - 1) - log q): the importance-weighted estimator, by hand."""
+    weight, ratio = pi_old / mu_old, pi_new / pi_old
+    return weight * ((ratio - 1.0) - math.log(ratio))
+
+
+def test_policy_kl_weights_each_step_by_the_policy_share_of_its_sample():
+    """KL(pi_old || pi_new) estimated from mixture samples: each term carries
+    w = pi_old(a) / mu_old(a), below 1 for an action the uniform branch
+    supplied more of than the policy did, above 1 for one it supplied less."""
+    torch.manual_seed(95)
+    epsilon, pi_old = 0.5, (0.7, 0.2, 0.1)
+    agent = _agent(rollout_size=1000, update_epochs=1, minibatch_size=64, exploration={"map": epsilon})
+    observation = _observation(_map_state(3))
+    for index in range(4):
+        action = agent.choose_action(observation)
+        agent.observe(
+            Transition(state=observation, action=action, reward=1.0, next_state=observation, done=index == 3)
+        )
+    expected = []
+    for step in agent._lane(0).steps:
+        _, mu_old = _collected_by(step, pi_old[step.action_index], epsilon)
+        expected.append(
+            _policy_kl_term(pi_old[step.action_index], mu_old, _policy_probability(agent, step))
+        )
+
+    metrics = agent.update()
+
+    assert metrics["policy_kl"] == pytest.approx(sum(expected) / len(expected), rel=1e-4)
+
+
+def test_policy_kl_stays_finite_when_the_policy_had_abandoned_the_action():
+    """w = pi_old / mu_old underflows and q = pi_new / pi_old overflows in
+    float32 once the policy has recovered an action it had given 1e-52; taken
+    apart they make 0 * inf, and the estimator must not report NaN for a real
+    number."""
+    torch.manual_seed(104)
+    epsilon = 0.5
+    agent = _agent(rollout_size=1000, update_epochs=1, minibatch_size=64, exploration={"map": epsilon})
+    observation = _observation(_map_state(3))
+    action = _explored_decision(agent, observation, explored=True)
+    agent.observe(
+        Transition(state=observation, action=action, reward=1.0, next_state=observation, done=True)
+    )
+    step = agent._lane(0).steps[0]
+    pi_old, mu_old = _collected_by(step, math.exp(-120.0), epsilon)
+    pi_new = _policy_probability(agent, step)
+    expected = _policy_kl_term(pi_old, mu_old, pi_new)
+    # Nearly all of the term is pi_new(a) / mu_old(a); the rest is 1e-50.
+    assert expected == pytest.approx(pi_new / mu_old, rel=1e-6)
+
+    metrics = agent.update()
+
+    assert math.isfinite(metrics["policy_kl"])
+    assert metrics["policy_kl"] == pytest.approx(expected, rel=1e-4)
+
+
+def test_without_exploration_the_policy_kl_is_the_approximate_kl():
+    """Every weight is exactly one and both ratios are the policy's own."""
+    torch.manual_seed(96)
+    agent = _agent(rollout_size=8, update_epochs=2, minibatch_size=8)
+    _fill_policy_rollout(agent, 8)
+
+    assert agent.last_update["approx_kl"] > 0.0
+    assert agent.last_update["policy_kl"] == agent.last_update["approx_kl"]
+
+
+def test_a_held_step_keeps_its_exploration_across_an_update():
+    torch.manual_seed(97)
+    agent = _agent(rollout_size=4, hold_open_steps=True, exploration={"map": 0.5})
+    observation = _observation(_map_state(3))
+    action = _explored_decision(agent, observation, explored=True, lane=1)
+    agent.observe(
+        Transition(state=observation, action=action, reward=1.0, next_state=observation, done=False),
+        lane=1,
+    )
+    _unrecorded_fight_step(agent, 1, reward=0.5)
+    held = agent._lane(1).steps[0]
+
+    for _ in range(3):
+        _macro_step(agent, 0, reward=1.0)
+    _macro_step(agent, 0, reward=1.0, done=True)
+
+    assert agent.optimizer_updates == 1
+    assert agent._lane(1).steps == [held]
+    assert held.explored is True
+    assert held.epsilon == 0.5
+    assert held.state_type == "map"
+
+
+def test_discarding_or_aborting_drops_the_exploration_with_the_decision():
+    torch.manual_seed(98)
+    agent = _agent(exploration={"map": 0.5})
+    observation = _observation(_map_state(3))
+
+    _explored_decision(agent, observation, explored=True)
+    agent.discard_decision()
+    assert agent._lane(0).pending is None
+
+    action = _explored_decision(agent, observation, explored=True)
+    agent.observe(
+        Transition(state=observation, action=action, reward=1.0, next_state=observation, done=False)
+    )
+    assert agent._lane(0).steps[0].explored is True
+    _explored_decision(agent, observation, explored=True)
+    agent.abort_lane(0)
+    assert agent._lane(0).pending is None
+    assert agent._lane(0).steps == []
+
+
+@pytest.mark.parametrize("reward", [100.0, -100.0])
+def test_exploration_metrics_count_only_the_steps_the_update_trained(reward: float):
+    torch.manual_seed(99)
+    agent = _agent(
+        rollout_size=1000, hold_open_steps=True, exploration={"map": 0.5, "rest_site": 0.3}
+    )
+    observation = _observation(_map_state(3))
+    # Lane 1: an explored decision, then a fight that holds it open.
+    action = _explored_decision(agent, observation, explored=True, lane=1)
+    agent.observe(
+        Transition(state=observation, action=action, reward=1.0, next_state=observation, done=False),
+        lane=1,
+    )
+    _unrecorded_fight_step(agent, 1, reward=0.5)
+    # Lane 0: three explored decisions paid ``reward`` and two the policy drew
+    # paid nothing, each its own episode so an advantage is its own reward.
+    for explored in (True, False, True, True, False):
+        action = _explored_decision(agent, observation, explored=explored)
+        agent.observe(
+            Transition(
+                state=observation,
+                action=action,
+                reward=reward if explored else 0.0,
+                next_state=observation,
+                done=True,
+            )
+        )
+
+    metrics = agent.update()
+
+    assert metrics["rollout_steps"] == 5.0
+    assert metrics["held_steps"] == 1.0
+    assert metrics["explored_steps"] == 3.0
+    assert metrics["explore/map"] == 3.0
+    assert metrics["explore/rest_site"] == 0.0
+    assert "explore/card_reward" not in metrics
+    assert metrics["explored_positive_advantage"] == (1.0 if reward > 0 else 0.0)
+
+
+def test_evaluation_never_explores_and_draws_nothing():
+    torch.manual_seed(100)
+    agent = _agent(exploration={"map": 0.9})
+    agent.eval()
+    observation = _observation(_map_state(3))
+
+    torch.manual_seed(101)
+    choices = {agent.choose_action(observation).to_dict()["index"] for _ in range(10)}
+    drawn = torch.rand(())
+    torch.manual_seed(101)
+
+    assert len(choices) == 1
+    assert torch.equal(drawn, torch.rand(()))
+    assert agent._lane(0).pending is None
+
+
+def test_exploration_draws_over_the_reduced_candidate_set():
+    """N and both stored probabilities refer to what was really offered."""
+    torch.manual_seed(102)
+    agent = _agent(exploration={"map": 0.5})
+    observation = _observation(_map_state(3))
+    refused = GameAction("choose_map_node", index=1)
+
+    for explored in (True, False):
+        action = _explored_decision(agent, observation, explored=explored, exclude=[refused])
+        pending = agent._lane(0).pending
+        assert action.to_dict() != _node(1)
+        assert len(pending.decision.actions) == 2
+        log_pi = _log_policy(agent, pending.decision, pending.action_index)
+        assert torch.allclose(pending.policy_log_probability, log_pi, atol=1e-6)
+        expected = torch.log(0.5 * log_pi.exp() + 0.5 / 2)
+        assert torch.allclose(pending.log_probability, expected, atol=1e-6)
+        agent.discard_decision()
+
+    # Reduced to one candidate it is a forced step, with nothing to explore.
+    agent.choose_action(observation, exclude=[GameAction("choose_map_node", index=0), refused])
+    pending = agent._lane(0).pending
+    assert pending.explored is False
+    assert pending.epsilon == 0.0
+    assert float(pending.log_probability) == 0.0
+
+
+def test_the_uniform_branch_reaches_every_candidate():
+    torch.manual_seed(103)
+    agent = _agent(exploration={"map": 0.9})
+    observation = _observation(_map_state(3))
+
+    seen = set()
+    for _ in range(60):
+        seen.add(_explored_decision(agent, observation, explored=True).to_dict()["index"])
+        agent.discard_decision()
+
+    assert seen == {0, 1, 2}
+
+
+@pytest.mark.parametrize(
+    "exploration",
+    [
+        {"lobby": 0.3},
+        (("map", 0.1), ("map", 0.2)),
+        {"map": 1.0},
+        {"map": -0.1},
+        {"map": float("nan")},
+        {"map": float("inf")},
+    ],
+)
+def test_an_exploration_rate_names_a_known_screen_once_with_a_rate_below_one(exploration):
+    with pytest.raises(ValueError, match="exploration"):
+        PPOConfig(exploration=exploration)
+
+
+def test_exploration_rates_are_normalised_so_order_and_spelling_do_not_count():
+    assert PPOConfig(exploration={"map": 0.15, "rest_site": 0.3}) == PPOConfig(
+        exploration=[["rest_site", 0.3], ["map", 0.15]]
+    )
+    config = PPOConfig(exploration={"rest_site": 0.3, "map": 0.15})
+    assert config.exploration == (("map", 0.15), ("rest_site", 0.3))
+    assert config.exploration_rate("map") == 0.15
+    assert config.exploration_rate("card_reward") == 0.0
+    assert PPOConfig().exploration == ()
+
+
+def test_a_vanishing_rate_still_gives_a_finite_mixture_log_probability():
+    """epsilon / count underflows to zero for the smallest rate the config
+    accepts, and log(0) would raise where log(epsilon) - log(count) is finite."""
+    log_probability = _mixture_log_probability(torch.tensor(-1.0), 5e-324, 3)
+    assert math.isfinite(float(log_probability))
+    assert float(log_probability) == pytest.approx(-1.0)
+
+    torch.manual_seed(105)
+    agent = _agent(exploration={"map": 5e-324})
+    agent.choose_action(_observation(_map_state(3)))
+    pending = agent._lane(0).pending
+    assert pending.epsilon == 5e-324
+    assert math.isfinite(float(pending.log_probability))
+
+
+def test_the_ratio_after_a_step_is_the_mixture_at_the_new_logits_over_the_stored_one():
+    """One optimizer step moves the logits; the rollout keeps mu_old. Measured
+    again without stepping, every ratio is mu_new(a) / mu_old(a) with mu_new
+    formed from the new logits, and policy_kl is the policy's own movement."""
+    torch.manual_seed(106)
+    epsilon = 0.5
+    agent = _agent(
+        rollout_size=1000, update_epochs=1, minibatch_size=64,
+        exploration={"map": epsilon}, learning_rate=0.02,
+    )
+    observation = _observation(_map_state(3))
+    for index in range(6):
+        action = _explored_decision(agent, observation, explored=index % 2 == 0)
+        agent.observe(
+            Transition(
+                state=observation,
+                action=action,
+                reward=10.0 if index % 2 else -10.0,
+                next_state=observation,
+                done=index == 5,
+            )
+        )
+    steps = list(agent._lane(0).steps)
+    agent.update()
+    # The same rollout again, under a limit the moved policy cannot meet: the
+    # first minibatch measures it and stops before stepping.
+    agent.config = dataclasses.replace(agent.config, target_kl=1e-12)
+    agent._lane(0).steps.extend(steps)
+
+    metrics = agent.update()
+
+    assert metrics["kl_early_stop"] == 1.0 and metrics["optimizer_steps"] == 0.0
+    ratios, terms = [], []
+    for step in steps:
+        pi_new = _policy_probability(agent, step)
+        mu_new = (1.0 - epsilon) * pi_new + epsilon / len(step.decision.actions)
+        pi_old = math.exp(float(step.old_policy_log_probability))
+        mu_old = math.exp(float(step.old_log_probability))
+        ratios.append(mu_new / mu_old)
+        terms.append(_policy_kl_term(pi_old, mu_old, pi_new))
+    assert all(abs(ratio - 1.0) > 1e-3 for ratio in ratios)
+    assert metrics["approx_kl"] == pytest.approx(
+        sum((r - 1.0) - math.log(r) for r in ratios) / len(ratios), rel=1e-3
+    )
+    assert metrics["policy_kl"] == pytest.approx(sum(terms) / len(terms), rel=1e-3)
+
+
+@pytest.mark.parametrize(
+    ("ratio", "reward", "moves"),
+    [(1.5, 50.0, False), (1.5, -50.0, True), (0.5, -50.0, False), (0.5, 50.0, True)],
+)
+def test_the_clip_binds_on_the_mixture_ratio(ratio: float, reward: float, moves: bool):
+    """Past 1 +/- clip_ratio on the side the advantage favours, the surrogate
+    is the clipped constant: no gradient, and the step moves nothing."""
+    torch.manual_seed(107)
+    agent = _agent(rollout_size=1000, update_epochs=1, minibatch_size=8, exploration={"map": 0.5})
+    # The policy term alone, so nothing else can move a weight.
+    agent.config = dataclasses.replace(
+        agent.config, value_coefficient=0.0, entropy_coefficient=0.0
+    )
+    observation = _observation(_map_state(3))
+    action = _explored_decision(agent, observation, explored=True)
+    agent.observe(
+        Transition(
+            state=observation,
+            action=action,
+            reward=reward,
+            next_state=_observation({"state_type": "game_over"}),
+            done=True,
+        )
+    )
+    step = agent._lane(0).steps[0]
+    # The policy has not moved, so mu_new is the stored mu_old: shifting the
+    # stored value makes the update see exactly ``ratio``.
+    step.old_log_probability = step.old_log_probability - math.log(ratio)
+    before = {name: tensor.clone() for name, tensor in agent.game_encoder.state_dict().items()}
+
+    agent.update()
+
+    changed = any(
+        not torch.equal(agent.game_encoder.state_dict()[name], tensor)
+        for name, tensor in before.items()
+    )
+    assert changed is moves
+
+
+@pytest.mark.parametrize("target_kl", [0.02, 0.2])
+def test_the_kl_stop_reads_the_mixture_ratio_while_policy_kl_reads_the_policy(target_kl: float):
+    """Four times likelier under the current policy than under the one that
+    collected it, the action's mixture ratio moved far less than its policy
+    ratio: the stop fires on the former, the metric reports the latter."""
+    torch.manual_seed(108)
+    epsilon = 0.5
+    agent = _agent(
+        rollout_size=1000, update_epochs=1, minibatch_size=8,
+        target_kl=target_kl, exploration={"map": epsilon},
+    )
+    observation = _observation(_map_state(3))
+    action = _explored_decision(agent, observation, explored=True)
+    agent.observe(
+        Transition(state=observation, action=action, reward=1.0, next_state=observation, done=True)
+    )
+    step = agent._lane(0).steps[0]
+    pi_new = _policy_probability(agent, step)
+    pi_old, mu_old = _collected_by(step, pi_new / 4.0, epsilon)
+    mu_new = (1.0 - epsilon) * pi_new + epsilon / 3
+    mixture = (mu_new / mu_old - 1.0) - math.log(mu_new / mu_old)
+    policy = _policy_kl_term(pi_old, mu_old, pi_new)
+
+    metrics = agent.update()
+
+    assert metrics["approx_kl"] == pytest.approx(mixture, rel=1e-4)
+    assert metrics["policy_kl"] == pytest.approx(policy, rel=1e-4)
+    assert policy > 1.5 * target_kl, "the policy's own movement is over the limit either way"
+    assert metrics["kl_early_stop"] == float(mixture > 1.5 * target_kl)
+    assert metrics["kl_early_stop"] == (1.0 if target_kl == 0.02 else 0.0)
+    assert metrics["optimizer_steps"] == 1.0 - metrics["kl_early_stop"]
+
+
+def test_an_update_uses_the_reduced_candidate_count_of_an_excluded_decision():
+    torch.manual_seed(109)
+    epsilon = 0.5
+    agent = _agent(rollout_size=1000, update_epochs=1, minibatch_size=8, exploration={"map": epsilon})
+    observation = _observation(_map_state(3))
+    refused = GameAction("choose_map_node", index=1)
+    action = _explored_decision(agent, observation, explored=True, exclude=[refused])
+    agent.observe(
+        Transition(state=observation, action=action, reward=1.0, next_state=observation, done=True)
+    )
+    step = agent._lane(0).steps[0]
+    assert len(step.decision.actions) == 2
+    # Formed over the full set of three instead, the unmoved policy would not
+    # give ratio 1, so a zero KL below says N was the reduced count.
+    log_pi = _log_policy(agent, step.decision, step.action_index)
+    wrong = float(torch.exp(_mixture_log_probability(log_pi, epsilon, 3) - step.old_log_probability))
+    assert abs(wrong - 1.0) > 1e-3
+
+    metrics = agent.update()
+
+    assert metrics["approx_kl"] == pytest.approx(0.0, abs=1e-7)
+    assert metrics["policy_kl"] == pytest.approx(0.0, abs=1e-7)
+
+
+def test_decisions_crossing_an_update_are_trained_with_their_original_probabilities():
+    """A pending decision and a held open step both outlive an update. The next
+    one trains them against the probabilities they were sampled under -- so
+    their ratio is no longer 1 there, and the estimator stays finite."""
+    torch.manual_seed(110)
+    agent = _agent(rollout_size=4, hold_open_steps=True, exploration={"map": 0.5})
+    observation = _observation(_map_state(3))
+    # Lane 1: an explored decision awaiting its observation.
+    pending_action = _explored_decision(agent, observation, explored=True, lane=1)
+    pending = agent._lane(1).pending
+    sampled = (pending.log_probability.clone(), pending.policy_log_probability.clone())
+    # Lane 2: an explored decision, then a fight that holds it open.
+    held_action = _explored_decision(agent, observation, explored=True, lane=2)
+    agent.observe(
+        Transition(state=observation, action=held_action, reward=1.0, next_state=observation, done=False),
+        lane=2,
+    )
+    _unrecorded_fight_step(agent, 2, reward=0.5)
+    held = agent._lane(2).steps[0]
+    held_sampled = (held.old_log_probability.clone(), held.old_policy_log_probability.clone())
+    # Lane 0 fills the rollout with the policy's own draws, and the policy moves.
+    for index in range(4):
+        action = _explored_decision(agent, observation, explored=False)
+        agent.observe(
+            Transition(state=observation, action=action, reward=float(index), next_state=observation, done=index == 3)
+        )
+    assert agent.optimizer_updates == 1
+    assert agent.last_update["explored_steps"] == 0.0
+
+    agent.observe(
+        Transition(state=observation, action=pending_action, reward=1.0, next_state=observation, done=True),
+        lane=1,
+    )
+    crossed = agent._lane(1).steps[0]
+    _unrecorded_fight_step(agent, 2, reward=-0.01, done=True)
+    for index in range(2):
+        action = _explored_decision(agent, observation, explored=False)
+        agent.observe(
+            Transition(state=observation, action=action, reward=1.0, next_state=observation, done=index == 1)
+        )
+
+    assert agent.optimizer_updates == 2
+    metrics = agent.last_update
+    assert metrics["rollout_steps"] == 4.0
+    assert metrics["explored_steps"] == 2.0
+    assert torch.equal(crossed.old_log_probability, sampled[0])
+    assert torch.equal(crossed.old_policy_log_probability, sampled[1])
+    assert torch.equal(held.old_log_probability, held_sampled[0])
+    assert torch.equal(held.old_policy_log_probability, held_sampled[1])
+    assert crossed.epsilon == held.epsilon == 0.5
+    assert crossed.explored and held.explored
+    # Sampled before the first update and trained after it: a moved ratio.
+    assert metrics["approx_kl"] > 0.0
+    assert math.isfinite(metrics["policy_kl"]) and metrics["policy_kl"] > 0.0
+
+
+def test_folding_and_closing_an_episode_leave_the_exploration_record_alone():
+    torch.manual_seed(111)
+    agent = _agent(rollout_size=1000, hold_open_steps=True, exploration={"map": 0.5})
+    observation = _observation(_map_state(3))
+
+    for lane, truncated in ((0, False), (1, True)):
+        action = _explored_decision(agent, observation, explored=True, lane=lane)
+        agent.observe(
+            Transition(state=observation, action=action, reward=1.0, next_state=observation, done=False),
+            lane=lane,
+        )
+        step = agent._lane(lane).steps[0]
+        recorded = (
+            step.old_log_probability.clone(),
+            step.old_policy_log_probability.clone(),
+            step.epsilon,
+            step.explored,
+        )
+        if truncated:
+            agent.finish_episode(observation, truncated=True, lane=lane)  # _close_episode
+            assert step.episode_end and step.bootstrap_value is not None
+        else:
+            _unrecorded_fight_step(agent, lane, reward=-0.01, done=True)  # _fold, a terminal
+            assert step.done and step.episode_end
+        assert torch.equal(step.old_log_probability, recorded[0])
+        assert torch.equal(step.old_policy_log_probability, recorded[1])
+        assert (step.epsilon, step.explored) == (recorded[2], recorded[3]) == (0.5, True)

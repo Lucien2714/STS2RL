@@ -219,6 +219,15 @@ def create_parser() -> argparse.ArgumentParser:
         type=float,
         help="stop an update's epochs once the policy's approximate KL from the rollout policy passes 1.5x this (default: no limit)",
     )
+    parser.add_argument(
+        "--explore",
+        help=(
+            "comma-separated state_type=epsilon pairs, e.g. "
+            "rest_site=0.3,card_reward=0.3,map=0.15: on those screens the agent "
+            "takes a uniformly random candidate with that probability, and PPO "
+            "trains the mixture (default: none)"
+        ),
+    )
     parser.add_argument("--no-tensorboard", action="store_true", default=None)
     parser.add_argument("--tensorboard-flush-secs", type=int)
     return parser
@@ -501,6 +510,7 @@ def _new_plan(args: argparse.Namespace) -> TrainingPlan:
             rollout_size=_or_default(args.rollout_size, ppo_defaults.rollout_size),
             update_epochs=_or_default(args.update_epochs, ppo_defaults.update_epochs),
             target_kl=_or_default(args.target_kl, ppo_defaults.target_kl),
+            exploration=_exploration_list(args.explore),
         ),
         reset=ResetSpec(
             character=_or_default(args.character, reset_defaults.character),
@@ -588,6 +598,13 @@ def _resumed_plan(
         },
         normalize=lambda value: ",".join(_seed_list(value, ()) or ()),
     )
+    # A different exploration rate is a different experiment, like a different
+    # seed pool; the same mapping in another order or spelling is the same one.
+    _require_equal_overrides(
+        args,
+        {"explore": saved.ppo.exploration},
+        normalize=lambda value: PPOConfig(exploration=_exploration_list(value)).exploration,
+    )
     if (
         args.no_tensorboard is not None
         and (not args.no_tensorboard) != saved.training.tensorboard_enabled
@@ -657,6 +674,31 @@ def _port_list(value: object) -> tuple[int, ...]:
         except ValueError:
             raise ValueError(f"--ports expects numbers, got {part!r}") from None
     return tuple(ports)
+
+
+def _exploration_list(value: object) -> tuple[tuple[str, float], ...]:
+    """Parse ``--explore``: comma-separated ``state_type=epsilon`` pairs.
+
+    Only the shape is checked here. ``PPOConfig`` validates the screens and
+    the rates, and refuses a screen named twice.
+    """
+    if value is None:
+        return ()
+    pairs: list[tuple[str, float]] = []
+    for part in str(value).split(","):
+        part = part.strip()
+        if not part:
+            continue
+        screen, separator, rate = part.partition("=")
+        try:
+            if not separator:
+                raise ValueError
+            pairs.append((screen.strip(), float(rate)))
+        except ValueError:
+            raise ValueError(
+                f"--explore expects state_type=epsilon pairs, got {part!r}"
+            ) from None
+    return tuple(pairs)
 
 
 def _seed_list(value: object, bundled: tuple[str, ...]) -> tuple[str, ...]:

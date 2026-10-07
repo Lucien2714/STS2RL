@@ -9,6 +9,7 @@ from types import SimpleNamespace
 import pytest
 import torch
 
+from sts2rl.agents import PPOConfig
 from sts2rl.env import ResetSpec
 from sts2rl.training import TrainingConfig, TrainingPlan
 from sts2rl.training.config import DEFAULT_HOLDOUT_SEEDS, DEFAULT_SEED_POOL
@@ -492,3 +493,71 @@ def test_searched_fights_can_be_kept_out_of_the_rollout(tmp_path: Path):
     assert cli._new_plan(parser.parse_args(["--run-dir", str(tmp_path / "a"), *base])).training.search_fights_in_rollout
     out = cli._new_plan(parser.parse_args(["--run-dir", str(tmp_path / "b"), *base, "--search-fights-out-of-rollout"]))
     assert out.training.search_fights_in_rollout is False
+
+
+def test_exploration_rates_come_from_the_command_line(tmp_path: Path):
+    args = cli.create_parser().parse_args(
+        ["--run-dir", str(tmp_path / "run"), "--explore", "rest_site=0.3, card_reward=0.3,map=0.15"]
+    )
+
+    plan = cli._new_plan(args)
+
+    assert plan.ppo.exploration == (("card_reward", 0.3), ("map", 0.15), ("rest_site", 0.3))
+
+
+def test_exploration_is_off_unless_asked(tmp_path: Path):
+    args = cli.create_parser().parse_args(["--run-dir", str(tmp_path / "run")])
+    assert cli._new_plan(args).ppo.exploration == ()
+
+
+@pytest.mark.parametrize("value", ["rest_site", "rest_site=lots", "rest_site:0.3"])
+def test_a_malformed_exploration_rate_names_the_flag(tmp_path: Path, value: str):
+    args = cli.create_parser().parse_args(["--run-dir", str(tmp_path / "run"), "--explore", value])
+    with pytest.raises(ValueError, match="--explore"):
+        cli._new_plan(args)
+
+
+def test_an_unknown_screen_in_the_exploration_rates_is_refused(tmp_path: Path):
+    args = cli.create_parser().parse_args(["--run-dir", str(tmp_path / "run"), "--explore", "lobby=0.3"])
+    with pytest.raises(ValueError, match="unknown state type"):
+        cli._new_plan(args)
+
+
+def test_resume_inherits_the_exploration_rates(tmp_path: Path):
+    saved = TrainingPlan(
+        training=TrainingConfig(run_dir=tmp_path / "run"),
+        ppo=PPOConfig(exploration={"map": 0.15}),
+    )
+    args = cli.create_parser().parse_args(["--run-dir", str(tmp_path / "run"), "--resume", "latest"])
+
+    resumed = cli._resumed_plan(args, SimpleNamespace(plan=saved))  # type: ignore[arg-type]
+
+    assert resumed.ppo.exploration == (("map", 0.15),)
+
+
+def test_resume_refuses_a_changed_exploration_rate(tmp_path: Path):
+    """A different rate is a different experiment, like a different seed pool."""
+    saved = TrainingPlan(
+        training=TrainingConfig(run_dir=tmp_path / "run"),
+        ppo=PPOConfig(exploration={"map": 0.15}),
+    )
+    args = cli.create_parser().parse_args(
+        ["--run-dir", str(tmp_path / "run"), "--resume", "latest", "--explore", "map=0.3"]
+    )
+
+    with pytest.raises(ValueError, match="--explore cannot change"):
+        cli._resumed_plan(args, SimpleNamespace(plan=saved))  # type: ignore[arg-type]
+
+
+def test_resume_accepts_the_exploration_rates_it_was_saved_with_in_any_order(tmp_path: Path):
+    saved = TrainingPlan(
+        training=TrainingConfig(run_dir=tmp_path / "run"),
+        ppo=PPOConfig(exploration={"map": 0.15, "rest_site": 0.3}),
+    )
+    args = cli.create_parser().parse_args(
+        ["--run-dir", str(tmp_path / "run"), "--resume", "latest", "--explore", "rest_site=0.3,map=0.15"]
+    )
+
+    resumed = cli._resumed_plan(args, SimpleNamespace(plan=saved))  # type: ignore[arg-type]
+
+    assert resumed.ppo == saved.ppo
