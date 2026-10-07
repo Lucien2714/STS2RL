@@ -260,3 +260,33 @@ def test_evaluation_can_play_fights_with_the_search():
     wrapped = eval_cli._lane_agent(Agent(), 3, object(), searched)
     assert isinstance(wrapped, SearchCombatAgent)
     assert wrapped.lane == 3
+
+
+def test_holdout_seeds_can_be_named_when_the_checkpoint_recorded_none():
+    from types import SimpleNamespace
+
+    from sts2rl.training import eval_cli
+    from sts2rl.training.config import DEFAULT_HOLDOUT_SEEDS
+
+    training = SimpleNamespace(training_seeds=("A", "B"), holdout_seeds=())
+    parse = eval_cli.create_parser().parse_args
+
+    assert eval_cli._seed_pools(parse(["--run-dir", "r"]), training) == (("A", "B"), ())
+    args = parse(["--run-dir", "r", "--holdout-seeds", "default", "--pools", "holdout"])
+    assert eval_cli._seed_pools(args, training) == ((), DEFAULT_HOLDOUT_SEEDS)
+    args = parse(["--run-dir", "r", "--holdout-seeds", "X,Y"])
+    assert eval_cli._seed_pools(args, training) == (("A", "B"), ("X", "Y"))
+
+
+def test_a_named_holdout_seed_the_checkpoint_trained_on_is_refused():
+    """Even with --pools holdout, where the training pool is not played."""
+    from types import SimpleNamespace
+
+    from sts2rl.training import eval_cli
+
+    training = SimpleNamespace(training_seeds=("A", "B"), holdout_seeds=())
+    args = eval_cli.create_parser().parse_args(
+        ["--run-dir", "r", "--holdout-seeds", "B,X", "--pools", "holdout"]
+    )
+    with pytest.raises(ValueError, match="trained on"):
+        eval_cli._seed_pools(args, training)

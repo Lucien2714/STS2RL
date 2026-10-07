@@ -66,6 +66,15 @@ def create_parser() -> argparse.ArgumentParser:
         help="Which seed pools to play. 'both' is what makes the gap readable.",
     )
     parser.add_argument(
+        "--holdout-seeds",
+        help=(
+            "Comma-separated holdout seeds, or 'default' for the bundled set, "
+            "used in place of the ones the checkpoint records.  A run trained "
+            "without --holdout-seeds records none.  A seed the checkpoint "
+            "trained on is refused."
+        ),
+    )
+    parser.add_argument(
         "--output",
         type=Path,
         help="Write the per-episode scores and the summary here as JSON.",
@@ -127,12 +136,7 @@ def run_evaluation(args: argparse.Namespace) -> int:
     loaded = manager.load(args.checkpoint, map_location="cpu")
     plan = loaded.plan
 
-    training_seeds = plan.training.training_seeds
-    holdout_seeds = plan.training.holdout_seeds
-    if args.pools == "training":
-        holdout_seeds = ()
-    elif args.pools == "holdout":
-        training_seeds = ()
+    training_seeds, holdout_seeds = _seed_pools(args, plan.training)
     if not training_seeds and not holdout_seeds:
         raise ValueError(
             "the checkpoint records no seed pool, so there is nothing "
@@ -222,6 +226,29 @@ def run_evaluation(args: argparse.Namespace) -> int:
         )
         print(f"\nwrote {args.output}")
     return 0
+
+
+def _seed_pools(args: argparse.Namespace, training: object) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    """Return the (training, holdout) seeds to play, after --holdout-seeds and --pools."""
+    from sts2rl.training.cli import _seed_list
+    from sts2rl.training.config import DEFAULT_HOLDOUT_SEEDS
+
+    training_seeds = training.training_seeds  # type: ignore[attr-defined]
+    holdout_seeds = training.holdout_seeds  # type: ignore[attr-defined]
+    if args.holdout_seeds is not None:
+        holdout_seeds = _seed_list(args.holdout_seeds, DEFAULT_HOLDOUT_SEEDS)
+        # Checked against the recorded pool whatever --pools says: a seed the
+        # checkpoint trained on measures nothing as a holdout.
+        overlap = set(holdout_seeds) & set(training_seeds)
+        if overlap:
+            raise ValueError(
+                f"the checkpoint trained on these holdout seeds: {sorted(overlap)}"
+            )
+    if args.pools == "training":
+        holdout_seeds = ()
+    elif args.pools == "holdout":
+        training_seeds = ()
+    return training_seeds, holdout_seeds
 
 
 def _client_base_urls(args: argparse.Namespace, plan: object) -> tuple[str, ...]:
