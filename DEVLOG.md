@@ -337,3 +337,10 @@
 - 遇到的问题：先在 150 个训练 seed 上开始了冻结策略评估，按要求改为 holdout 后停止（约 10 局，不使用）。step2n/step2p 训练时没有传 --holdout-seeds，checkpoint 没有记录 holdout，sts2rl-eval 拒绝运行，所以加了 --holdout-seeds。driver 脚本的退出码记录有错（$(date) 在 $? 之前执行，所以总是 0），新 driver 已改。
 - 下一步：holdout 评估完成后按 seed 配对比较 4 个 checkpoint，选出起点，继续训练。
 - 需要 Lucien 决定的事：mod 的 Foul Potion 改动需要在真实游戏中测试后再部署；是否合并到 main。
+
+### 2026-10-07 05:58 (PT) · feat/mcts-combat
+- 做了什么：Step 2-r：在 30 个 holdout seed 上（每个 seed 3 局，argmax，MCTS 50 / boss 200）用冻结策略评估 step2n update_000102 和 step2p update_000060 / 000108 / 000164（runs/eval2p-holdout，20:39 ~ 22:55）。用 scripts/policy_probe.py 在人类录像的 1317 个宏观界面上探测 15 个 checkpoint 的动作概率。写 docs/mcts/step2r-holdout-eval.md；scripts/policy_probe.py、scripts/holdout_compare.py 入库。
+- 结果/数据：平均楼层 n102 23.92、p060 26.30、p108 25.42、p164 22.32（各 90 局）。同 seed 配对：p060 对 n102 +2.38（17 高 / 6 低，p = 0.035）；p164 对 p060 −3.98（6 高 / 20 低，p = 0.009）；p108 对 p060 −0.88（p = 0.69）。通关 0。探测：营火升级概率 0.01–0.04（人类 0.65），跳过选牌 0.00（人类 0.52），HP > 80% 时休息 0.83–0.94（人类 0.06），整个训练过程都没有变化。测试通过（816 个）。
+- 遇到的问题：22:43 模拟器被误停（等待脚本匹配了日志里上一次启动留下的 "all done" 行），n102 和 p060 各损失 2 和 6 局，已按 seed 重放补齐。BC 参考策略训练和 Codex 的 BC-KL 设计审查被 Claude Code 因内存不足停止，之后不再需要。
+- 下一步：从 update_000060 开始，加定向探索（营火 0.3、选牌奖励 0.3、地图 0.15），训练 3 个周期；每个周期末在 holdout 上评估并探测升级、跳过的概率。设计已交 Codex 审查（runs/codex/exploration_design.md）。
+- 需要 Lucien 决定的事：无（定向探索方案已由 Lucien 选定；mod 的 Foul Potion 改动仍待真实游戏测试）。
