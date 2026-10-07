@@ -9,6 +9,8 @@ import os
 from pathlib import Path
 from typing import Protocol
 
+from sts2rl.agents.ppo import STATE_TYPES
+
 
 class MetricsError(RuntimeError):
     """Raised when training metrics cannot be safely written or resumed."""
@@ -82,6 +84,8 @@ class TrainingMetricsWriter:
         # Present only on a run with a reference policy; absent keys are skipped.
         "reference_kl": "ppo/reference_kl",
         "reference_kl_mean": "ppo/reference_kl_mean",
+        # One per screen, present only where the reference term is in force.
+        **{f"reference_kl/{screen}": f"ppo/reference_kl/{screen}" for screen in STATE_TYPES},
     }
 
     def __init__(

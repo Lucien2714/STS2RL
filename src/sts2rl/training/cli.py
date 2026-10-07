@@ -255,6 +255,16 @@ def create_parser() -> argparse.ArgumentParser:
             "(default 0: no reference)"
         ),
     )
+    parser.add_argument(
+        "--reference-kl-screens",
+        help=(
+            "comma-separated state_type=beta pairs, e.g. rest_site=0.1,map=0.03: "
+            "the reference KL coefficient on those screens, replacing "
+            "--reference-kl there; 0 switches the reference off on that screen. "
+            "Needs --reference-policy once any coefficient is positive "
+            "(default: --reference-kl on every screen)"
+        ),
+    )
     parser.add_argument("--no-tensorboard", action="store_true", default=None)
     parser.add_argument("--tensorboard-flush-secs", type=int)
     return parser
@@ -347,7 +357,7 @@ def run_training(args: argparse.Namespace) -> int:
     tokenizer = GameTokenizer(vocabulary)
     encoder = GameEncoder(vocabulary, plan.encoder)
     reference_encoder: GameEncoder | None = None
-    if plan.ppo.reference_kl_coefficient > 0:
+    if plan.ppo.uses_reference:
         # Always from the run's own copy, new run or resumed, read once: the
         # bytes the digest was checked on are the bytes loaded, so what every
         # update pulls toward is the file the plan's digest names.
@@ -576,9 +586,12 @@ def _new_plan(args: argparse.Namespace) -> TrainingPlan:
             rollout_size=_or_default(args.rollout_size, ppo_defaults.rollout_size),
             update_epochs=_or_default(args.update_epochs, ppo_defaults.update_epochs),
             target_kl=_or_default(args.target_kl, ppo_defaults.target_kl),
-            exploration=_exploration_list(args.explore),
+            exploration=_screen_list(args.explore, "--explore", "epsilon"),
             reference_kl_coefficient=_or_default(
                 args.reference_kl, ppo_defaults.reference_kl_coefficient
+            ),
+            reference_kl_screens=_screen_list(
+                args.reference_kl_screens, "--reference-kl-screens", "beta"
             ),
         ),
         reset=ResetSpec(
@@ -670,10 +683,20 @@ def _resumed_plan(
     )
     # A different exploration rate is a different experiment, like a different
     # seed pool; the same mapping in another order or spelling is the same one.
+    # The per-screen reference coefficients are the same kind of setting.
     _require_equal_overrides(
         args,
         {"explore": saved.ppo.exploration},
-        normalize=lambda value: PPOConfig(exploration=_exploration_list(value)).exploration,
+        normalize=lambda value: PPOConfig(
+            exploration=_screen_list(value, "--explore", "epsilon")
+        ).exploration,
+    )
+    _require_equal_overrides(
+        args,
+        {"reference_kl_screens": saved.ppo.reference_kl_screens},
+        normalize=lambda value: PPOConfig(
+            reference_kl_screens=_screen_list(value, "--reference-kl-screens", "beta")
+        ).reference_kl_screens,
     )
     # A different reference is a different experiment too; the run reads its
     # own copy, so the path is only the record being kept honest.
@@ -803,11 +826,11 @@ def _port_list(value: object) -> tuple[int, ...]:
     return tuple(ports)
 
 
-def _exploration_list(value: object) -> tuple[tuple[str, float], ...]:
-    """Parse ``--explore``: comma-separated ``state_type=epsilon`` pairs.
+def _screen_list(value: object, flag: str, quantity: str) -> tuple[tuple[str, float], ...]:
+    """Parse a per-screen flag: comma-separated ``state_type=<quantity>`` pairs.
 
     Only the shape is checked here. ``PPOConfig`` validates the screens and
-    the rates, and refuses a screen named twice.
+    the numbers, and refuses a screen named twice.
     """
     if value is None:
         return ()
@@ -816,14 +839,14 @@ def _exploration_list(value: object) -> tuple[tuple[str, float], ...]:
         part = part.strip()
         if not part:
             continue
-        screen, separator, rate = part.partition("=")
+        screen, separator, number = part.partition("=")
         try:
             if not separator:
                 raise ValueError
-            pairs.append((screen.strip(), float(rate)))
+            pairs.append((screen.strip(), float(number)))
         except ValueError:
             raise ValueError(
-                f"--explore expects state_type=epsilon pairs, got {part!r}"
+                f"{flag} expects state_type={quantity} pairs, got {part!r}"
             ) from None
     return tuple(pairs)
 

@@ -855,6 +855,7 @@ def test_a_checkpoint_from_before_the_reference_existed_resumes_without_one(tmp_
     config = json.loads(config_path.read_text(encoding="utf-8"))
     for plan in (payload["training_plan"], config):
         del plan["ppo"]["reference_kl_coefficient"]
+        del plan["ppo"]["reference_kl_screens"]
         del plan["training"]["reference_policy"]
         del plan["training"]["reference_policy_sha256"]
     torch.save(payload, checkpoint)
@@ -864,6 +865,111 @@ def test_a_checkpoint_from_before_the_reference_existed_resumes_without_one(tmp_
 
     resumed = captured[1]
     assert resumed.plan.ppo.reference_kl_coefficient == 0.0
+    assert resumed.plan.ppo.reference_kl_screens == ()
     assert resumed.plan.training.reference_policy is None
     assert resumed.plan.training.reference_policy_sha256 is None
     assert resumed.agent.reference_encoder is None
+
+
+# ------------------------------------------- per-screen reference coefficients
+
+
+def test_per_screen_reference_coefficients_come_from_the_command_line(tmp_path: Path):
+    parse = cli.create_parser().parse_args
+
+    plan = cli._new_plan(parse(
+        ["--run-dir", str(tmp_path / "a"), "--reference-policy", "bc_best.pt",
+         "--reference-kl-screens", "rest_site=0.1, map=0.03,card_reward=0"]
+    ))
+
+    assert plan.ppo.reference_kl_screens == (("card_reward", 0.0), ("map", 0.03), ("rest_site", 0.1))
+    assert plan.ppo.reference_kl_coefficient == 0.0 and plan.ppo.uses_reference
+    # A screen at 0 under a global coefficient: the reference is off there alone.
+    mixed = cli._new_plan(parse(
+        ["--run-dir", str(tmp_path / "b"), "--reference-policy", "bc_best.pt",
+         "--reference-kl", "0.1", "--reference-kl-screens", "card_reward=0"]
+    ))
+    assert mixed.ppo.reference_kl_for("card_reward") == 0.0
+    assert mixed.ppo.reference_kl_for("shop") == 0.1
+    assert cli._new_plan(parse(["--run-dir", str(tmp_path / "c")])).ppo.reference_kl_screens == ()
+
+
+def test_per_screen_reference_coefficients_need_the_reference_too(tmp_path: Path):
+    parse = cli.create_parser().parse_args
+    with pytest.raises(ValueError, match="go together"):
+        cli._new_plan(parse(["--run-dir", str(tmp_path / "a"), "--reference-kl-screens", "rest_site=0.1"]))
+    with pytest.raises(ValueError, match="go together"):
+        cli._new_plan(parse(
+            ["--run-dir", str(tmp_path / "b"), "--reference-policy", "bc_best.pt",
+             "--reference-kl-screens", "rest_site=0"]
+        ))
+
+
+@pytest.mark.parametrize("value", ["rest_site", "rest_site=lots", "rest_site:0.1"])
+def test_a_malformed_per_screen_reference_coefficient_names_the_flag(tmp_path: Path, value: str):
+    args = cli.create_parser().parse_args(
+        ["--run-dir", str(tmp_path / "run"), "--reference-kl-screens", value]
+    )
+    with pytest.raises(ValueError, match="--reference-kl-screens"):
+        cli._new_plan(args)
+
+
+def test_an_unknown_screen_in_the_reference_coefficients_is_refused(tmp_path: Path):
+    args = cli.create_parser().parse_args(
+        ["--run-dir", str(tmp_path / "run"), "--reference-policy", "bc_best.pt",
+         "--reference-kl-screens", "lobby=0.1"]
+    )
+    with pytest.raises(ValueError, match="unknown state type"):
+        cli._new_plan(args)
+
+
+def test_resume_inherits_the_per_screen_coefficients_and_refuses_a_changed_mapping(tmp_path: Path):
+    saved = TrainingPlan(
+        training=TrainingConfig(
+            run_dir=tmp_path / "run", reference_policy="bc_best.pt", reference_policy_sha256="0" * 64
+        ),
+        ppo=PPOConfig(reference_kl_screens={"rest_site": 0.1, "map": 0.03}),
+    )
+    parse = cli.create_parser().parse_args
+    base = ["--run-dir", str(tmp_path / "run"), "--resume", "latest"]
+
+    resumed = cli._resumed_plan(parse(base), SimpleNamespace(plan=saved))  # type: ignore[arg-type]
+
+    assert resumed.ppo == saved.ppo
+    assert resumed.ppo.reference_kl_screens == (("map", 0.03), ("rest_site", 0.1))
+    for changed in ("rest_site=0.2,map=0.03", "rest_site=0.1", "rest_site=0.1,map=0.03,shop=0"):
+        with pytest.raises(ValueError, match="--reference-kl-screens cannot change"):
+            cli._resumed_plan(
+                parse([*base, "--reference-kl-screens", changed]), SimpleNamespace(plan=saved)  # type: ignore[arg-type]
+            )
+    same = cli._resumed_plan(
+        parse([*base, "--reference-kl-screens", "map=0.03, rest_site=0.1"]), SimpleNamespace(plan=saved)  # type: ignore[arg-type]
+    )
+    assert same.ppo == saved.ppo
+
+
+def test_a_run_with_only_per_screen_coefficients_loads_its_reference(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    artifact = _artifact(tmp_path)
+    captured = _capture_trainer(monkeypatch)
+    run = tmp_path / "run"
+    parse = cli.create_parser().parse_args
+
+    assert cli.run_training(parse(
+        ["--run-dir", str(run), "--no-tensorboard", *SMALL_ENCODER_FLAGS,
+         "--reference-policy", str(artifact), "--reference-kl-screens", "rest_site=0.1,card_reward=0"]
+    )) == 0
+
+    agent = captured[0].agent
+    assert agent.reference_encoder is not None
+    assert agent.config.reference_kl_coefficient == 0.0
+    assert agent.config.reference_kl_screens == (("card_reward", 0.0), ("rest_site", 0.1))
+    config = json.loads((run / "config.json").read_text(encoding="utf-8"))
+    assert config["ppo"]["reference_kl_screens"] == [["card_reward", 0.0], ["rest_site", 0.1]]
+    assert config["ppo"]["reference_kl_coefficient"] == 0.0
+    assert config["training"]["reference_policy_sha256"] == _sha256(artifact)
+    # Resumed, the mapping is inherited and the reference is loaded again.
+    assert cli.run_training(parse(["--run-dir", str(run), "--resume"])) == 0
+    assert captured[1].plan.ppo == captured[0].plan.ppo
+    assert captured[1].agent.reference_encoder is not None
+    with pytest.raises(ValueError, match="--reference-kl-screens cannot change"):
+        cli.run_training(parse(["--run-dir", str(run), "--resume", "--reference-kl-screens", "rest_site=0.3"]))

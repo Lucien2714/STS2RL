@@ -232,6 +232,14 @@ reads the copy from then on, and refuses a changed path or coefficient on
 resume. Both flags may name the same file as `--init-encoder`; `sts2rl-eval`
 needs neither the flags nor the artifact.
 
+The clone is only trustworthy on some screens, so the coefficient can be set
+per screen: `--reference-kl-screens rest_site=0.1,map=0.03` replaces
+`--reference-kl` on those screens and leaves the others on the global value,
+and a screen set to `0` is pulled nowhere even when the global coefficient is
+positive. The mapping is recorded in the plan and, like `--explore`, cannot
+change on resume. The metrics carry `reference_kl/<state_type>` for every
+screen the term is in force on.
+
 The saved artifact is the epoch with the **lowest holdout cross entropy** —
 not the last, and not the most accurate. Training accuracy keeps climbing after
 the holdout has turned, so the final weights would be the most overfitted of

@@ -157,8 +157,9 @@ class TrainingConfig:
     # decisions around them instead of entering the rollout as steps.
     search_fights_in_rollout: bool = True
     # The behavior-cloning artifact a reference KL pulls toward
-    # (``PPOConfig.reference_kl_coefficient``), as named on the command line
-    # and for the record only.  The run reads its own copy,
+    # (``PPOConfig.reference_kl_coefficient``, per screen
+    # ``PPOConfig.reference_kl_screens``), as named on the command line and
+    # for the record only.  The run reads its own copy,
     # ``<run_dir>/reference_policy.pt``, and records that copy's sha256 beside
     # it: a reference that changed under a run would change what every later
     # update pulls toward, with nothing in the metrics to say so, so resume
@@ -385,16 +386,14 @@ class TrainingPlan:
             raise ValueError(
                 "the simulator backend needs seeds; pass --seed-pool or --run-seed"
             )
-        if (self.ppo.reference_kl_coefficient > 0) != (
-            self.training.reference_policy is not None
-        ):
+        if self.ppo.uses_reference != (self.training.reference_policy is not None):
             # Either alone is a run that is silently not the experiment it
             # names: a coefficient with nothing to pull toward, or a reference
             # no update ever reads.
             raise ValueError(
-                "--reference-policy and --reference-kl go together: a positive "
-                "coefficient needs the reference it pulls toward, and a "
-                "reference without a coefficient is never read"
+                "--reference-policy and --reference-kl (or --reference-kl-screens) "
+                "go together: a positive coefficient needs the reference it pulls "
+                "toward, and a reference without a coefficient is never read"
             )
 
     def to_dict(self) -> dict[str, object]:

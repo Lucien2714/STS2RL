@@ -15,7 +15,7 @@ from torch import nn
 
 from sts2rl.actions import GameAction
 from sts2rl.agents import CandidatePPOAgent, NoLegalActionsError, PPOConfig, Transition
-from sts2rl.agents.ppo import _mixture_log_probability, _policy_step
+from sts2rl.agents.ppo import STATE_TYPES, _mixture_log_probability, _policy_step
 from sts2rl.encoder import (
     EncoderConfig,
     GameEncoder,
@@ -87,6 +87,7 @@ def _agent(
     exploration: Mapping[str, float] | tuple[tuple[str, float], ...] = (),
     learning_rate: float = 3e-4,
     reference_kl: float = 0.0,
+    reference_kl_screens: Mapping[str, float] | tuple[tuple[str, float], ...] = (),
     reference: nn.Module | None = None,
     encoder: nn.Module | None = None,
 ) -> CandidatePPOAgent:
@@ -105,6 +106,7 @@ def _agent(
             minibatch_size=minibatch_size,
             exploration=exploration,
             reference_kl_coefficient=reference_kl,
+            reference_kl_screens=reference_kl_screens,
         ),
         hold_open_steps=hold_open_steps,
         reference_encoder=reference,
@@ -1482,10 +1484,20 @@ def _log_policy(agent, decision: TokenizedDecision, action_index: int) -> torch.
     return torch.log_softmax(logits, dim=-1)[action_index]
 
 
-def _reference_run(exploration):
-    """A seeded rollout of eight map decisions, and the one update it fills."""
+def _reference_run(exploration=(), **options):
+    """A seeded rollout of eight map decisions, and the one update it fills.
+
+    ``options`` go to ``_agent`` over the defaults here: a reference policy
+    and its coefficients, or a minibatch size, for the runs pinned beside the
+    one without them.
+    """
     torch.manual_seed(90)
-    agent = _agent(rollout_size=8, update_epochs=1, minibatch_size=8, exploration=exploration)
+    agent = _agent(
+        **{
+            "rollout_size": 8, "update_epochs": 1, "minibatch_size": 8,
+            "exploration": exploration, **options,
+        }
+    )
     actions = []
     for index in range(8):
         observation = _observation(_map_state(3))
@@ -2211,6 +2223,26 @@ def _digest(tensor: torch.Tensor) -> dict:
     }
 
 
+def _assert_matches_baseline(agent, actions: list[int], baseline: dict) -> None:
+    """The run is the recorded one bit for bit: the actions, the generator's
+    state, every parameter and Adam tensor, and every recorded metric."""
+    assert actions == baseline["actions"]
+    assert _digest(torch.get_rng_state()) == baseline["rng"]
+    parameters = agent.game_encoder.state_dict()
+    assert set(parameters) == set(baseline["parameters"])
+    for name, tensor in parameters.items():
+        assert _digest(tensor) == baseline["parameters"][name], name
+    optimizer = agent.optimizer.state_dict()
+    assert json.loads(json.dumps(optimizer["param_groups"])) == baseline["optimizer"]["param_groups"]
+    assert {str(index) for index in optimizer["state"]} == set(baseline["optimizer"]["state"])
+    for index, entry in optimizer["state"].items():
+        recorded = baseline["optimizer"]["state"][str(index)]
+        assert set(entry) == set(recorded)
+        for name, value in entry.items():
+            assert _digest(value) == recorded[name], (index, name)
+    assert baseline["metrics"].items() <= agent.last_update.items()
+
+
 @pytest.mark.parametrize("key", ["plain", "explore_map"])
 def test_without_a_reference_the_run_is_bit_identical_to_the_base_commit(key: str):
     """``fixtures/ppo_baseline_85c6703.json`` is the seeded run of
@@ -2225,22 +2257,10 @@ def test_without_a_reference_the_run_is_bit_identical_to_the_base_commit(key: st
 
     agent, actions = _reference_run(baseline["exploration"] or ())
 
-    assert actions == baseline["actions"]
     assert agent.reference_encoder is None
     assert agent.config.reference_kl_coefficient == 0.0
-    assert _digest(torch.get_rng_state()) == baseline["rng"]
-    parameters = agent.game_encoder.state_dict()
-    assert set(parameters) == set(baseline["parameters"])
-    for name, tensor in parameters.items():
-        assert _digest(tensor) == baseline["parameters"][name], name
-    optimizer = agent.optimizer.state_dict()
-    assert json.loads(json.dumps(optimizer["param_groups"])) == baseline["optimizer"]["param_groups"]
-    assert {str(index) for index in optimizer["state"]} == set(baseline["optimizer"]["state"])
-    for index, entry in optimizer["state"].items():
-        recorded = baseline["optimizer"]["state"][str(index)]
-        assert set(entry) == set(recorded)
-        for name, value in entry.items():
-            assert _digest(value) == recorded[name], (index, name)
+    assert agent.config.reference_kl_screens == ()
+    _assert_matches_baseline(agent, actions, baseline)
     assert agent.last_update == baseline["metrics"]
 
 
@@ -2773,10 +2793,22 @@ def test_a_played_checkpoint_needs_no_reference():
     """``PPOConfig.without_reference`` is what the snapshot and boss scripts
     build a saved plan's agent with: sampled or argmaxed, never updated, so
     the artifact the run pulled toward is nothing to them."""
-    config = PPOConfig(reference_kl_coefficient=0.3, exploration={"map": 0.2}, rollout_size=10**9)
+    config = PPOConfig(
+        reference_kl_coefficient=0.3,
+        reference_kl_screens={"shop": 0.0, "map": 0.05},
+        exploration={"map": 0.2},
+        rollout_size=10**9,
+    )
     played = config.without_reference()
     assert played.reference_kl_coefficient == 0.0
-    assert dataclasses.replace(played, reference_kl_coefficient=0.3) == config
+    assert played.reference_kl_screens == ()
+    assert not played.uses_reference
+    assert (
+        dataclasses.replace(
+            played, reference_kl_coefficient=0.3, reference_kl_screens=config.reference_kl_screens
+        )
+        == config
+    )
     assert PPOConfig().without_reference() == PPOConfig()
 
     torch.manual_seed(139)
@@ -2839,3 +2871,282 @@ def test_a_non_finite_gradient_norm_refuses_the_step(beta: float):
     assert torch.equal(actor.logits.detach(), before)
     assert agent.optimizer_updates == 0
     assert not agent.optimizer.state
+
+
+# ------------------------------------------- per-screen reference coefficients
+
+REFERENCE_BASELINE = Path(__file__).parent / "fixtures" / "ppo_reference_baseline_5f64073.json"
+
+
+def _player() -> dict[str, object]:
+    return {
+        "character": "The Ironclad", "hp": 40, "max_hp": 80, "gold": 50,
+        "relics": [], "potions": [], "status": [],
+    }
+
+
+def _rest_site_state() -> dict[str, object]:
+    """A rest site offering rest and smith: two candidates."""
+    return {
+        "state_type": "rest_site",
+        "run": {"floor": 6},
+        "player": _player(),
+        "rest_site": {
+            "options": [{"index": 0, "id": "REST"}, {"index": 1, "id": "SMITH"}],
+            "can_proceed": False,
+        },
+    }
+
+
+def _card_reward_state(count: int = 2) -> dict[str, object]:
+    """A card reward of ``count`` cards and a skip: ``count + 1`` candidates."""
+    return {
+        "state_type": "card_reward",
+        "run": {"floor": 6},
+        "player": _player(),
+        "card_reward": {
+            "cards": [
+                {"index": index, "id": "UPPERCUT", "type": "Attack", "cost": "2", "rarity": "Uncommon"}
+                for index in range(count)
+            ],
+            "can_skip": True,
+        },
+    }
+
+
+def _decide(agent, observation, *, reward: float = 0.0, done: bool = False):
+    """One sampled decision on lane 0, observed; returns its rollout step."""
+    action = agent.choose_action(observation)
+    agent.observe(
+        Transition(state=observation, action=action, reward=reward, next_state=observation, done=done)
+    )
+    return agent._lane(0).steps[-1]
+
+
+@pytest.mark.parametrize("key", ["reference", "reference_minibatch_5", "plain"])
+def test_without_per_screen_coefficients_the_run_is_bit_identical_to_the_one_before_them(key: str):
+    """``fixtures/ppo_reference_baseline_5f64073.json`` is ``_reference_run``
+    under commit 5f64073, before a coefficient could be set per screen, with
+    a reference policy at a global coefficient of 0.1 and without one: the
+    same record as ``ppo_baseline_85c6703.json``, captured the same way. An
+    empty mapping must leave that path alone -- the run in progress on it
+    resumes onto the same experiment -- so the actions, the generator, every
+    parameter and every Adam tensor are checked bit for bit, and the metrics
+    gain only the per-screen keys. The minibatch of 5 is the run that tells
+    beta times the mean KL from the sum of the weighted terms over the count:
+    over 8 steps the division is exact and the two coincide, over 5 they
+    differ by an ulp that Adam's moments keep."""
+    baseline = json.loads(REFERENCE_BASELINE.read_text(encoding="utf-8"))["runs"][key]
+    beta = baseline["reference_kl_coefficient"]
+
+    agent, actions = _reference_run(
+        reference_kl=beta, reference=_reference_encoder() if beta else None, **baseline["options"]
+    )
+
+    assert agent.config.reference_kl_coefficient == beta
+    assert agent.config.reference_kl_screens == ()
+    assert agent.config.uses_reference is (beta > 0)
+    _assert_matches_baseline(agent, actions, baseline)
+    added = set(agent.last_update) - set(baseline["metrics"])
+    if beta:
+        # A global coefficient is in force on every screen, and the eight
+        # decisions were all on the map.
+        assert added == {f"reference_kl/{screen}" for screen in STATE_TYPES}
+        assert agent.last_update["reference_kl/map"] == baseline["metrics"]["reference_kl"]
+        assert all(
+            agent.last_update[f"reference_kl/{screen}"] == 0.0
+            for screen in STATE_TYPES
+            if screen != "map"
+        )
+    else:
+        assert added == set()
+
+
+def test_a_screen_with_a_coefficient_stores_the_reference_and_a_screen_at_zero_does_not():
+    """rest_site at 0.1 and card_reward at 0, no global coefficient: the
+    rest-site step carries pi_ref and is pulled on 0.1 * KL over the
+    minibatch's two policy steps; the card-reward step carries None, is not a
+    reference step, and the update asks nothing of it."""
+    torch.manual_seed(150)
+    agent = _agent(
+        rollout_size=1000, update_epochs=1, minibatch_size=64,
+        reference_kl_screens={"rest_site": 0.1, "card_reward": 0.0}, reference=_reference_encoder(),
+    )
+    config = agent.config
+    assert config.reference_kl_for("rest_site") == 0.1
+    assert config.reference_kl_for("card_reward") == 0.0 and config.reference_kl_for("map") == 0.0
+    assert config.uses_reference and config.reference_screens() == ("rest_site",)
+    agent.config = dataclasses.replace(config, value_coefficient=0.0, entropy_coefficient=0.0)
+    _zero_advantages(agent)
+    rest = _decide(agent, _observation(_rest_site_state()))
+    card = _decide(agent, _observation(_card_reward_state()), done=True)
+    assert rest.reference_log_probabilities is not None
+    assert rest.reference_log_probabilities.shape == (2,)
+    assert card.reference_log_probabilities is None
+    kl = _reference_kl_on(agent, [rest])
+
+    metrics = agent.update()
+
+    assert metrics["rollout_steps"] == 2.0
+    assert metrics["reference_steps"] == 1.0
+    assert metrics["reference_kl"] == pytest.approx(kl, rel=1e-5)
+    assert metrics["reference_kl_mean"] == pytest.approx(kl, rel=1e-5)
+    assert metrics["policy_loss"] == 0.0
+    assert metrics["loss"] == pytest.approx(0.1 * kl / 2, abs=1e-6)
+    assert {key for key in metrics if key.startswith("reference_kl/")} == {"reference_kl/rest_site"}
+    assert metrics["reference_kl/rest_site"] == pytest.approx(kl, rel=1e-5)
+
+
+def test_a_zero_override_switches_the_reference_off_on_its_screen_only():
+    torch.manual_seed(151)
+    agent = _agent(
+        rollout_size=1000, update_epochs=1, minibatch_size=64,
+        reference_kl=0.3, reference_kl_screens={"map": 0.0}, reference=_reference_encoder(),
+    )
+    config = agent.config
+    assert config.reference_kl_for("map") == 0.0 and config.reference_kl_for("rest_site") == 0.3
+    assert config.uses_reference
+    assert config.reference_screens() == tuple(screen for screen in STATE_TYPES if screen != "map")
+    map_step = _decide(agent, _observation(_map_state(3)))
+    rest_step = _decide(agent, _observation(_rest_site_state()), done=True)
+    assert map_step.reference_log_probabilities is None
+    assert rest_step.reference_log_probabilities is not None
+
+    metrics = agent.update()
+
+    assert metrics["rollout_steps"] == 2.0 and metrics["reference_steps"] == 1.0
+    assert "reference_kl/map" not in metrics
+    assert metrics["reference_kl/rest_site"] == pytest.approx(metrics["reference_kl"])
+    # Every screen at 0 under a positive global coefficient is no reference at all.
+    silent = PPOConfig(
+        reference_kl_coefficient=0.3, reference_kl_screens={screen: 0.0 for screen in STATE_TYPES}
+    )
+    assert not silent.uses_reference and silent.reference_screens() == ()
+    vocabulary = GameVocabulary.from_bundled_data()
+    with pytest.raises(ValueError, match="positive reference_kl_coefficient"):
+        CandidatePPOAgent(
+            GameTokenizer(vocabulary), GameEncoder(vocabulary, TEST_ENCODER),
+            config=silent, reference_encoder=_reference_encoder(),
+        )
+
+
+def test_an_override_alone_switches_the_reference_on_there_only():
+    torch.manual_seed(152)
+    config = PPOConfig(reference_kl_screens={"rest_site": 0.2})
+    assert config.reference_kl_coefficient == 0.0 and config.uses_reference
+    assert config.reference_screens() == ("rest_site",)
+    # With a reference the rest-site decision carries it and the map one does not ...
+    agent = _agent(reference_kl_screens={"rest_site": 0.2}, reference=_reference_encoder())
+    agent.choose_action(_observation(_map_state(3)))
+    assert agent._lane(0).pending.reference_log_probabilities is None
+    agent.discard_decision()
+    agent.choose_action(_observation(_rest_site_state()))
+    assert agent._lane(0).pending.reference_log_probabilities is not None
+    # ... and without one, only the screen that needs it is refused.
+    bare = _agent(reference_kl_screens={"rest_site": 0.2})
+    bare.choose_action(_observation(_map_state(3)))
+    assert bare._lane(0).pending.reference_log_probabilities is None
+    bare.discard_decision()
+    with pytest.raises(RuntimeError, match="reference policy"):
+        bare.choose_action(_observation(_rest_site_state()))
+    assert bare._lane(0).pending is None
+
+
+def test_the_weighted_term_averages_each_screen_coefficient_times_its_kl_over_the_policy_steps():
+    """map at 0.1, rest_site at 0.3 and card_reward on the global 0: the term
+    is (0.1 * KL_map + 0.3 * KL_rest) / 3 over the minibatch's three policy
+    steps, and the gradient on each step's logits is
+    beta_s * (pi_theta - pi_ref) / 3 -- zero on the card reward."""
+    torch.manual_seed(153)
+    coefficients = {"map": 0.1, "rest_site": 0.3}
+    agent = _agent(
+        rollout_size=1000, update_epochs=1, minibatch_size=64,
+        reference_kl_screens=coefficients, reference=_reference_encoder(),
+    )
+    agent.config = dataclasses.replace(
+        agent.config, value_coefficient=0.0, entropy_coefficient=0.0
+    )
+    _zero_advantages(agent)
+    # Candidate counts 4, 2 and 3, so each forward pass of the update is told
+    # apart by the length of its logits; the forced step is no policy step.
+    steps = [
+        _decide(agent, _observation(_map_state(4))),
+        _decide(agent, _observation(_rest_site_state())),
+        _decide(agent, _observation(_card_reward_state(2))),
+    ]
+    forced = _observation(_map_state(1))
+    agent.observe(
+        Transition(state=forced, action=agent.choose_action(forced), reward=0.0, next_state=forced, done=True)
+    )
+    assert [step.state_type for step in steps] == ["map", "rest_site", "card_reward"]
+    assert steps[2].reference_log_probabilities is None
+    kl = {step.state_type: _reference_kl_on(agent, [step]) for step in steps[:2]}
+    by_length = {len(step.decision.actions): step for step in steps}
+    captured: list[torch.Tensor] = []
+    original = agent.game_encoder.policy_value
+
+    def spy(decision):
+        output = original(decision)
+        output.logits.retain_grad()
+        captured.append(output.logits)
+        return output
+
+    agent.game_encoder.policy_value = spy
+
+    metrics = agent.update()
+
+    assert metrics["rollout_steps"] == 4.0 and metrics["reference_steps"] == 2.0
+    assert metrics["policy_loss"] == 0.0
+    assert metrics["loss"] == pytest.approx((0.1 * kl["map"] + 0.3 * kl["rest_site"]) / 3, abs=1e-6)
+    assert metrics["reference_kl"] == pytest.approx((kl["map"] + kl["rest_site"]) / 2, rel=1e-5)
+    assert metrics["reference_kl/map"] == pytest.approx(kl["map"], rel=1e-5)
+    assert metrics["reference_kl/rest_site"] == pytest.approx(kl["rest_site"], rel=1e-5)
+    assert "reference_kl/card_reward" not in metrics
+    assert len(captured) == 3
+    for logits in captured:
+        step = by_length[logits.numel()]
+        beta = coefficients.get(step.state_type, 0.0)
+        pi = torch.softmax(logits.detach(), dim=-1)
+        expected = (
+            beta * (pi - step.reference_log_probabilities.exp()) / 3 if beta else torch.zeros_like(pi)
+        )
+        gradient = logits.grad if logits.grad is not None else torch.zeros_like(pi)
+        assert torch.allclose(gradient, expected, atol=1e-6), step.state_type
+
+
+@pytest.mark.parametrize(
+    "screens",
+    [
+        {"lobby": 0.1},
+        (("map", 0.1), ("map", 0.2)),
+        {"map": -0.1},
+        {"map": float("nan")},
+        {"map": float("inf")},
+    ],
+)
+def test_a_per_screen_coefficient_names_a_known_screen_once_with_a_finite_non_negative_number(screens):
+    with pytest.raises(ValueError, match="reference_kl_screens"):
+        PPOConfig(reference_kl_screens=screens)
+
+
+@pytest.mark.parametrize("beta", ["0.1", True, None])
+def test_a_per_screen_coefficient_must_be_a_number(beta):
+    with pytest.raises(TypeError, match="reference_kl_screens"):
+        PPOConfig(reference_kl_screens={"map": beta})
+
+
+def test_per_screen_coefficients_are_normalised_so_order_and_spelling_do_not_count():
+    assert PPOConfig(reference_kl_screens={"map": 0.03, "rest_site": 0.1}) == PPOConfig(
+        reference_kl_screens=[["rest_site", 0.1], ["map", 0.03]]
+    )
+    config = PPOConfig(
+        reference_kl_coefficient=0.05, reference_kl_screens={"rest_site": 0.1, "map": 0.03, "shop": 0}
+    )
+    assert config.reference_kl_screens == (("map", 0.03), ("rest_site", 0.1), ("shop", 0.0))
+    assert config.reference_kl_for("map") == 0.03
+    assert config.reference_kl_for("rest_site") == 0.1
+    assert config.reference_kl_for("shop") == 0.0
+    assert config.reference_kl_for("card_reward") == 0.05
+    assert config.reference_screens() == tuple(screen for screen in STATE_TYPES if screen != "shop")
+    assert PPOConfig().reference_kl_screens == () and not PPOConfig().uses_reference
+    assert PPOConfig(reference_kl_coefficient=0.1).reference_screens() == tuple(STATE_TYPES)

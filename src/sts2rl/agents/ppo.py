@@ -20,36 +20,64 @@ from sts2rl.encoder import GameEncoder, GameTokenizer, GameVocabulary, Tokenized
 from sts2rl.env.types import GameObservation
 
 
-# Every screen the game reports, which is all an exploration rate can name.
+# Every screen the game reports, which is all a per-screen setting can name.
 STATE_TYPES = GameVocabulary.FIXED_TOKENS["state_types"]
 
 
-def _exploration_pairs(value: object) -> tuple[tuple[str, float], ...]:
-    """Normalise an exploration mapping into sorted ``(state_type, epsilon)`` pairs.
+def _screen_pairs(
+    value: object,
+    name: str,
+    quantity: str,
+    *,
+    within: Callable[[float], bool],
+    bounds: str,
+) -> tuple[tuple[str, float], ...]:
+    """Normalise a per-screen mapping into sorted ``(state_type, number)`` pairs.
 
     A mapping, a sequence of pairs, and the JSON reading of either arrive here,
     so a plan round-trips through ``asdict`` and ``from_dict`` unchanged and
-    two spellings of one mapping compare equal.
+    two spellings of one mapping compare equal. ``within`` is the range a
+    finite number must fall in, and ``bounds`` is how the error names it.
     """
     items = value.items() if isinstance(value, Mapping) else value
-    rates: dict[str, float] = {}
+    numbers: dict[str, float] = {}
     for item in items:
         try:
-            state_type, epsilon = item
+            state_type, number = item
         except (TypeError, ValueError):
-            raise ValueError("exploration must map state types to rates") from None
+            raise ValueError(f"{name} must map state types to {quantity}s") from None
         if state_type not in STATE_TYPES:
-            raise ValueError(f"exploration names an unknown state type: {state_type!r}")
-        if state_type in rates:
-            raise ValueError(f"exploration names {state_type!r} twice")
-        if isinstance(epsilon, bool) or not isinstance(epsilon, (int, float)):
-            raise TypeError(f"exploration rate for {state_type!r} must be a number")
-        if not math.isfinite(epsilon) or not 0 <= epsilon < 1:
-            raise ValueError(
-                f"exploration rate for {state_type!r} must be at least 0 and below 1"
-            )
-        rates[state_type] = float(epsilon)
-    return tuple(sorted(rates.items()))
+            raise ValueError(f"{name} names an unknown state type: {state_type!r}")
+        if state_type in numbers:
+            raise ValueError(f"{name} names {state_type!r} twice")
+        if isinstance(number, bool) or not isinstance(number, (int, float)):
+            raise TypeError(f"{name} {quantity} for {state_type!r} must be a number")
+        if not math.isfinite(number) or not within(number):
+            raise ValueError(f"{name} {quantity} for {state_type!r} must be {bounds}")
+        numbers[state_type] = float(number)
+    return tuple(sorted(numbers.items()))
+
+
+def _exploration_pairs(value: object) -> tuple[tuple[str, float], ...]:
+    """Sorted ``(state_type, epsilon)`` pairs: rates at least 0 and below 1."""
+    return _screen_pairs(
+        value,
+        "exploration",
+        "rate",
+        within=lambda epsilon: 0 <= epsilon < 1,
+        bounds="at least 0 and below 1",
+    )
+
+
+def _reference_pairs(value: object) -> tuple[tuple[str, float], ...]:
+    """Sorted ``(state_type, beta)`` pairs: coefficients that are 0 or more."""
+    return _screen_pairs(
+        value,
+        "reference_kl_screens",
+        "coefficient",
+        within=lambda beta: beta >= 0,
+        bounds="a finite number, 0 or more",
+    )
 
 
 @dataclass(frozen=True)
@@ -102,6 +130,20 @@ class PPOConfig:
     # KL stop: it is a pull toward the reference, not a reward. 0: no reference
     # is built, and the path is exactly the one without it.
     reference_kl_coefficient: float = 0.0
+    # The coefficient per screen, as sorted (state_type, beta) pairs, each
+    # replacing reference_kl_coefficient on its screen: 0 switches the
+    # reference off there whatever the global coefficient, and a positive one
+    # switches it on there alone. The reference is a human clone, and it is
+    # trustworthy on some screens and not others -- upgrading at high HP at a
+    # rest site and taking elites on the map, against 65% accuracy on card
+    # rewards and 40% in shops -- so one coefficient everywhere revived the
+    # collapsed options within 12 updates (upgrade 0.01 to 0.16, skip 0.00 to
+    # 0.66) and also pushed skipping a card reward past the reference's 0.62
+    # and the humans' 0.52, while the floor fell from 26.5 to 18.4 on the same
+    # seeds. Normalised like ``exploration``, so order and spelling do not
+    # count. Empty: reference_kl_coefficient on every screen, which is exactly
+    # the path from before this existed.
+    reference_kl_screens: tuple[tuple[str, float], ...] = ()
 
     def __post_init__(self) -> None:
         if self.rollout_size < 1 or self.update_epochs < 1:
@@ -126,6 +168,9 @@ class PPOConfig:
         ):
             raise ValueError("reference_kl_coefficient must be a finite number, 0 or more")
         object.__setattr__(self, "reference_kl_coefficient", float(beta))
+        object.__setattr__(
+            self, "reference_kl_screens", _reference_pairs(self.reference_kl_screens)
+        )
 
     def exploration_rate(self, state_type: str) -> float:
         """Return the epsilon in force on a screen, 0 where none is configured."""
@@ -134,16 +179,33 @@ class PPOConfig:
                 return epsilon
         return 0.0
 
+    def reference_kl_for(self, state_type: str) -> float:
+        """Return the reference coefficient in force on a screen: its own, else the global one."""
+        for screen, beta in self.reference_kl_screens:
+            if screen == state_type:
+                return beta
+        return self.reference_kl_coefficient
+
+    def reference_screens(self) -> tuple[str, ...]:
+        """The screens the reference term is in force on, in ``STATE_TYPES`` order."""
+        return tuple(screen for screen in STATE_TYPES if self.reference_kl_for(screen) > 0)
+
+    @property
+    def uses_reference(self) -> bool:
+        """Whether any screen pulls toward the reference, which the agent then needs."""
+        return bool(self.reference_screens())
+
     def without_reference(self) -> PPOConfig:
         """This configuration for an agent that only plays a checkpoint's actor.
 
         A script that samples or argmaxes a saved policy and never updates --
         capturing snapshots, playing boss fights -- has no use for the artifact
-        its run pulled toward and must not be made to find it: the coefficient
-        at 0 asks for no reference. Everything else is kept, so the exploration
-        rates and the rollout such an agent collects are still the run's.
+        its run pulled toward and must not be made to find it: every
+        coefficient at 0 asks for no reference. Everything else is kept, so
+        the exploration rates and the rollout such an agent collects are
+        still the run's.
         """
-        return replace(self, reference_kl_coefficient=0.0)
+        return replace(self, reference_kl_coefficient=0.0, reference_kl_screens=())
 
 
 @dataclass
@@ -164,8 +226,8 @@ class _PendingDecision:
     epsilon: float = 0.0
     explored: bool = False
     # log pi_ref(.|s) over these same candidates, for the reference KL. None
-    # where the term does not apply: a forced or external step, or no
-    # reference at all.
+    # where the term does not apply: a forced or external step, a screen
+    # whose coefficient is 0, or no reference at all.
     reference_log_probabilities: Tensor | None = None
 
 
@@ -316,12 +378,14 @@ class CandidatePPOAgent(Agent):
     next one (``_holds_open_step``). The first unrecorded step turns it on;
     passing it at construction also covers the first fight of each lane.
 
-    ``reference_encoder``: the frozen policy ``PPOConfig.reference_kl_coefficient``
-    pulls toward. Its parameters are its own -- never the trained encoder's,
-    never the optimizer's -- it is read only under ``no_grad``, and it stays in
-    eval mode whatever ``train`` does to the actor, so an update cannot move it.
-    Needed only to *train* with a positive coefficient: evaluation builds the
-    agent from a saved plan, never samples, and has no use for the artifact.
+    ``reference_encoder``: the frozen policy the reference term pulls toward
+    (``PPOConfig.reference_kl_coefficient``, per screen
+    ``PPOConfig.reference_kl_screens``). Its parameters are its own -- never
+    the trained encoder's, never the optimizer's -- it is read only under
+    ``no_grad``, and it stays in eval mode whatever ``train`` does to the
+    actor, so an update cannot move it. Needed only to *train* with a positive
+    coefficient on some screen: evaluation builds the agent from a saved plan,
+    never samples, and has no use for the artifact.
     """
 
     def __init__(
@@ -345,9 +409,10 @@ class CandidatePPOAgent(Agent):
             self.game_encoder.parameters(), lr=self.config.learning_rate
         )
         if reference_encoder is not None:
-            if not self.config.reference_kl_coefficient > 0:
+            if not self.config.uses_reference:
                 raise ValueError(
-                    "a reference policy needs a positive reference_kl_coefficient"
+                    "a reference policy needs a positive reference_kl_coefficient, "
+                    "globally or on a screen in reference_kl_screens"
                 )
             # Memory, not identity: nn.Parameter(actor_parameter.detach()) is
             # a new object on the actor's storage, and every optimizer step
@@ -486,10 +551,13 @@ class CandidatePPOAgent(Agent):
         well.
 
         With a reference policy, log pi_ref over that same set is stored
-        beside the sample: the update re-encodes the stored decision and the
-        reference KL compares the two over identical candidates. The reference
-        is read here rather than in the update because the reference encoder
-        never changes, so its one forward pass per decision is final.
+        beside the sample on every screen whose coefficient
+        (``PPOConfig.reference_kl_for``) is positive: the update re-encodes
+        the stored decision and the reference KL compares the two over
+        identical candidates. The reference is read here rather than in the
+        update because the reference encoder never changes, so its one forward
+        pass per decision is final. A screen whose coefficient is 0 reads
+        nothing and stores None, and the update asks nothing of such a step.
         """
         entry = self._lane(lane)
         if entry.pending is not None:
@@ -508,7 +576,7 @@ class CandidatePPOAgent(Agent):
         # The rate in force: only a real choice, made while learning, is mixed.
         # Evaluation and a forced step read no random number for it.
         epsilon = self.config.exploration_rate(state_type) if sampling else 0.0
-        reference = self._reference() if sampling else None
+        reference = self._reference(state_type) if sampling else None
         decision = self.tokenizer.tokenize_decision(state, candidates)
         with self._lock, torch.no_grad():
             on_device = decision.to(self.device)
@@ -559,22 +627,22 @@ class CandidatePPOAgent(Agent):
                 )
         return candidates[action_index]
 
-    def _reference(self) -> GameEncoder | None:
-        """Return the reference encoder if the coefficient calls for one.
+    def _reference(self, state_type: str) -> GameEncoder | None:
+        """Return the reference encoder if this screen's coefficient calls for one.
 
-        Checked here, on the first sampled decision, rather than at
-        construction: evaluation builds the agent from a saved plan whose
-        coefficient is positive and never samples, so the artifact need not
-        be there. Training without it would store no reference distribution
-        and the update would have nothing to pull toward, which is worth
-        failing before a rollout is collected.
+        Checked here, on the first sampled decision of such a screen, rather
+        than at construction: evaluation builds the agent from a saved plan
+        whose coefficient is positive and never samples, so the artifact need
+        not be there. Training without it would store no reference
+        distribution and the update would have nothing to pull toward, which
+        is worth failing before a rollout is collected.
         """
-        if not self.config.reference_kl_coefficient > 0:
+        if not self.config.reference_kl_for(state_type) > 0:
             return None
         if self.reference_encoder is None:
             raise RuntimeError(
                 "training with a reference KL needs a reference policy: pass "
-                "reference_encoder, or set reference_kl_coefficient to 0"
+                "reference_encoder, or set every reference KL coefficient to 0"
             )
         return self.reference_encoder
 
@@ -988,7 +1056,7 @@ class CandidatePPOAgent(Agent):
             metrics["rollout_steps"] = float(len(steps))
             metrics["optimizer_steps"] = float(optimizer_steps)
             metrics["kl_early_stop"] = float(stopped)
-            if self.config.reference_kl_coefficient > 0:
+            if self.config.uses_reference:
                 # Weighted over the minibatches that stepped, by the reference
                 # steps each was measured on. 0.0 after a stop on the first
                 # minibatch means nothing was measured, not that the policy is
@@ -1044,21 +1112,27 @@ class CandidatePPOAgent(Agent):
     ) -> dict[str, float]:
         """Run one clipped-surrogate optimizer step over a subset of the rollout.
 
-        The reference KL is formed on every policy step from the same
-        re-encoded logits the surrogate uses, on the policy itself -- an
-        explored screen trains the mixture's ratio, but the pull is toward
-        what the policy should put on each candidate, not what the mixture
-        does. It is averaged over the minibatch's policy steps and added to
-        the loss on its own coefficient; the surrogate, the advantage
-        normalisation and the KL stop never see it.
+        The reference KL is formed on every policy step of a screen with a
+        positive coefficient, from the same re-encoded logits the surrogate
+        uses, on the policy itself -- an explored screen trains the mixture's
+        ratio, but the pull is toward what the policy should put on each
+        candidate, not what the mixture does. Each step's KL is added to the
+        loss on its own screen's coefficient, averaged over the minibatch's
+        policy steps -- a step whose screen has no coefficient is one of
+        those steps and contributes nothing; the surrogate, the advantage
+        normalisation and the KL stop never see any of it.
         """
-        beta = self.config.reference_kl_coefficient
+        uses_reference = self.config.uses_reference
         policy_losses: list[Tensor] = []
         value_losses: list[Tensor] = []
         entropies: list[Tensor] = []
         kl_terms: list[Tensor] = []
         policy_kl_terms: list[Tensor] = []
+        # The KL of every reference step: unweighted for the metrics, on its
+        # coefficient for the loss, and by screen for the per-screen metrics.
         reference_kl_terms: list[Tensor] = []
+        weighted_reference_kl_terms: list[Tensor] = []
+        reference_kl_by_screen: dict[str, list[Tensor]] = {}
         for index in indices:
             step = steps[index]
             if not _policy_step(step):
@@ -1067,8 +1141,12 @@ class CandidatePPOAgent(Agent):
                 continue
             output = self.game_encoder.policy_value(step.decision.to(self.device))
             distribution = Categorical(logits=output.logits)
+            beta = self.config.reference_kl_for(step.state_type) if uses_reference else 0.0
             if beta > 0:
-                reference_kl_terms.append(self._reference_kl(step, output.logits))
+                reference_kl = self._reference_kl(step, output.logits)
+                reference_kl_terms.append(reference_kl)
+                weighted_reference_kl_terms.append(beta * reference_kl)
+                reference_kl_by_screen.setdefault(step.state_type, []).append(reference_kl.detach())
             action_index = torch.tensor(step.action_index, device=self.device)
             new_policy_log_probability = distribution.log_prob(action_index)
             old_log_probability = step.old_log_probability.to(self.device)
@@ -1132,13 +1210,28 @@ class CandidatePPOAgent(Agent):
             - self.config.entropy_coefficient * entropy
         )
         terms = [("policy_loss", policy_loss), ("value_loss", value_loss), ("entropy", entropy)]
-        if beta > 0:
+        if uses_reference:
             # A minibatch of forced and external steps alone has no reference
             # step, and contributes nothing rather than failing.
             reference_kl = torch.stack(reference_kl_terms).mean() if reference_kl_terms else zero
             if not bool(torch.isfinite(reference_kl)):
                 raise RuntimeError("the reference KL is not finite")
-            weighted_reference_kl = beta * reference_kl
+            if self.config.reference_kl_screens:
+                # Each step on its screen's coefficient, over the minibatch's
+                # policy steps, with the steps whose screen has none at 0.
+                weighted_reference_kl = (
+                    torch.stack(weighted_reference_kl_terms).sum() / len(policy_losses)
+                    if weighted_reference_kl_terms
+                    else zero
+                )
+            else:
+                # One coefficient everywhere, so every policy step is a
+                # reference step and the mean above is the one the loss takes.
+                # Formed as beta times that mean rather than as the sum of the
+                # weighted terms over the count: the two agree only to rounding,
+                # and this is the path every run without overrides trained on
+                # and resumes onto bit for bit.
+                weighted_reference_kl = self.config.reference_kl_coefficient * reference_kl
             loss = loss + weighted_reference_kl
             terms.append(("beta * reference_kl", weighted_reference_kl))
         if not bool(torch.isfinite(loss)):
@@ -1169,9 +1262,16 @@ class CandidatePPOAgent(Agent):
             "approx_kl": approx_kl,
             "policy_kl": policy_kl,
         }
-        if beta > 0:
+        if uses_reference:
             metrics["reference_kl"] = float(reference_kl.detach().cpu())
             metrics["reference_steps"] = float(len(reference_kl_terms))
+            # One key per screen the term is in force on, 0.0 when this
+            # minibatch held none of its steps -- like ``reference_kl`` itself.
+            for screen in self.config.reference_screens():
+                screen_terms = reference_kl_by_screen.get(screen)
+                metrics[f"reference_kl/{screen}"] = (
+                    float(torch.stack(screen_terms).mean().cpu()) if screen_terms else 0.0
+                )
         return metrics
 
     def _reference_kl(self, step: _RolloutStep, logits: Tensor) -> Tensor:
@@ -1187,7 +1287,8 @@ class CandidatePPOAgent(Agent):
         if reference is None:
             raise RuntimeError(
                 "a sampled decision carries no reference distribution; the "
-                "reference KL needs one on every policy step"
+                "reference KL needs one on every policy step of a screen with "
+                "a positive coefficient"
             )
         # Stored on the CPU, so this is a check and not a device synchronisation.
         if not bool(torch.isfinite(reference).all()):

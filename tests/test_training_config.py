@@ -9,6 +9,7 @@ import pytest
 import torch
 
 from sts2rl.agents import PPOConfig
+from sts2rl.agents.ppo import STATE_TYPES
 from sts2rl.encoder import EncoderConfig
 from sts2rl.env import ResetSpec
 from sts2rl.training import TrainingConfig, TrainingPlan, TrainingState
@@ -254,11 +255,59 @@ def test_an_invalid_reference_record_is_rejected(changes: dict[str, object]):
 def test_a_plan_saved_before_the_reference_existed_loads_without_it():
     values = TrainingPlan().to_dict()
     del values["ppo"]["reference_kl_coefficient"]
+    del values["ppo"]["reference_kl_screens"]
     del values["training"]["reference_policy"]
     del values["training"]["reference_policy_sha256"]
 
     plan = TrainingPlan.from_dict(values)
 
     assert plan.ppo.reference_kl_coefficient == 0.0
+    assert plan.ppo.reference_kl_screens == ()
     assert plan.training.reference_policy is None
     assert plan.training.reference_policy_sha256 is None
+
+
+def test_per_screen_reference_coefficients_survive_a_serialization_round_trip():
+    plan = TrainingPlan(
+        training=TrainingConfig(reference_policy="bc_best.pt", reference_policy_sha256="0" * 64),
+        ppo=PPOConfig(reference_kl_screens={"rest_site": 0.1, "map": 0.03}),
+    )
+
+    restored = TrainingPlan.from_dict(json.loads(json.dumps(plan.to_dict())))
+
+    assert restored == plan
+    assert restored.ppo.reference_kl_screens == (("map", 0.03), ("rest_site", 0.1))
+    assert restored.ppo.reference_kl_coefficient == 0.0
+    assert restored.ppo.uses_reference
+
+
+def test_a_per_screen_coefficient_needs_the_reference_and_screens_at_zero_need_none():
+    with pytest.raises(ValueError, match="go together"):
+        TrainingPlan(ppo=PPOConfig(reference_kl_screens={"rest_site": 0.1}))
+    with pytest.raises(ValueError, match="go together"):
+        TrainingPlan(
+            training=TrainingConfig(reference_policy="bc_best.pt"),
+            ppo=PPOConfig(reference_kl_screens={"rest_site": 0.0}),
+        )
+    # A global coefficient every screen overrides to 0 pulls nowhere either.
+    with pytest.raises(ValueError, match="go together"):
+        TrainingPlan(
+            training=TrainingConfig(reference_policy="bc_best.pt"),
+            ppo=PPOConfig(
+                reference_kl_coefficient=0.1,
+                reference_kl_screens={screen: 0.0 for screen in STATE_TYPES},
+            ),
+        )
+    plan = TrainingPlan(
+        training=TrainingConfig(reference_policy="bc_best.pt"),
+        ppo=PPOConfig(reference_kl_coefficient=0.1, reference_kl_screens={"card_reward": 0.0}),
+    )
+    assert plan.ppo.reference_kl_for("card_reward") == 0.0
+    assert plan.ppo.reference_kl_for("rest_site") == 0.1
+
+
+def test_a_plan_saved_before_per_screen_coefficients_existed_loads_without_them():
+    values = TrainingPlan().to_dict()
+    del values["ppo"]["reference_kl_screens"]
+
+    assert TrainingPlan.from_dict(values).ppo.reference_kl_screens == ()

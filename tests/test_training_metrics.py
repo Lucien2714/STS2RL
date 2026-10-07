@@ -9,6 +9,7 @@ from tensorboard.backend.event_processing.event_accumulator import EventAccumula
 
 import pytest
 
+from sts2rl.agents.ppo import STATE_TYPES
 from sts2rl.training import EpisodeMetrics, TrainingMetricsWriter
 from sts2rl.training import metrics as metrics_module
 from sts2rl.training.metrics import MetricsError
@@ -169,6 +170,27 @@ def test_reference_kl_metrics_reach_tensorboard_only_when_present(tmp_path: Path
     ]
     assert "reference_kl" not in records[0]
     assert records[1]["reference_steps"] == 4.0
+
+
+def test_per_screen_reference_kl_metrics_reach_tensorboard_for_every_screen(tmp_path: Path):
+    """``reference_kl/<state_type>`` has a tag for each screen the game
+    reports, and only the keys an update carries are mirrored."""
+    assert {f"reference_kl/{screen}" for screen in STATE_TYPES} <= set(TrainingMetricsWriter.PPO_TAGS)
+    fake = FakeSummaryWriter()
+    writer = TrainingMetricsWriter(
+        tmp_path, writer_factory=lambda **options: _capture_options(fake, options)
+    )
+
+    writer.log_ppo_update(
+        {"environment_steps": 12.0, "loss": 1.0, "reference_kl/rest_site": 0.4, "reference_kl/map": 0.0}
+    )
+    writer.close()
+
+    assert ("ppo/reference_kl/rest_site", 0.4, 12) in fake.scalars
+    assert ("ppo/reference_kl/map", 0.0, 12) in fake.scalars
+    assert not any(tag == "ppo/reference_kl/card_reward" for tag, _, _ in fake.scalars)
+    record = json.loads((tmp_path / "metrics.jsonl").read_text(encoding="utf-8").splitlines()[0])
+    assert record["reference_kl/rest_site"] == 0.4
 
 
 def _capture_options(
