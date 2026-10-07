@@ -29,3 +29,5 @@
 | Step 2-o：宝箱必须先拿遗物，再离开 | [step2o-treasure.md](step2o-treasure.md) | 2026-10-06 |
 | Step 2-p（修复）：PPO 更新时保留正在打战斗的决策 | [step2p-held-steps.md](step2p-held-steps.md) | 2026-10-06 |
 | Step 2-p（性能）：训练进程的 HTTP 开销（urllib3、restore 带 reseed） | [step2p-perf.md](step2p-perf.md) | 2026-10-06 |
+| Step 2-p（训练）：修复奖励归属之后，从最好的周期继续训练 450 局 | [step2p-training.md](step2p-training.md) | 2026-10-06 |
+| Step 2-q：商店里的 Foul Potion，以及被拒绝后不重复同一动作 | [step2q-foul-potion.md](step2q-foul-potion.md) | 2026-10-06 |
