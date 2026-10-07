@@ -33,3 +33,4 @@
 | Step 2-q：商店里的 Foul Potion，以及被拒绝后不重复同一动作 | [step2q-foul-potion.md](step2q-foul-potion.md) | 2026-10-06 |
 | Step 2-r：在 holdout seed 上评估四个 checkpoint，以及宏观策略的探测 | [step2r-holdout-eval.md](step2r-holdout-eval.md) | 2026-10-06 |
 | Step 2-s：定向探索（ε 混合采样；没有恢复塌缩的选项） | [step2s-exploration.md](step2s-exploration.md) | 2026-10-07 |
+| Step 2-t / 2-u：向人类克隆策略的 KL 约束（全局 β 失败；按界面 β 把升级概率从 0.01 拉到 0.27，楼层持平） | [step2tu-reference-kl.md](step2tu-reference-kl.md) | 2026-10-07 |
