@@ -88,6 +88,7 @@ def _agent(
     learning_rate: float = 3e-4,
     reference_kl: float = 0.0,
     reference_kl_screens: Mapping[str, float] | tuple[tuple[str, float], ...] = (),
+    reference_kl_min_hp: Mapping[str, float] | tuple[tuple[str, float], ...] = (),
     reference: nn.Module | None = None,
     encoder: nn.Module | None = None,
 ) -> CandidatePPOAgent:
@@ -107,6 +108,7 @@ def _agent(
             exploration=exploration,
             reference_kl_coefficient=reference_kl,
             reference_kl_screens=reference_kl_screens,
+            reference_kl_min_hp=reference_kl_min_hp,
         ),
         hold_open_steps=hold_open_steps,
         reference_encoder=reference,
@@ -3302,3 +3304,231 @@ def test_per_screen_coefficients_are_normalised_so_order_and_spelling_do_not_cou
     assert config.reference_screens() == tuple(screen for screen in STATE_TYPES if screen != "shop")
     assert PPOConfig().reference_kl_screens == () and not PPOConfig().uses_reference
     assert PPOConfig(reference_kl_coefficient=0.1).reference_screens() == tuple(STATE_TYPES)
+
+
+# ------------------------------------------------------ reference HP floors
+
+
+def _rest_site_at(hp: object, max_hp: object = 80) -> GameObservation:
+    """The two-candidate rest site with the player's HP set."""
+    state = _rest_site_state()
+    state["player"] = {**_player(), "hp": hp, "max_hp": max_hp}
+    return _observation(state)
+
+
+def _counting_reference() -> tuple[GameEncoder, list[int]]:
+    """A reference encoder that records the candidate count of every forward pass."""
+    reference = _reference_encoder()
+    calls: list[int] = []
+    original = reference.policy_value
+
+    def counting(decision):
+        calls.append(len(decision.actions))
+        return original(decision)
+
+    reference.policy_value = counting
+    return reference, calls
+
+
+def test_hp_floors_are_normalised_like_the_per_screen_coefficients():
+    config = PPOConfig(
+        reference_kl_screens={"rest_site": 0.3, "map": 0.1},
+        reference_kl_min_hp={"rest_site": 0.5, "map": 1},
+    )
+    assert config.reference_kl_min_hp == (("map", 1.0), ("rest_site", 0.5))
+    assert config == PPOConfig(
+        reference_kl_screens=[["map", 0.1], ["rest_site", 0.3]],
+        reference_kl_min_hp=[["rest_site", 0.5], ["map", 1.0]],
+    )
+    assert config.reference_hp_floor("rest_site") == 0.5
+    assert config.reference_hp_floor("card_reward") is None
+    assert PPOConfig().reference_kl_min_hp == ()
+    # Under a global coefficient alone, every screen has a pull to gate.
+    assert PPOConfig(
+        reference_kl_coefficient=0.1, reference_kl_min_hp={"shop": 0.25}
+    ).reference_kl_min_hp == (("shop", 0.25),)
+
+
+@pytest.mark.parametrize(
+    "floors",
+    [
+        {"rest_site": 0.0},
+        {"rest_site": -0.1},
+        {"rest_site": 1.01},
+        {"rest_site": float("nan")},
+        {"rest_site": float("inf")},
+        {"lobby": 0.5},
+        (("rest_site", 0.5), ("rest_site", 0.6)),
+    ],
+)
+def test_an_hp_floor_names_a_known_screen_once_with_a_fraction_in_zero_to_one(floors):
+    with pytest.raises(ValueError, match="reference_kl_min_hp"):
+        PPOConfig(reference_kl_coefficient=0.3, reference_kl_min_hp=floors)
+
+
+@pytest.mark.parametrize(
+    "coefficients",
+    [
+        {},
+        {"reference_kl_screens": {"map": 0.1}},
+        {"reference_kl_coefficient": 0.3, "reference_kl_screens": {"rest_site": 0.0}},
+    ],
+)
+def test_an_hp_floor_needs_a_positive_coefficient_on_its_screen(coefficients):
+    with pytest.raises(ValueError, match="HP floor on 'rest_site'"):
+        PPOConfig(reference_kl_min_hp={"rest_site": 0.5}, **coefficients)
+
+
+def test_without_reference_also_clears_the_hp_floors():
+    config = PPOConfig(reference_kl_screens={"rest_site": 0.3}, reference_kl_min_hp={"rest_site": 0.5})
+    played = config.without_reference()
+    assert played.reference_kl_min_hp == ()
+    assert not played.uses_reference
+    assert (
+        dataclasses.replace(
+            played,
+            reference_kl_screens=config.reference_kl_screens,
+            reference_kl_min_hp=config.reference_kl_min_hp,
+        )
+        == config
+    )
+
+
+def test_below_its_floor_a_decision_reads_no_reference_and_at_it_one_does():
+    """Floor 0.6 on rest_site: 40/80 HP stores None without a reference
+    forward pass; 48/80, exactly the floor, and full HP store pi_ref. The
+    map, with no floor, is untouched."""
+    torch.manual_seed(160)
+    reference, calls = _counting_reference()
+    agent = _agent(
+        reference_kl_screens={"rest_site": 0.3, "map": 0.1},
+        reference_kl_min_hp={"rest_site": 0.6},
+        reference=reference,
+    )
+
+    agent.choose_action(_rest_site_at(40))
+    pending = agent._lane(0).pending
+    assert pending.reference_log_probabilities is None and pending.reference_gated
+    assert calls == []
+    agent.discard_decision()
+    for hp in (48, 80):
+        agent.choose_action(_rest_site_at(hp))
+        pending = agent._lane(0).pending
+        assert pending.reference_log_probabilities is not None and not pending.reference_gated
+        assert pending.reference_log_probabilities.shape == (2,)
+        agent.discard_decision()
+    assert calls == [2, 2]
+    agent.choose_action(_observation(_map_state(3)))
+    assert agent._lane(0).pending.reference_log_probabilities is not None
+    assert calls == [2, 2, 3]
+
+
+@pytest.mark.parametrize(
+    "player",
+    [
+        None,
+        "not a player",
+        {"max_hp": 80},
+        {"hp": 80},
+        {"hp": None, "max_hp": 80},
+        {"hp": 80, "max_hp": 0},
+        {"hp": 80, "max_hp": -80},
+        {"hp": float("nan"), "max_hp": 80},
+        {"hp": 80, "max_hp": float("inf")},
+        {"hp": True, "max_hp": 1},
+        {"hp": "lots", "max_hp": 80},
+    ],
+)
+def test_unreadable_hp_on_a_screen_with_a_floor_reads_no_reference(player):
+    """HP that cannot be read is treated as below the floor: the reference is
+    wrong at low HP, so a decision at unknown HP is not one to pull on."""
+    torch.manual_seed(161)
+    reference, calls = _counting_reference()
+    agent = _agent(
+        reference_kl_screens={"rest_site": 0.3}, reference_kl_min_hp={"rest_site": 0.5}, reference=reference
+    )
+    state = _rest_site_state()
+    if player is None:
+        del state["player"]
+    elif isinstance(player, dict):
+        rest = {key: value for key, value in _player().items() if key not in ("hp", "max_hp")}
+        state["player"] = {**rest, **player}
+    else:
+        state["player"] = player
+
+    agent.choose_action(_observation(state))
+
+    pending = agent._lane(0).pending
+    assert pending.reference_log_probabilities is None and pending.reference_gated
+    assert calls == []
+
+
+def test_a_gated_decision_is_a_policy_step_the_reference_term_skips():
+    """Two rest-site decisions at a floor of 0.6, one at 20/80 HP and one at
+    80/80: the term is 0.3 * KL of the high one over both policy steps, only
+    the high one is a reference step, and the gated one is counted once."""
+    torch.manual_seed(162)
+    agent = _agent(
+        rollout_size=1000, update_epochs=2, minibatch_size=64,
+        reference_kl_screens={"rest_site": 0.3}, reference_kl_min_hp={"rest_site": 0.6},
+        reference=_reference_encoder(),
+    )
+    agent.config = dataclasses.replace(agent.config, value_coefficient=0.0, entropy_coefficient=0.0)
+    _zero_advantages(agent)
+    results = _spy_minibatches(agent)
+    low = _decide(agent, _rest_site_at(20))
+    high = _decide(agent, _rest_site_at(80), done=True)
+    assert low.reference_gated and low.reference_log_probabilities is None
+    assert not high.reference_gated and high.reference_log_probabilities is not None
+    kl = _reference_kl_on(agent, [high])
+
+    metrics = agent.update()
+
+    assert results[0]["loss"] == pytest.approx(0.3 * kl / 2, abs=1e-6)
+    assert results[0]["reference_steps"] == 1.0
+    assert metrics["rollout_steps"] == 2.0
+    # Once per epoch for the reference step, once per rollout for the gated one.
+    assert metrics["reference_steps/rest_site"] == 2.0
+    assert metrics["reference_gated/rest_site"] == 1.0
+
+
+def test_a_floor_under_the_global_coefficient_takes_the_weighted_path():
+    """A global 0.3 with no per-screen coefficients normally averages over
+    reference steps alone, because every policy step is one; with a gated
+    rest site that no longer holds, and the term is 0.3 * KL_map over both
+    policy steps."""
+    torch.manual_seed(163)
+    agent = _agent(
+        rollout_size=1000, update_epochs=1, minibatch_size=64,
+        reference_kl=0.3, reference_kl_min_hp={"rest_site": 0.6}, reference=_reference_encoder(),
+    )
+    agent.config = dataclasses.replace(agent.config, value_coefficient=0.0, entropy_coefficient=0.0)
+    _zero_advantages(agent)
+    map_step = _decide(agent, _observation(_map_state(3)))
+    rest_step = _decide(agent, _rest_site_at(20), done=True)
+    assert rest_step.reference_gated and not map_step.reference_gated
+    kl = _reference_kl_on(agent, [map_step])
+
+    metrics = agent.update()
+
+    assert metrics["loss"] == pytest.approx(0.3 * kl / 2, abs=1e-6)
+    assert metrics["reference_steps"] == 1.0
+    assert metrics["reference_gated/rest_site"] == 1.0
+    assert "reference_steps/rest_site" not in metrics
+
+
+def test_a_floor_leaves_evaluation_and_external_steps_alone():
+    torch.manual_seed(164)
+    reference, calls = _counting_reference()
+    agent = _agent(
+        reference_kl_screens={"rest_site": 0.3}, reference_kl_min_hp={"rest_site": 0.6}, reference=reference
+    )
+    observation = _rest_site_at(20)
+    action = agent.action_provider.require_candidates(observation.raw_state)[0]
+    agent.choose_external(observation, action)
+    pending = agent._lane(0).pending
+    assert pending.reference_log_probabilities is None and not pending.reference_gated
+    agent.discard_decision()
+    agent.train(False)
+    agent.choose_action(observation)
+    assert calls == []

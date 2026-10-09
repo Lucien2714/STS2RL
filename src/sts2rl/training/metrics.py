@@ -88,6 +88,9 @@ class TrainingMetricsWriter:
         # step of: that screen's mean KL, and the count it is over.
         **{f"reference_kl/{screen}": f"ppo/reference_kl/{screen}" for screen in STATE_TYPES},
         **{f"reference_steps/{screen}": f"ppo/reference_steps/{screen}" for screen in STATE_TYPES},
+        # Per screen with an HP floor: the rollout's decisions there that the
+        # floor kept the reference off.
+        **{f"reference_gated/{screen}": f"ppo/reference_gated/{screen}" for screen in STATE_TYPES},
     }
 
     def __init__(

@@ -16,7 +16,13 @@ from torch.nn import functional as F
 from sts2rl.actions import GameAction
 from sts2rl.agents.action_space import LegalActionProvider
 from sts2rl.agents.base import Agent, Transition, without_excluded
-from sts2rl.encoder import GameEncoder, GameTokenizer, GameVocabulary, TokenizedDecision
+from sts2rl.encoder import (
+    GameEncoder,
+    GameTokenizer,
+    GameVocabulary,
+    TokenizedDecision,
+    ratio_feature,
+)
 from sts2rl.env.types import GameObservation
 
 
@@ -77,6 +83,17 @@ def _reference_pairs(value: object) -> tuple[tuple[str, float], ...]:
         "coefficient",
         within=lambda beta: beta >= 0,
         bounds="a finite number, 0 or more",
+    )
+
+
+def _hp_floor_pairs(value: object) -> tuple[tuple[str, float], ...]:
+    """Sorted ``(state_type, fraction)`` pairs: HP fractions above 0 and at most 1."""
+    return _screen_pairs(
+        value,
+        "reference_kl_min_hp",
+        "HP fraction",
+        within=lambda fraction: 0 < fraction <= 1,
+        bounds="above 0 and at most 1",
     )
 
 
@@ -144,6 +161,19 @@ class PPOConfig:
     # count. Empty: reference_kl_coefficient on every screen, which is exactly
     # the path from before this existed.
     reference_kl_screens: tuple[tuple[str, float], ...] = ()
+    # An HP floor per screen, as sorted (state_type, fraction) pairs: on that
+    # screen a sampled decision carries the reference, and is pulled toward
+    # it, only while hp / max_hp is at or above the fraction. The clone does
+    # not condition on HP at a rest site -- it rests about a third of the
+    # time at every HP -- and at 0.3 on rest_site the policy copied that:
+    # rest probability 0.52/0.48/0.50 at HP below 50%, 50-80% and above 80%,
+    # against the humans' 0.62/0.19/0.06, the act 1 boss entered at 75% HP
+    # instead of 91%, and 4.6 floors lost on the same seeds. Below the floor
+    # the decision is left to the reward, which prices low HP by the run it
+    # ends. A floor needs a positive coefficient on its screen, since a floor
+    # on a screen with no pull is a mistake. Normalised like ``exploration``.
+    # Empty: no floor anywhere, exactly the path from before this existed.
+    reference_kl_min_hp: tuple[tuple[str, float], ...] = ()
 
     def __post_init__(self) -> None:
         if self.rollout_size < 1 or self.update_epochs < 1:
@@ -171,6 +201,15 @@ class PPOConfig:
         object.__setattr__(
             self, "reference_kl_screens", _reference_pairs(self.reference_kl_screens)
         )
+        object.__setattr__(
+            self, "reference_kl_min_hp", _hp_floor_pairs(self.reference_kl_min_hp)
+        )
+        for screen, _ in self.reference_kl_min_hp:
+            if not self.reference_kl_for(screen) > 0:
+                raise ValueError(
+                    f"reference_kl_min_hp sets an HP floor on {screen!r}, where "
+                    "the reference coefficient is 0: a floor needs a pull to gate"
+                )
 
     def exploration_rate(self, state_type: str) -> float:
         """Return the epsilon in force on a screen, 0 where none is configured."""
@@ -185,6 +224,13 @@ class PPOConfig:
             if screen == state_type:
                 return beta
         return self.reference_kl_coefficient
+
+    def reference_hp_floor(self, state_type: str) -> float | None:
+        """Return the HP fraction the reference needs on a screen, None where it needs none."""
+        for screen, fraction in self.reference_kl_min_hp:
+            if screen == state_type:
+                return fraction
+        return None
 
     def reference_screens(self) -> tuple[str, ...]:
         """The screens the reference term is in force on, in ``STATE_TYPES`` order."""
@@ -205,7 +251,12 @@ class PPOConfig:
         the exploration rates and the rollout such an agent collects are
         still the run's.
         """
-        return replace(self, reference_kl_coefficient=0.0, reference_kl_screens=())
+        return replace(
+            self,
+            reference_kl_coefficient=0.0,
+            reference_kl_screens=(),
+            reference_kl_min_hp=(),
+        )
 
 
 @dataclass
@@ -227,8 +278,12 @@ class _PendingDecision:
     explored: bool = False
     # log pi_ref(.|s) over these same candidates, for the reference KL. None
     # where the term does not apply: a forced or external step, a screen
-    # whose coefficient is 0, or no reference at all.
+    # whose coefficient is 0, HP below the screen's floor, or no reference.
     reference_log_probabilities: Tensor | None = None
+    # A sampled decision whose screen has a reference coefficient but whose HP
+    # was below that screen's floor, or unreadable: it carries no reference,
+    # and the update must not ask it for one (``PPOConfig.reference_kl_min_hp``).
+    reference_gated: bool = False
 
 
 @dataclass
@@ -248,6 +303,7 @@ class _RolloutStep:
     epsilon: float = 0.0
     explored: bool = False
     reference_log_probabilities: Tensor | None = None
+    reference_gated: bool = False
 
 
 @dataclass
@@ -566,6 +622,8 @@ class CandidatePPOAgent(Agent):
         update because the reference encoder never changes, so its one forward
         pass per decision is final. A screen whose coefficient is 0 reads
         nothing and stores None, and the update asks nothing of such a step.
+        Neither does a decision below its screen's HP floor
+        (``PPOConfig.reference_kl_min_hp``, ``_below_hp_floor``).
         """
         entry = self._lane(lane)
         if entry.pending is not None:
@@ -584,7 +642,8 @@ class CandidatePPOAgent(Agent):
         # The rate in force: only a real choice, made while learning, is mixed.
         # Evaluation and a forced step read no random number for it.
         epsilon = self.config.exploration_rate(state_type) if sampling else 0.0
-        reference = self._reference(state_type) if sampling else None
+        reference_gated = sampling and self._below_hp_floor(state, state_type)
+        reference = self._reference(state_type) if sampling and not reference_gated else None
         decision = self.tokenizer.tokenize_decision(state, candidates)
         with self._lock, torch.no_grad():
             on_device = decision.to(self.device)
@@ -632,8 +691,27 @@ class CandidatePPOAgent(Agent):
                     epsilon=epsilon,
                     explored=explored,
                     reference_log_probabilities=reference_log_probabilities,
+                    reference_gated=reference_gated,
                 )
         return candidates[action_index]
+
+    def _below_hp_floor(self, state: GameObservation, state_type: str) -> bool:
+        """Whether this screen's HP floor keeps the reference off this decision.
+
+        HP is read as the tokenizer reads ``hp_ratio``: both numbers finite
+        and ``max_hp`` positive. HP that cannot be read counts as below the
+        floor. The floor exists because the reference is wrong at low HP, so
+        a decision whose HP is unknown is one it cannot be trusted on, and
+        leaving it to the reward costs at most one decision's pull.
+        """
+        floor = self.config.reference_hp_floor(state_type)
+        if floor is None:
+            return False
+        player = state.raw_state.get("player")
+        if not isinstance(player, Mapping):
+            return True
+        fraction = ratio_feature(player.get("hp"), player.get("max_hp"))
+        return not fraction.present or fraction.value < floor
 
     def _reference(self, state_type: str) -> GameEncoder | None:
         """Return the reference encoder if this screen's coefficient calls for one.
@@ -747,6 +825,7 @@ class CandidatePPOAgent(Agent):
                         epsilon=entry.pending.epsilon,
                         explored=entry.pending.explored,
                         reference_log_probabilities=entry.pending.reference_log_probabilities,
+                        reference_gated=entry.pending.reference_gated,
                     )
                 )
                 entry.pending = None
@@ -1103,6 +1182,13 @@ class CandidatePPOAgent(Agent):
             metrics["return_scale"] = self._return_scale.scale
             metrics["held_steps"] = float(held_steps)
             metrics.update(self._exploration_metrics(steps, advantages))
+            # Counted over the rollout, like ``explore/<screen>``: each
+            # decision once, where ``reference_steps/<screen>`` counts a step
+            # once per epoch that trained on it.
+            for screen, _ in self.config.reference_kl_min_hp:
+                metrics[f"reference_gated/{screen}"] = float(
+                    sum(1 for step in steps if step.reference_gated and step.state_type == screen)
+                )
             for lane, count in zip(lanes, trained_counts):
                 del lane.steps[:count]
             self.last_update = metrics
@@ -1147,9 +1233,10 @@ class CandidatePPOAgent(Agent):
         ratio, but the pull is toward what the policy should put on each
         candidate, not what the mixture does. Each step's KL is added to the
         loss on its own screen's coefficient, averaged over the minibatch's
-        policy steps -- a step whose screen has no coefficient is one of
-        those steps and contributes nothing; the surrogate, the advantage
-        normalisation and the KL stop never see any of it.
+        policy steps -- a step whose screen has no coefficient, or that was
+        below its screen's HP floor, is one of those steps and contributes
+        nothing; the surrogate, the advantage normalisation and the KL stop
+        never see any of it.
 
         The metrics carry the reference steps' mean KL and count, and the
         same per screen for the screens this minibatch held a reference step
@@ -1176,7 +1263,7 @@ class CandidatePPOAgent(Agent):
             output = self.game_encoder.policy_value(step.decision.to(self.device))
             distribution = Categorical(logits=output.logits)
             beta = self.config.reference_kl_for(step.state_type) if uses_reference else 0.0
-            if beta > 0:
+            if beta > 0 and not step.reference_gated:
                 reference_kl = self._reference_kl(step, output.logits)
                 reference_kl_terms.append(reference_kl)
                 weighted_reference_kl_terms.append(beta * reference_kl)
@@ -1250,9 +1337,10 @@ class CandidatePPOAgent(Agent):
             reference_kl = torch.stack(reference_kl_terms).mean() if reference_kl_terms else zero
             if not bool(torch.isfinite(reference_kl)):
                 raise RuntimeError("the reference KL is not finite")
-            if self.config.reference_kl_screens:
+            if self.config.reference_kl_screens or self.config.reference_kl_min_hp:
                 # Each step on its screen's coefficient, over the minibatch's
-                # policy steps, with the steps whose screen has none at 0.
+                # policy steps, with the steps whose screen has none, or whose
+                # HP was below its screen's floor, at 0.
                 weighted_reference_kl = (
                     torch.stack(weighted_reference_kl_terms).sum() / len(policy_losses)
                     if weighted_reference_kl_terms
