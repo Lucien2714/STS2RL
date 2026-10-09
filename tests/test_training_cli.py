@@ -1011,3 +1011,115 @@ def test_a_checkpoint_from_before_per_screen_coefficients_resumes_on_its_global_
     # decision reads the reference.
     resumed.agent.choose_action(GameObservation(_rest_site()))
     assert resumed.agent._lane(0).pending.reference_log_probabilities is not None
+
+
+# ------------------------------------------------------ reference HP floors
+
+
+def test_hp_floors_come_from_the_command_line(tmp_path: Path):
+    parse = cli.create_parser().parse_args
+
+    plan = cli._new_plan(parse(
+        ["--run-dir", str(tmp_path / "a"), "--reference-policy", "bc_best.pt",
+         "--reference-kl-screens", "rest_site=0.3,map=0.1",
+         "--reference-kl-min-hp", "rest_site=0.8, map=0.5"]
+    ))
+
+    assert plan.ppo.reference_kl_min_hp == (("map", 0.5), ("rest_site", 0.8))
+    assert cli._new_plan(parse(["--run-dir", str(tmp_path / "b")])).ppo.reference_kl_min_hp == ()
+
+
+@pytest.mark.parametrize(
+    ("flags", "match"),
+    [
+        (["--reference-kl-min-hp", "rest_site"], "--reference-kl-min-hp"),
+        (["--reference-kl-min-hp", "rest_site=most"], "--reference-kl-min-hp"),
+        (["--reference-kl-min-hp", "rest_site=1.5"], "reference_kl_min_hp"),
+        (["--reference-kl-min-hp", "lobby=0.5"], "unknown state type"),
+        (["--reference-kl-min-hp", "shop=0.5"], "HP floor on 'shop'"),
+    ],
+)
+def test_a_bad_hp_floor_is_refused(tmp_path: Path, flags: list[str], match: str):
+    args = cli.create_parser().parse_args(
+        ["--run-dir", str(tmp_path / "run"), "--reference-policy", "bc_best.pt",
+         "--reference-kl-screens", "rest_site=0.3", *flags]
+    )
+    with pytest.raises(ValueError, match=match):
+        cli._new_plan(args)
+
+
+def test_resume_inherits_the_hp_floors_and_refuses_a_changed_mapping(tmp_path: Path):
+    saved = TrainingPlan(
+        training=TrainingConfig(
+            run_dir=tmp_path / "run", reference_policy="bc_best.pt", reference_policy_sha256="0" * 64
+        ),
+        ppo=PPOConfig(
+            reference_kl_screens={"rest_site": 0.3, "map": 0.1},
+            reference_kl_min_hp={"rest_site": 0.8},
+        ),
+    )
+    parse = cli.create_parser().parse_args
+    base = ["--run-dir", str(tmp_path / "run"), "--resume", "latest"]
+
+    resumed = cli._resumed_plan(parse(base), SimpleNamespace(plan=saved))  # type: ignore[arg-type]
+
+    assert resumed.ppo == saved.ppo
+    for changed in ("rest_site=0.7", "rest_site=0.8,map=0.5"):
+        with pytest.raises(ValueError, match="--reference-kl-min-hp cannot change"):
+            cli._resumed_plan(
+                parse([*base, "--reference-kl-min-hp", changed]), SimpleNamespace(plan=saved)  # type: ignore[arg-type]
+            )
+    # A floor the saved run's coefficients cannot take is refused as such.
+    with pytest.raises(ValueError, match="HP floor on 'shop'"):
+        cli._resumed_plan(
+            parse([*base, "--reference-kl-min-hp", "rest_site=0.8,shop=0.5"]), SimpleNamespace(plan=saved)  # type: ignore[arg-type]
+        )
+    same = cli._resumed_plan(
+        parse([*base, "--reference-kl-min-hp", " rest_site=0.80"]), SimpleNamespace(plan=saved)  # type: ignore[arg-type]
+    )
+    assert same.ppo == saved.ppo
+
+
+def test_a_run_with_hp_floors_keeps_them_across_a_checkpoint(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    artifact = _artifact(tmp_path)
+    captured = _capture_trainer(monkeypatch)
+    run = tmp_path / "run"
+    parse = cli.create_parser().parse_args
+
+    assert cli.run_training(parse(
+        ["--run-dir", str(run), "--no-tensorboard", *SMALL_ENCODER_FLAGS,
+         "--reference-policy", str(artifact), "--reference-kl-screens", "rest_site=0.3",
+         "--reference-kl-min-hp", "rest_site=0.8"]
+    )) == 0
+
+    assert captured[0].agent.config.reference_kl_min_hp == (("rest_site", 0.8),)
+    config = json.loads((run / "config.json").read_text(encoding="utf-8"))
+    assert config["ppo"]["reference_kl_min_hp"] == [["rest_site", 0.8]]
+    assert cli.run_training(parse(["--run-dir", str(run), "--resume"])) == 0
+    assert captured[1].plan.ppo == captured[0].plan.ppo
+    with pytest.raises(ValueError, match="--reference-kl-min-hp cannot change"):
+        cli.run_training(parse(["--run-dir", str(run), "--resume", "--reference-kl-min-hp", "rest_site=0.5"]))
+
+
+def test_a_checkpoint_from_before_hp_floors_resumes_without_them(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    artifact = _artifact(tmp_path)
+    captured = _capture_trainer(monkeypatch)
+    run = tmp_path / "run"
+    parse = cli.create_parser().parse_args
+    cli.run_training(parse(
+        ["--run-dir", str(run), "--no-tensorboard", *SMALL_ENCODER_FLAGS,
+         "--reference-policy", str(artifact), "--reference-kl-screens", "rest_site=0.3"]
+    ))
+    checkpoint = run / "checkpoints" / "update_000000.pt"
+    payload = torch.load(checkpoint, map_location="cpu", weights_only=True)
+    config_path = run / "config.json"
+    config = json.loads(config_path.read_text(encoding="utf-8"))
+    for plan in (payload["training_plan"], config):
+        del plan["ppo"]["reference_kl_min_hp"]
+    torch.save(payload, checkpoint)
+    config_path.write_text(json.dumps(config), encoding="utf-8")
+
+    assert cli.run_training(parse(["--run-dir", str(run), "--resume"])) == 0
+
+    assert captured[1].plan == captured[0].plan
+    assert captured[1].plan.ppo.reference_kl_min_hp == ()

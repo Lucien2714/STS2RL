@@ -265,6 +265,17 @@ def create_parser() -> argparse.ArgumentParser:
             "(default: --reference-kl on every screen)"
         ),
     )
+    parser.add_argument(
+        "--reference-kl-min-hp",
+        help=(
+            "comma-separated state_type=fraction pairs, e.g. rest_site=0.8: on "
+            "those screens a decision is pulled toward the reference only while "
+            "hp / max_hp is at or above the fraction; below it, or with HP "
+            "unknown, the reward alone decides. Each fraction is above 0 and at "
+            "most 1, and its screen needs a positive reference coefficient "
+            "(default: no floor)"
+        ),
+    )
     parser.add_argument("--no-tensorboard", action="store_true", default=None)
     parser.add_argument("--tensorboard-flush-secs", type=int)
     return parser
@@ -593,6 +604,9 @@ def _new_plan(args: argparse.Namespace) -> TrainingPlan:
             reference_kl_screens=_screen_list(
                 args.reference_kl_screens, "--reference-kl-screens", "beta"
             ),
+            reference_kl_min_hp=_screen_list(
+                args.reference_kl_min_hp, "--reference-kl-min-hp", "fraction"
+            ),
         ),
         reset=ResetSpec(
             character=_or_default(args.character, reset_defaults.character),
@@ -697,6 +711,17 @@ def _resumed_plan(
         normalize=lambda value: PPOConfig(
             reference_kl_screens=_screen_list(value, "--reference-kl-screens", "beta")
         ).reference_kl_screens,
+    )
+    # Normalised against the saved run's own coefficients, since a floor is
+    # only valid on a screen that has a pull; a floor the saved run could not
+    # take is refused there rather than compared.
+    _require_equal_overrides(
+        args,
+        {"reference_kl_min_hp": saved.ppo.reference_kl_min_hp},
+        normalize=lambda value: replace(
+            saved.ppo,
+            reference_kl_min_hp=_screen_list(value, "--reference-kl-min-hp", "fraction"),
+        ).reference_kl_min_hp,
     )
     # A different reference is a different experiment too; the run reads its
     # own copy, so the path is only the record being kept honest.

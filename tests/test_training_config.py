@@ -311,3 +311,25 @@ def test_a_plan_saved_before_per_screen_coefficients_existed_loads_without_them(
     del values["ppo"]["reference_kl_screens"]
 
     assert TrainingPlan.from_dict(values).ppo.reference_kl_screens == ()
+
+
+def test_hp_floors_survive_a_serialization_round_trip():
+    plan = TrainingPlan(
+        training=TrainingConfig(reference_policy="bc_best.pt", reference_policy_sha256="0" * 64),
+        ppo=PPOConfig(
+            reference_kl_screens={"rest_site": 0.3, "map": 0.1},
+            reference_kl_min_hp={"rest_site": 0.8, "map": 0.5},
+        ),
+    )
+
+    restored = TrainingPlan.from_dict(json.loads(json.dumps(plan.to_dict())))
+
+    assert restored == plan
+    assert restored.ppo.reference_kl_min_hp == (("map", 0.5), ("rest_site", 0.8))
+
+
+def test_a_plan_saved_before_hp_floors_existed_loads_without_them():
+    values = TrainingPlan().to_dict()
+    del values["ppo"]["reference_kl_min_hp"]
+
+    assert TrainingPlan.from_dict(values).ppo.reference_kl_min_hp == ()
