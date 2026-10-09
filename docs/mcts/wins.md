@@ -1,6 +1,6 @@
 # 通关记录
 
-每次通关追加一条。检查点和这一局的战斗记录保存在 `runs/wins/<seed>/`（`runs/` 不进 git，只在本机）；`info.json` 里有指标、检查点的 sha256 和三场 boss 战。保存用 `runs/tools/save_win.py <run> <局号>`：它复制覆盖这一局的检查点（开始前最后一个、局中的、结束后第一个），按局的步数找出这一局的战斗记录。同一个 seed 再次通关时保存到 `runs/wins/<seed>-ep<局号>/`。
+每次通关追加一条。检查点和这一局的战斗记录保存在 `runs/wins/<seed>/`（`runs/` 不进 git，只在本机）；`info.json` 里有指标、检查点的 sha256 和三场 boss 战。保存用 `runs/tools/save_win.py <run> <局号>`：它复制覆盖这一局的检查点（开始前最后一个、局中的、结束后第一个），按局的步数（允许差 2 步）和派发顺序（lane 内的局序号）找出这一局的战斗记录。`runs/step2w_win_saver.sh` 在训练中每 2 分钟自动运行它。同一个 seed 再次通关时保存到 `runs/wins/<seed>-ep<局号>/`。
 
 通关的判断：指标里没有胜利字段，打赢的 boss 数 =（奖励 −（楼层 − 1）+ 0.01 × 步数）/ 10，通关是 3。这些 run 每一幕只有一个 boss，所以 3 个 boss 奖励只能来自通关。
 
@@ -8,6 +8,8 @@
 |---|---|---|---|---|---|---|
 | 2026-10-09 | `JEQSXL4XVT` | `runs/step2w-plain10` | 2210（奖励 71.23，楼层 48，577 步） | Soul Fysh → The Insatiable → Aeonglass | 69/82 → 82/82 → 80/82 | `update_000742`（开始前）、`update_000748`（局中）、`update_000754`（结束后） |
 | 2026-10-09 | `3EH64E978B` | `runs/step2w-plain10` | 2285（周期 16） | Lagavulin Matriarch → The Insatiable → Aeonglass | 87/87 → 77/87 → 88/101 | `update_000772`（开始前）、`update_000778`（局中）、`update_000784`（结束后） |
+| 2026-10-09 | `3EH64E978B`（第二次） | `runs/step2w-plain10` | 2734（周期 19，奖励 72.37，463 步） | Lagavulin Matriarch → The Insatiable → Aeonglass | 87/87 → 40/87 → 85/101 | `update_000934`（开始前）、`update_000940`（局中）、`update_000946`（结束后）；保存在 `runs/wins/3EH64E978B-ep2734/` |
+| 2026-10-09 | `4UEVB4R020` | `runs/step2w-plain10` | 2746（周期 19，奖励 71.15，585 步） | Ceremonial Beast → Knowledge Demon → Aeonglass | 82/85 → 85/85 → 74/86 | `update_000934`（开始前）、`update_000940`、`update_000946`（局中）、`update_000952`（结束后） |
 
 ## 2026-10-09：第一次通关（`JEQSXL4XVT`）
 
@@ -23,3 +25,10 @@
 - 三场 boss 战都是满血或接近满血进入：Lagavulin Matriarch 87/87，The Insatiable 77/87，Aeonglass 88/101。
 - 两次通关的第 2、3 幕 boss 相同：The Insatiable 和 Aeonglass。
 - 这个 seed 在本 run 的 16 次对局：楼层 17、7、17、28、25、28、17、23、17、17、17、17、17、17、17、48（通关）。前 15 次有 10 次死在第 1 幕 boss，以前最高只到第 28 层。
+
+## 2026-10-09：第三、四次通关（周期 19）
+
+- 第 2734 局：`3EH64E978B` 第二次通关（第一次是第 2285 局）。这一次进入第 2 幕 boss 时只有 40/87 HP，仍然打赢了。
+- 第 2746 局：`4UEVB4R020`。这个 seed 以前两次死在第 3 幕 boss（第 196 局、第 1847 局）。
+- 四次通关的第 3 幕 boss 都是 Aeonglass。
+- 找战斗记录的规则改过两次：这两局的最后一个战斗决策和局的步数差 1（不是 2210、2285 那样的倒数第二步），而且按步数有两个候选（`s2124-lane8-12` 和 `s2124-lane5-59`），按派发顺序选出 `lane5-59`。
