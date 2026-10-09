@@ -379,3 +379,10 @@
 - 遇到的问题：Claude Code 因内存不足回收了 4 次等待脚本（空闲内存在探测时短暂 < 2.5 GB），训练未受影响；停掉 2 个空闲模拟器（15612、15613）后缓解。第 11–20 周期的 watcher 第一版把接续脚本日志里的 "first driver … exit 0" 当成训练结束而退出，已修复重起。第一次起训练误用了 WSL 的 bash.exe，立即失败，换 Git Bash 后正常。
 - 下一步：等 Lucien 指令。恢复命令：`uv run sts2rl-train --run-dir runs/step2w-plain10 --resume --total-episodes 3000`（先起 10 个模拟器 15600–15609）；或者就此收尾：写 docs/mcts/step2w-plain20.md，评估 p060（重评）、2-v 末、2-w 周期 2 末和最后一个 checkpoint 的 holdout。
 - 需要 Lucien 决定的事：Step 2-w 是继续到 20 个周期还是就此收尾；mod 的 Foul Potion 改动仍待真实游戏测试。
+
+### 2026-10-09 02:50 (PT) · feat/mcts-combat
+- 做了什么：按 Lucien 的指令恢复 Step 2-w（01:04，`--resume --total-episodes 3000`，从 `update_000718`、2124 局继续，10 个模拟器，新驱动日志 `runs/step2w-plain10.driver3.log`，周期记录脚本 `runs/step2w_cycle_record3.sh` 按最大局号判断周期边界）。第 2210 局通关，按指令保存 seed 和检查点：`runs/wins/JEQSXL4XVT/`（`update_000742/748/754`、这一局的 335 个战斗决策、`info.json`），记录写进 docs/mcts/wins.md。
+- 结果/数据：第一次通关：seed `JEQSXL4XVT`，第 2210 局，奖励 71.23，楼层 48，577 步，boss Soul Fysh → The Insatiable → Aeonglass（进入时 HP 53/82、27/82、21/82）。恢复后到第 2245 局：121 局，平均楼层 25.06，最高 50（第 2138 局，seed `6S8W3SPCTK`，死在第 3 幕 boss）。周期 15 前 140 局平均 24.69，同 seed 对周期 14 +1.17（p = 0.58）。截断 0，错误 0。
+- 遇到的问题：无。
+- 下一步：Step 2-w 继续到 3000 局（周期 15–20，约 11 小时，按约 75 局/小时）；结束后写 docs/mcts/step2w-plain20.md。
+- 需要 Lucien 决定的事：无。
