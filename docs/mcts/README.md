@@ -35,3 +35,5 @@
 | Step 2-s：定向探索（ε 混合采样；没有恢复塌缩的选项） | [step2s-exploration.md](step2s-exploration.md) | 2026-10-07 |
 | Step 2-t / 2-u：向人类克隆策略的 KL 约束（全局 β 失败；按界面 β 把升级概率从 0.01 拉到 0.27，楼层持平） | [step2tu-reference-kl.md](step2tu-reference-kl.md) | 2026-10-07 |
 | Step 2-v：从 p060 做 6 个周期的普通 PPO（13 个周期的同类训练都没有超过起点） | [step2v-plain6.md](step2v-plain6.md) | 2026-10-07 |
+| Step 2-w：从 Step 2-v 末尾继续 20 个周期的普通 PPO（平台期；第一批通关 4 局） | [step2w-plain20.md](step2w-plain20.md) | 2026-10-09 |
+| 通关记录 | [wins.md](wins.md) | 2026-10-09 |
