@@ -10,6 +10,7 @@
 | 2026-10-09 | `3EH64E978B` | `runs/step2w-plain10` | 2285（周期 16） | Lagavulin Matriarch → The Insatiable → Aeonglass | 87/87 → 77/87 → 88/101 | `update_000772`（开始前）、`update_000778`（局中）、`update_000784`（结束后） |
 | 2026-10-09 | `3EH64E978B`（第二次） | `runs/step2w-plain10` | 2734（周期 19，奖励 72.37，463 步） | Lagavulin Matriarch → The Insatiable → Aeonglass | 87/87 → 40/87 → 85/101 | `update_000934`（开始前）、`update_000940`（局中）、`update_000946`（结束后）；保存在 `runs/wins/3EH64E978B-ep2734/` |
 | 2026-10-09 | `4UEVB4R020` | `runs/step2w-plain10` | 2746（周期 19，奖励 71.15，585 步） | Ceremonial Beast → Knowledge Demon → Aeonglass | 82/85 → 85/85 → 74/86 | `update_000934`（开始前）、`update_000940`、`update_000946`（局中）、`update_000952`（结束后） |
+| 2026-10-10 | `4UEVB4R020`（第二次） | `runs/step2y-refkl-hp` | 2447（周期 17，奖励 71.96，504 步） | Ceremonial Beast → Knowledge Demon → Aeonglass | 80/80 → 80/80 → 80/80 | `update_000703`（开始前）、`update_000709`（局中）、`update_000715`（结束后）；保存在 `runs/wins/4UEVB4R020-step2y-refkl-hp-ep2447/` |
 
 ## 2026-10-09：第一次通关（`JEQSXL4XVT`）
 
@@ -32,3 +33,11 @@
 - 第 2746 局：`4UEVB4R020`。这个 seed 以前两次死在第 3 幕 boss（第 196 局、第 1847 局）。
 - 四次通关的第 3 幕 boss 都是 Aeonglass。
 - 找战斗记录的规则改过两次：这两局的最后一个战斗决策和局的步数差 1（不是 2210、2285 那样的倒数第二步），而且按步数有两个候选（`s2124-lane8-12` 和 `s2124-lane5-59`），按派发顺序选出 `lane5-59`。
+
+## 2026-10-10：第五次通关（Step 2-y 第一次，`4UEVB4R020`）
+
+- 训练：Step 2-y（`runs/step2y-refkl-hp`），从 Step 2-w 的 `update_001035` 开始，营火参考 KL β 0.3，只在 HP ≥ 50% 的营火界面生效（`--reference-kl-min-hp rest_site=0.5`），地图 β 0.03。
+- 周期 17 的第 2447 局，搜索记录 run id `s0-lane5-231`，这一局期间策略从第 707 次更新变到第 713 次更新。
+- 三场 boss 战都是满血进入（80/80）。boss 和 Step 2-w 第 2746 局的通关完全相同：Ceremonial Beast → Knowledge Demon → Aeonglass。
+- 这个 seed 在本 run 的 16 次对局：楼层 24、38、33、33、9、48、37、17、17、28、28、33、24、17、48、48（通关）。第 953 局和第 2298 局死在第 3 幕 boss。
+- 背景：这一局发生在第 10–14 周期的崩溃（选牌奖励几乎总是跳过，平均楼层约 15–16）之后，第 15–17 周期选牌恢复到拿卡约 0.65，楼层回到约 21–23。
