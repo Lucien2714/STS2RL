@@ -421,3 +421,10 @@
 - 遇到的问题：选牌奖励和商店上没有参考 KL，策略反复漂移，一次持续约 190 次更新；PPO 自己无法离开"总是跳过"的状态（熵约 0.01）。按 Lucien "不要停止训练"的规则跑完了 20 个周期。HP 门槛实现正确，但没有让休息按 HP 区分。
 - 下一步：等 Lucien 决定：给所有宏观界面加参考 KL 再训练；或先离线检查策略在营火上是否对 HP 有反应；或两个都做。
 - 需要 Lucien 决定的事：下一步的方向（见 docs/mcts/step2xy-refkl-hp.md 的"下一步"）。
+
+### 2026-10-10 16:45 (PT) · feat/mcts-combat
+- 做了什么：按 Lucien 的决定，不做参考 KL 的两个方案，改为继续 Step 2-w 的普通 PPO（没有参考 KL）。记为 Step 2-z：`runs/step2w-plain10` 从 update_001035（3000 局）`--resume --total-episodes 6000`，再跑 20 个周期（第 21–40 周期），其余设置都从 checkpoint 读取。16:38 启动，代码 a2c69fe，10 个模拟器。驱动 runs/step2z_driver.sh（日志 runs/step2w-plain10.driver4.log），周期记录和探测 runs/step2z_cycle_record.sh，通关自动保存 runs/step2z_win_saver.sh，报告脚本 runs/tools/step2z_tick.py、step2z_big.py。
+- 结果/数据：未完成。第 3001 局正常结束（第 14 层），截断 0，错误 0。
+- 遇到的问题：无。
+- 下一步：跑 20 个周期（按约 90 局/小时，约 33 小时）；每 5 分钟小报告、每 30 分钟大报告，每个周期末画图和探测；对照基准是 Step 2-w 第 15–20 周期（同 seed）。重点看平均楼层有没有持续上升、选牌跳过和营火升级会不会漂移。
+- 需要 Lucien 决定的事：无。
