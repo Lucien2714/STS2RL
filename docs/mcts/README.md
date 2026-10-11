@@ -37,4 +37,5 @@
 | Step 2-v：从 p060 做 6 个周期的普通 PPO（13 个周期的同类训练都没有超过起点） | [step2v-plain6.md](step2v-plain6.md) | 2026-10-07 |
 | Step 2-w：从 Step 2-v 末尾继续 20 个周期的普通 PPO（平台期；第一批通关 4 局） | [step2w-plain20.md](step2w-plain20.md) | 2026-10-09 |
 | Step 2-x / 2-y：营火参考 KL 和 HP 门槛（休息仍不按 HP 区分；选牌漂移，第 10–14 周期崩溃；−4.1 层；通关 2 局） | [step2xy-refkl-hp.md](step2xy-refkl-hp.md) | 2026-10-10 |
+| Step 2-z：从 Step 2-w 末尾继续普通 PPO 14 个周期（没有效果，−1.06 层，通关 0；选牌和商店反复漂移，"只买牌"让第 2 幕 boss 胜率降到 9%） | [step2z-plain-resume.md](step2z-plain-resume.md) | 2026-10-11 |
 | 通关记录 | [wins.md](wins.md) | 2026-10-09 |
