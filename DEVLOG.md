@@ -449,3 +449,10 @@
 - 遇到的问题：无。
 - 下一步：要比较模拟器和真实游戏，就在同一批 holdout seed 上各跑若干局（`--backend game` 对比 `--backend sim`）。
 - 需要 Lucien 决定的事：sts2_1 先保留新 mod，还是从备份恢复；新 mod 要不要部署到其他客户端（Foul Potion 改动还没按 docs/testing/foul-potion-shop.md 测过）。
+
+### 2026-10-23 20:54 (PT) · feat/mcts-combat
+- 做了什么：按 Lucien 的要求，在真实客户端（sts2_1，10 月 6 日的 mod）上用通关过的 checkpoint 和 seed 跑了一局。checkpoint 选 runs/step2w-plain10 的 `update_000940`：Step 2-w 第 2734 局（`3EH64E978B`）和第 2746 局（`4UEVB4R020`）两次通关时都用到了它（sha256 和 runs/wins/3EH64E978B-ep2734/ 里的副本相同）。seed 选 `3EH64E978B`（Step 2-w 通关两次）。`sts2rl-eval` 只能跑整个训练池，所以用了一个临时脚本（在会话 scratchpad 里，没进仓库），把 eval_cli 的 `_seed_pools` 换成只返回这一个 seed，其他和 `sts2rl-eval --backend game --episodes-per-seed 1` 相同。日志和结果在 runs/demo/win-3EH64E978B-u940.{log,json}。
+- 结果/数据：第 1 幕 boss 是 LAGAVULIN_MATRIARCH_BOSS，和模拟器里这个 seed 的通关记录相同，说明 seed 生效了。这一局到第 17 层（第 1 幕 boss）死亡，奖励 +14.59，141 步，没有截断和错误。没有复现通关：通关是在模拟器里由 MCTS 打战斗（普通和精英战 50 次，boss 战 200 次），真实游戏不能搜索，战斗只能由 actor 打，而 Step 2 训练时战斗不进 rollout。这个 seed 在 Step 2-w 的 16 局里有 11 局也停在第 17 层。
+- 遇到的问题：无。
+- 下一步：如果要在真实游戏里通关，战斗 actor 得先变强（比如 Step 3-a 的蒸馏，模拟器上 boss 胜率 6.1% → 15.6%）；或者先在模拟器上跑不带 --search-combat 的 eval，看 actor 自己能打到第几层。
+- 需要 Lucien 决定的事：sts2_1 先保留新 mod，还是从备份恢复。
