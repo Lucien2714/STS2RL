@@ -442,3 +442,10 @@
 - 遇到的问题：更正 08:40 条目——"在每个 minibatch 检查 KL 提前停止"代码里已经有了（agents/ppo.py:1316-1324，每个 minibatch 优化步之前检查）。普通 PPO 也会漂移，所以 Step 2-y 的选牌漂移不是参考 KL 引起的。
 - 下一步：等 Lucien 决定（见文档"下一步"）。
 - 需要 Lucien 决定的事：A 给所有宏观界面加参考 KL；B 降低学习率或改严 KL 检查；C 先离线检查营火对 HP 的反应；D 查 Aeonglass 0/17。可以组合。
+
+### 2026-10-23 20:50 (PT) · feat/mcts-combat
+- 做了什么：检查 STS2RL 能不能在真实游戏客户端上跑演示。按 Lucien 的指令，把 D:\sts2depot\sts2_1 的 mod 换成 STS2MCP-foul 的 10 月 6 日编译版（feat/shop-foul-potion，带 `run.boss` 和商店扔 Foul Potion），`instant_mode` 改为 false；原来的 9 月 10 日版本（dll、pdb、conf、deps、manifest）备份到 D:\sts2depot\sts2_1\STS2_MCP-backup-20260910（放在 mods 外面，免得游戏把它当成第二个 mod 加载）。sts2_2..6 和 Steam 安装目录没有改，还是 9 月 10 日版本。然后用 Step 2-z 最后的 checkpoint（runs/step2w-plain10 `update_001772`）跑了一局真实客户端演示：`sts2rl-eval --backend game --ports 15526 --pools holdout --holdout-seeds 1HV0TDQF9C --episodes-per-seed 1`，日志和结果在 runs/demo/demo-20261023.{log,json}。
+- 结果/数据：989 个测试通过。真实游戏 reset 正常（custom 模式开局），新 mod 在每个界面都发 `run.boss`（这局是 SOUL_FYSH_BOSS）。这一局：holdout seed `1HV0TDQF9C`，楼层 17，奖励 +14.15，185 步，正常结束（死亡），没有截断，也没有客户端错误。这是 10 月 6 日换成 urllib3 之后第一次连真实 mod，没出问题。只有 1 局，不能和模拟器的平均楼层比。
+- 遇到的问题：无。
+- 下一步：要比较模拟器和真实游戏，就在同一批 holdout seed 上各跑若干局（`--backend game` 对比 `--backend sim`）。
+- 需要 Lucien 决定的事：sts2_1 先保留新 mod，还是从备份恢复；新 mod 要不要部署到其他客户端（Foul Potion 改动还没按 docs/testing/foul-potion-shop.md 测过）。
