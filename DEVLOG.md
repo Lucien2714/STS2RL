@@ -470,3 +470,10 @@
 - 遇到的问题：第一次启动游戏时 Steam 还没起来，游戏弹出 Steam 初始化错误后退出，Steam 起来后重新启动正常。实机结果里多出一条空的 episode 记录：第一次 reset 失败被 Evaluator 重试时，`ShadowEnv` 把失败的那次也算成了一局；已改为 reset 成功后才开新记录，并加了测试。
 - 下一步：影子同步多跑几局（多个 seed、多个客户端），统计同步能保持多久，并和模拟器上同 seed 的楼层对比；之后再决定蒸馏战斗 actor 还是先稳住宏观策略。
 - 需要 Lucien 决定的事：feat/shadow-search 是否合并到 feat/mcts-combat；sts2_1 保留新 mod 还是恢复备份；宏观漂移的处理方向（见 docs/mcts/step2z-plain-resume.md 的 A/B/C/D）。
+
+### 2026-10-27 01:10 (PT) · feat/shadow-search
+- 做了什么：影子同步在 sts2_1 上再跑 5 个 seed（runs/step2w-plain10 `update_000940`，普通和精英战 50 次模拟、boss 战 200 次，每个 seed 1 局）：训练 seed `4UEVB4R020`，holdout `1HV0TDQF9C`、`1PC2R1GS0T`、`2022RDHNEP`、`89WSDV9QQG`。同时在模拟器后端（15621）用同一个 checkpoint、同样的搜索设置，把这 5 个 seed 加上 `3EH64E978B` 各跑 3 局作对照。结果在 runs/demo/shadow-multi-u940.{log,json} 和 runs/demo/simref-multi-u940.{log,json}。查了两次分开的原因；影子的 fingerprint 改为按种类、价格、库存区分商店物品（84a8e82）。跑完后停掉了两个模拟器，游戏客户端还开着。
+- 结果/数据：楼层（真实游戏 1 局 | 模拟器 3 局）：`3EH64E978B` 17（上一条） | 33、33、17；`4UEVB4R020` 48（打过 2 个 boss，死在第 3 幕 boss） | 48、48、17；`1HV0TDQF9C` 33 | 33、33、33；`1PC2R1GS0T` 33 | 12、33、17；`2022RDHNEP` 17 | 17、17、17；`89WSDV9QQG` 12 | 12、12、12。真实游戏 6 局平均 26.67，模拟器 18 局平均 24.67；每个 seed 的真实结果都等于模拟器 3 局中的至少 1 局。`4UEVB4R020` 是真实客户端第一次打过第 1 幕和第 2 幕 boss；`1HV0TDQF9C` 之前不带搜索只到第 17 层，这次 33。同步：6 局里 4 局全程一致（132/132、552/552、157/157、121/121 个决策）；2 局中途放弃：`1HV0TDQF9C` 第 30 层第 245 个决策（商店删牌后真实游戏在 card_select、模拟器在 shop），`1PC2R1GS0T` 第 22 层第 223 个决策（假商人：真实游戏在 fake_merchant 买了 FAKE_HAPPY_FLOWER 和 FAKE_VENERABLE_TEA_SET、少 96 金币，模拟器在 event、只有 PROCEED）；放弃之后由 actor 打，两局都死在第 2 幕 boss。没有截断和错误。测试 1004 个通过，ruff 通过。
+- 遇到的问题：两次分开都是模拟器缺的功能，不是随机数分叉。(1) 模拟器没有 fake_merchant 界面，把假商人当成普通事件（STS2Simulator 源码里没有 fake_merchant），所以训练里也从没在假商人买过东西。(2) 商店删牌：用新 fingerprint 回放人类录像 `B9JUVT9B2D`，第 22 层删牌后真实游戏的删牌服务变成 is_stocked false（价格 37，金币 50→13），模拟器扣了同样的 37 金币但删牌服务仍是 is_stocked true。旧 fingerprint 不比较遗物、药水、删牌（这些物品没有 id，全是 None），所以之前那局回放"一致到第 27 层"其实在第 22 层已经不一致。
+- 下一步：在 STS2Simulator 修这两处（假商人界面；删牌后售罄），修完再跑影子同步。
+- 需要 Lucien 决定的事：是否修模拟器的这两处；feat/shadow-search 是否合并到 feat/mcts-combat；sts2_1 保留新 mod 还是恢复备份。
