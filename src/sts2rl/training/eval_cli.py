@@ -12,6 +12,7 @@ from sts2rl.agents import CandidatePPOAgent, EpisodeRunner
 from sts2rl.encoder import GameEncoder, GameTokenizer, GameVocabulary
 from sts2rl.env import DEFAULT_ACTION_DELAY_SECONDS, GameEnv
 from sts2rl.env.game_env import BACKENDS
+from sts2rl.search.shadow import ShadowEnv
 from sts2rl.training.checkpoint import CheckpointManager
 from sts2rl.training.evaluate import (
     Evaluator,
@@ -75,6 +76,13 @@ def create_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--only-seeds",
+        help=(
+            "Comma-separated seeds: play only these, from whichever pool holds "
+            "them.  A seed in neither pool is refused."
+        ),
+    )
+    parser.add_argument(
         "--output",
         type=Path,
         help="Write the per-episode scores and the summary here as JSON.",
@@ -84,8 +92,17 @@ def create_parser() -> argparse.ArgumentParser:
         action="store_true",
         help=(
             "play every fight with the combat search instead of the actor (needs "
-            "--backend sim), so two macro policies are compared under the same "
-            "combat play"
+            "--backend sim, or --shadow-sims beside real clients), so two macro "
+            "policies are compared under the same combat play"
+        ),
+    )
+    parser.add_argument(
+        "--shadow-sims",
+        help=(
+            "Comma-separated simulator base URLs, one per --ports client: each "
+            "follows its real client's run so its fights can be searched "
+            "(--backend game with --search-combat).  A fight the copy no longer "
+            "matches is played by the actor."
         ),
     )
     parser.add_argument("--search-simulations", type=int, default=50)
@@ -96,8 +113,18 @@ def create_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def _lane_agent(agent: CandidatePPOAgent, lane: int, env: GameEnv, args: argparse.Namespace):
-    """The lane's agent: the actor alone, or with the combat search playing fights."""
+def _lane_agent(
+    agent: CandidatePPOAgent,
+    lane: int,
+    env: GameEnv,
+    args: argparse.Namespace,
+    gate=None,
+):
+    """The lane's agent: the actor alone, or with the combat search playing fights.
+
+    ``env`` is the simulator the search branches on; beside a real client it is
+    the shadow copy, and ``gate`` is the copy's agreement check.
+    """
     view = agent.lane_view(lane)
     if not args.search_combat:
         return view
@@ -117,6 +144,7 @@ def _lane_agent(agent: CandidatePPOAgent, lane: int, env: GameEnv, args: argpars
     return SearchCombatAgent(
         view, env, search, run_label=f"eval-lane{lane}",
         room_simulations={room: n for room, n in rooms.items() if n is not None},
+        gate=gate,
     )
 
 
@@ -169,8 +197,12 @@ def run_evaluation(args: argparse.Namespace) -> int:
         # not a speedup: actions land while the game is still resolving.
         delay = 0.0 if backend == "sim" else DEFAULT_ACTION_DELAY_SECONDS
 
-    if args.search_combat and backend != "sim":
-        raise ValueError("--search-combat needs the simulator backend: only it can branch")
+    shadow_urls = _shadow_urls(args, backend, len(base_urls))
+    if args.search_combat and backend != "sim" and not shadow_urls:
+        raise ValueError(
+            "--search-combat needs the simulator backend, or --shadow-sims "
+            "beside real clients: only a simulator can branch"
+        )
     with ExitStack() as clients:
         env_for = [
             clients.enter_context(
@@ -187,10 +219,25 @@ def run_evaluation(args: argparse.Namespace) -> int:
             )
             for base_url in base_urls
         ]
+        shadows = [
+            ShadowEnv(
+                env_for[lane],
+                clients.enter_context(
+                    GameEnv(base_url=url, timeout=timeout, action_delay_seconds=0.0, backend="sim")
+                ),
+            )
+            for lane, url in enumerate(shadow_urls)
+        ]
         runners = [
             EpisodeRunner(
-                env_for[lane],
-                _lane_agent(agent, lane, env_for[lane], args),
+                shadows[lane] if shadows else env_for[lane],
+                _lane_agent(
+                    agent,
+                    lane,
+                    shadows[lane].sim if shadows else env_for[lane],
+                    args,
+                    gate=shadows[lane].agrees if shadows else None,
+                ),
                 max_steps=plan.training.max_steps_per_episode,
                 max_state_refreshes=plan.training.max_state_refreshes,
             )
@@ -208,6 +255,12 @@ def run_evaluation(args: argparse.Namespace) -> int:
         scores = evaluator.run(schedule)
 
     print(format_report(scores))
+    following = [
+        {"lane": lane, "episodes": shadow.finish()} for lane, shadow in enumerate(shadows)
+    ]
+    for lane in following:
+        for number, record in enumerate(lane["episodes"], start=1):
+            print(f"shadow lane {lane['lane']} episode {number}: " + json.dumps(record, sort_keys=True))
     if args.output is not None:
         args.output.parent.mkdir(parents=True, exist_ok=True)
         args.output.write_text(
@@ -218,6 +271,7 @@ def run_evaluation(args: argparse.Namespace) -> int:
                     "episodes_per_seed": args.episodes_per_seed,
                     "episodes": [score.to_dict() for score in scores],
                     "summary": summarize(scores),
+                    **({"shadow": following} if following else {}),
                 },
                 indent=2,
                 sort_keys=True,
@@ -248,7 +302,30 @@ def _seed_pools(args: argparse.Namespace, training: object) -> tuple[tuple[str, 
         holdout_seeds = ()
     elif args.pools == "holdout":
         training_seeds = ()
+    if args.only_seeds:
+        wanted = tuple(part.strip() for part in str(args.only_seeds).split(",") if part.strip())
+        unknown = set(wanted) - set(training_seeds) - set(holdout_seeds)
+        if unknown:
+            raise ValueError(f"not in the pools being played: {sorted(unknown)}")
+        training_seeds = tuple(seed for seed in wanted if seed in training_seeds)
+        holdout_seeds = tuple(seed for seed in wanted if seed in holdout_seeds)
     return training_seeds, holdout_seeds
+
+
+def _shadow_urls(args: argparse.Namespace, backend: str, clients: int) -> tuple[str, ...]:
+    """Return one simulator URL per real client, or none without --shadow-sims."""
+    if not args.shadow_sims:
+        return ()
+    urls = tuple(part.strip() for part in str(args.shadow_sims).split(",") if part.strip())
+    if backend != "game":
+        raise ValueError("--shadow-sims follows real clients: it needs --backend game")
+    if not args.search_combat:
+        raise ValueError("--shadow-sims is only read by the search: add --search-combat")
+    if len(urls) != clients:
+        raise ValueError(f"--shadow-sims needs one simulator per client: {len(urls)} for {clients}")
+    if len(set(urls)) != len(urls):
+        raise ValueError("--shadow-sims repeats a simulator: two runs cannot share one")
+    return urls
 
 
 def _client_base_urls(args: argparse.Namespace, plan: object) -> tuple[str, ...]:

@@ -20,7 +20,7 @@ from __future__ import annotations
 import gzip
 import json
 import threading
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 from typing import Protocol
 
@@ -121,12 +121,19 @@ class SearchCombatAgent(Agent):
         run_label: str = "lane",
         record_fights: bool = True,
         room_simulations: Mapping[str, int] | None = None,
+        gate: Callable[[Mapping[str, object]], bool] | None = None,
     ) -> None:
         self.inner = lane
         # The trainer reads ``agent.lane`` as the lane's number (as on a LaneView),
         # to key its failure handling and its metrics: it must be that int.
         self.lane = getattr(lane, "lane", 0)
+        # ``env`` is the simulator searched on.  It is the lane's own environment,
+        # except beside a real client, where it is the ``ShadowEnv``'s copy and
+        # ``gate`` says, decision by decision, whether that copy can be trusted
+        # (``search/shadow.py``).  A fight decision the gate refuses goes to PPO.
         self.sim = SimulatorSearchEnv(env)
+        self.gate = gate
+        self.unsearchable = 0
         self.search = search
         self.rooms = rooms
         self.recorder = recorder
@@ -176,7 +183,18 @@ class SearchCombatAgent(Agent):
             self._room = state_type
         elif is_fight_over(raw):
             self._in_fight = False
+        if self._in_fight and self.gate is not None and not self.gate(raw):
+            # The searched copy does not show this fight: the actor plays it.
+            self.unsearchable += 1
+            self._node = self._node_before = None
+            if exclude:
+                return self.inner.choose_action(state, exclude=exclude)
+            return self.inner.choose_action(state)
         if not self._in_fight:
+            if self.gate is not None:
+                # Out of a fight the answer is not needed, but asking counts the
+                # decision, which is what gives a copy up after a run of disagreements.
+                self.gate(raw)
             self._node = self._node_before = None
             if exclude:
                 return self.inner.choose_action(state, exclude=exclude)
