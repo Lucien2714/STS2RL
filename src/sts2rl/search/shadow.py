@@ -104,8 +104,16 @@ def _powers(powers: Any) -> list[tuple[Any, Any]]:
 
 
 def _choice(item: Mapping[str, Any]) -> tuple[Any, ...]:
-    identity = item.get("id") or item.get("card_id") or item.get("text_key") or item.get("type")
-    return (identity, item.get("col"), item.get("row"))
+    # A shop names each item kind by its own key; card removal names none but its category.
+    identity = next(
+        (
+            item[key]
+            for key in ("id", "card_id", "relic_id", "potion_id", "text_key", "category", "type")
+            if item.get(key)
+        ),
+        None,
+    )
+    return (identity, item.get("col"), item.get("row"), item.get("price"), item.get("is_stocked"))
 
 
 @dataclass

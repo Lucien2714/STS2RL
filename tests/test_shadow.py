@@ -180,6 +180,18 @@ def test_a_failed_reset_opens_no_record():
     assert [record["agreed"] for record in shadow.finish()] == [1]
 
 
+def test_shop_items_are_told_apart_by_kind_price_and_stock():
+    def shop(*items):
+        return {"state_type": "shop", "shop": {"items": list(items)}}
+
+    relic = {"category": "relic", "relic_id": "VAJRA", "price": 150, "is_stocked": True}
+    removal = {"category": "card_removal", "price": 75, "is_stocked": True}
+    assert fingerprint(shop(relic, removal)) == fingerprint(shop(dict(relic), dict(removal)))
+    assert fingerprint(shop(relic)) != fingerprint(shop({**relic, "relic_id": "ANCHOR"}))
+    assert fingerprint(shop(removal)) != fingerprint(shop({**removal, "price": 100}))
+    assert fingerprint(shop(removal)) != fingerprint(shop({**removal, "is_stocked": False}))
+
+
 def test_display_text_does_not_count_as_a_disagreement():
     worded = combat()
     worded["battle"]["enemies"][0]["intents"] = [{"type": "Attack", "label": "11", "description": "Deal 11."}]
