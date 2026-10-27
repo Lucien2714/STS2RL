@@ -463,3 +463,10 @@
 - 遇到的问题：上一条数错了。
 - 下一步：无。
 - 需要 Lucien 决定的事：无。
+
+### 2026-10-27 00:17 (PT) · feat/shadow-search
+- 做了什么：影子模拟器原型（ae0d968 + 本次修复）。`search/shadow.py` 的 `ShadowEnv` 让一个模拟器跟着真实客户端走：同 seed、角色、进阶开局，真实游戏接受的每个动作也在模拟器上执行；每个决策比较两边的可见状态（`fingerprint`），一致才在模拟器上做 MCTS，连续 3 次不一致就放弃模拟器、由 actor 打完这一局；模拟器出错只影响搜索，不影响这一局。`sts2rl-eval` 新增 `--shadow-sims`（每个 --ports 客户端一个模拟器，需 --backend game 和 --search-combat）和 `--only-seeds`（只打指定 seed）。实机跑了一局：sts2_1（10 月 6 日的 mod）+ 模拟器 15620，runs/step2w-plain10 `update_000940`，seed `3EH64E978B`，普通和精英战 50 次模拟、boss 战 200 次。结果在 runs/demo/shadow-3EH64E978B-u940.{log,json}。另外做了一份约 9 分钟的阶段报告幻灯片（12 页，claude.ai artifact）。
+- 结果/数据：回放两局人类录像，模拟器和真实游戏一直一致到第 11 层（47 个战斗动作）和第 27 层（233 个）；第一处不一致是一张牌的升级等级（第 11 层）和营火取消选牌后的界面流程（第 27 层）。实机这一局：132 个决策全部一致，0 次不一致，没有放弃模拟器，所有战斗由 MCTS 打（模拟器 5805 次 restore，0 个 fault）；第 16 层营火时 HP 87；死在第 17 层（第 1 幕 boss Lagavulin Matriarch），奖励 +14.72，128 步，没有截断和错误。只有 1 局，不能说明胜率；这个 seed 在模拟器上有 MCTS 时前 16 局有 10 局停在第 17 层。测试 1003 个通过（新增 14 个），ruff 通过。
+- 遇到的问题：第一次启动游戏时 Steam 还没起来，游戏弹出 Steam 初始化错误后退出，Steam 起来后重新启动正常。实机结果里多出一条空的 episode 记录：第一次 reset 失败被 Evaluator 重试时，`ShadowEnv` 把失败的那次也算成了一局；已改为 reset 成功后才开新记录，并加了测试。
+- 下一步：影子同步多跑几局（多个 seed、多个客户端），统计同步能保持多久，并和模拟器上同 seed 的楼层对比；之后再决定蒸馏战斗 actor 还是先稳住宏观策略。
+- 需要 Lucien 决定的事：feat/shadow-search 是否合并到 feat/mcts-combat；sts2_1 保留新 mod 还是恢复备份；宏观漂移的处理方向（见 docs/mcts/step2z-plain-resume.md 的 A/B/C/D）。

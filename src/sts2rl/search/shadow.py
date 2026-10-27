@@ -168,14 +168,16 @@ class ShadowEnv:
 
     def reset(self, spec: ResetSpec | None = None) -> RawState:
         spec = spec or ResetSpec()
+        self.alive = False
+        self._sim_state = None
+        state = self.real.reset(spec)
+        # Only a reset that started a run opens a record: a failed one is retried
+        # by the caller and is not an episode.
         if self._started:
             self.episodes.append(self.stats.to_dict())
         self._started = True
         self.stats = ShadowStats()
         self._streak = 0
-        self._sim_state = None
-        self.alive = False
-        state = self.real.reset(spec)
         if self.real.reused_active_run:
             self._lose("the real client joined a run in progress")
         elif spec.modifiers:

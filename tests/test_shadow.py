@@ -169,6 +169,17 @@ def test_each_episode_keeps_its_own_record():
     assert [record["agreed"] for record in records] == [1, 0]
 
 
+def test_a_failed_reset_opens_no_record():
+    shadow, real, sim = pair({}, {})
+    real.reset = lambda spec=None: (_ for _ in ()).throw(STS2ClientError("menu raced"))
+    with pytest.raises(STS2ClientError):
+        shadow.reset(SEEDED)
+    del real.reset
+    shadow.reset(SEEDED)
+    shadow.agrees(real.state)
+    assert [record["agreed"] for record in shadow.finish()] == [1]
+
+
 def test_display_text_does_not_count_as_a_disagreement():
     worded = combat()
     worded["battle"]["enemies"][0]["intents"] = [{"type": "Attack", "label": "11", "description": "Deal 11."}]
